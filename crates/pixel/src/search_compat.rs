@@ -210,6 +210,107 @@ pub fn rewrite(command: &str, cwd: &Path) -> Option<String> {
     rewrite_with(command, cwd, native_configuration)
 }
 
+/// Rewrite the bounded discovery commands supported by Devin's exec hook.
+pub fn rewrite_retrieval(command: &str, cwd: &Path) -> Option<String> {
+    rewrite_retrieval_with(command, cwd, native_configuration)
+}
+
+fn rewrite_retrieval_with(
+    command: &str,
+    cwd: &Path,
+    native_configuration: impl Fn(SearchTool) -> bool,
+) -> Option<String> {
+    let mut argv = shell_argv(command)?;
+    let wrapped_with_rtk = argv.first().is_some_and(|program| program == "rtk");
+    if wrapped_with_rtk {
+        if !matches!(
+            argv.get(1).map(String::as_str),
+            Some("grep" | "rg" | "cat" | "ls" | "find")
+        ) {
+            return None;
+        }
+        argv.remove(0);
+    }
+    let normalized_command = wrapped_with_rtk.then(|| {
+        argv.iter()
+            .map(|argument| shell_quote(argument))
+            .collect::<Vec<_>>()
+            .join(" ")
+    });
+    let command = normalized_command.as_deref().unwrap_or(command);
+    match argv.first()?.as_str() {
+        "cat" => rewrite_cat(&argv[1..], cwd),
+        "ls" => {
+            let path = match argv.get(1..) {
+                Some([]) => ".",
+                Some([path]) if !path.starts_with('-') => path,
+                Some([_flag]) if matches!(argv[1].as_str(), "-a" | "-l" | "-la" | "-al") => ".",
+                Some([_flag, path])
+                    if matches!(argv[1].as_str(), "-a" | "-l" | "-la" | "-al")
+                        && !path.starts_with('-') =>
+                {
+                    path
+                }
+                _ => return None,
+            };
+            rewrite_listing(path, cwd, None)
+        }
+        "find" => rewrite_find(&argv[1..], cwd),
+        _ => rewrite_with(command, cwd, native_configuration),
+    }
+}
+
+/// Route a small, literal `cat <file>` read through the indexed line reader.
+/// Larger or non-text files remain native; the Devin policy can then block
+/// unsupported retrieval with a Pixel-specific explanation.
+fn rewrite_cat(args: &[String], cwd: &Path) -> Option<String> {
+    let [path] = args else {
+        return None;
+    };
+    let (_, absolute, _) = checked_path(path, cwd)?;
+    let source = std::fs::read_to_string(absolute).ok()?;
+    if source.lines().count() > 200 {
+        return None;
+    }
+    Some(format!(
+        "pixel search-content --limit 200 '.*' {}",
+        shell_quote(path)
+    ))
+}
+
+/// Map a repository path listing to the files the Pixel index can retrieve.
+fn rewrite_listing(path: &str, cwd: &Path, glob: Option<&str>) -> Option<String> {
+    let directory = checked_dir(path, cwd)?.1;
+    if dir_entries(SearchTool::Rg, &directory, DIR_EMULATION_MAX_FILES)
+        .ok()?
+        .iter()
+        .any(|entry| credential_path(entry))
+    {
+        return None;
+    }
+    let glob = glob.map(|pattern| format!(" --glob {}", shell_quote(pattern)));
+    Some(format!(
+        "pixel search-content --files-with-matches{} '.*' {}",
+        glob.unwrap_or_default(),
+        shell_quote(path)
+    ))
+}
+
+fn rewrite_find(args: &[String], cwd: &Path) -> Option<String> {
+    let (path, glob) = match args {
+        [path] => (path.as_str(), None),
+        [path, kind, file_type] if kind == "-type" && file_type == "f" => (path.as_str(), None),
+        [path, name, glob] if name == "-name" => (path.as_str(), Some(glob.as_str())),
+        [path, kind, file_type, name, glob]
+            if kind == "-type" && file_type == "f" && name == "-name" =>
+        {
+            (path.as_str(), Some(glob.as_str()))
+        }
+        _ => return None,
+    };
+    rewrite_listing(path, cwd, glob)
+}
+
 /// `rewrite` with the tool-configuration probe as a parameter, so a test
 /// states the environment it assumes instead of inheriting the developer's
 /// (an exported `RIPGREP_CONFIG_PATH` turned every `rg` case native).
@@ -721,7 +822,7 @@ mod tests {
     /// `GREP_OPTIONS` sees it, whatever the developer running the suite
     /// exports.
     fn rewrite_unconfigured(command: &str, cwd: &Path) -> Option<String> {
-        rewrite_with(command, cwd, |_| false)
+        rewrite_retrieval_with(command, cwd, |_| false)
     }
 
     struct Repo(PathBuf);
@@ -828,6 +929,67 @@ mod tests {
     }
 
     #[test]
+    fn retrieval_commands_should_route_bounded_reads_and_file_lists_through_pixel() {
+        let repo = Repo::new();
+        assert_eq!(
+            rewrite_unconfigured("cat src/a.rs", &repo.0).as_deref(),
+            Some("pixel search-content --limit 200 '.*' 'src/a.rs'")
+        );
+        assert_eq!(
+            rewrite_unconfigured("ls src", &repo.0).as_deref(),
+            Some("pixel search-content --files-with-matches '.*' 'src'")
+        );
+        assert_eq!(
+            rewrite_unconfigured("ls -la src", &repo.0).as_deref(),
+            Some("pixel search-content --files-with-matches '.*' 'src'")
+        );
+        assert_eq!(
+            rewrite_unconfigured("find src -type f -name '*.rs'", &repo.0).as_deref(),
+            Some("pixel search-content --files-with-matches --glob '*.rs' '.*' 'src'")
+        );
+        assert_eq!(
+            rewrite_unconfigured("grep -r needle src", &repo.0).as_deref(),
+            Some("pixel search-like-rg grep -- '-r' 'needle' 'src'")
+        );
+        assert_eq!(
+            rewrite_unconfigured("rtk grep -r needle src", &repo.0).as_deref(),
+            Some("pixel search-like-rg grep -- '-r' 'needle' 'src'")
+        );
+        assert_eq!(
+            rewrite_unconfigured("rtk cat src/a.rs", &repo.0).as_deref(),
+            Some("pixel search-content --limit 200 '.*' 'src/a.rs'")
+        );
+        assert_eq!(
+            rewrite_unconfigured("rtk ls src", &repo.0).as_deref(),
+            Some("pixel search-content --files-with-matches '.*' 'src'")
+        );
+        assert_eq!(
+            rewrite_unconfigured("rtk find src -type f -name '*.rs'", &repo.0).as_deref(),
+            Some("pixel search-content --files-with-matches --glob '*.rs' '.*' 'src'")
+        );
+        assert_eq!(rewrite_unconfigured("rtk git status", &repo.0), None);
+    }
+
+    #[test]
+    fn retrieval_rewrites_should_decline_unbounded_or_ambiguous_inputs() {
+        let repo = Repo::new();
+        let long_file = repo.0.join("src/long.rs");
+        std::fs::write(&long_file, "line\n".repeat(201)).unwrap();
+        for command in [
+            "cat src/a.rs src/sub/b.rs",
+            "cat -n src/a.rs",
+            "cat src/long.rs",
+            "ls -la src extra",
+            "find src -exec cat {} \\;",
+        ] {
+            assert!(
+                rewrite_unconfigured(command, &repo.0).is_none(),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
     fn rewrite_keeps_unsupported_or_out_of_scope_searches_native() {
         let repo = Repo::new();
         for command in [
@@ -915,5 +1077,91 @@ mod tests {
         );
         // rg skips hidden directories natively, so its walk is unaffected.
         assert!(dir_entries(SearchTool::Rg, &repo.0, DIR_EMULATION_MAX_FILES).is_ok());
+    }
+
+    /// `ls` rewrites only the shapes it understands: bare, one operand that
+    /// is not a flag, and the common flag forms optionally followed by a
+    /// path. Everything else stays native.
+    #[test]
+    fn rewrite_ls_accepts_only_the_bounded_forms() {
+        let repo = Repo::new();
+        for command in [
+            "ls",
+            "ls src",
+            "ls -a",
+            "ls -l",
+            "ls -la",
+            "ls -al",
+            "ls -a src",
+            "ls -l src",
+        ] {
+            let rewritten = rewrite_unconfigured(command, &repo.0);
+            assert!(
+                rewritten.is_some_and(|r| r.starts_with("pixel search-content")),
+                "{command}"
+            );
+        }
+        // A flag outside the accepted set is not a path nor a listing.
+        for command in [
+            "ls -h",
+            "ls -x src",
+            "ls -a -h",
+            "ls src sub",
+            "ls src -a sub",
+        ] {
+            assert_eq!(rewrite_unconfigured(command, &repo.0), None, "{command}");
+        }
+    }
+
+    /// `find` maps to a listing only for the literal forms: a path alone,
+    /// `-type f`, `-name <glob>`, or both in that order.
+    #[test]
+    fn rewrite_find_accepts_only_the_literal_forms() {
+        let repo = Repo::new();
+        for command in [
+            "find src",
+            "find src -type f",
+            "find src -name '*.rs'",
+            "find src -type f -name '*.rs'",
+        ] {
+            let rewritten = rewrite_unconfigured(command, &repo.0);
+            assert!(
+                rewritten.is_some_and(|r| r.starts_with("pixel search-content")),
+                "{command}"
+            );
+        }
+        for command in [
+            "find",
+            "find src -type d",
+            "find src -type",
+            "find src -x f",
+            "find src -notype f",
+            "find src -name",
+            "find src -nom '*.rs'",
+            "find src -type d -name '*.rs'",
+            "find src -type f -nom '*.rs'",
+            "find src -x f -name '*.rs'",
+            "find src -name '*.rs' -type f",
+            "find src -name '*.rs' -type x",
+            "find src -type f -name '*.rs' extra",
+        ] {
+            assert_eq!(rewrite_unconfigured(command, &repo.0), None, "{command}");
+        }
+    }
+
+    /// `cat` hands the read to the indexed reader only below the line cap:
+    /// exactly 200 lines still fits, 201 is a page the agent should page.
+    #[test]
+    fn rewrite_cat_stays_within_the_line_budget() {
+        let repo = Repo::new();
+        let fits = repo.0.join("fits.rs");
+        let page = repo.0.join("page.rs");
+        std::fs::write(&fits, "l\n".repeat(200)).unwrap();
+        std::fs::write(&page, "l\n".repeat(201)).unwrap();
+        assert_eq!(
+            rewrite_unconfigured("cat fits.rs", &repo.0).as_deref(),
+            Some("pixel search-content --limit 200 '.*' 'fits.rs'")
+        );
+        assert_eq!(rewrite_unconfigured("cat page.rs", &repo.0), None);
     }
 }

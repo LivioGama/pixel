@@ -210,6 +210,18 @@ mod tests {
         assert!(source.contains(config::MANAGED_BEGIN), "{source}");
         assert!(source.contains(config::MANAGED_END), "{source}");
         assert!(source.contains("pi.registerTool({"), "{source}");
+        assert!(
+            source.contains("name: \"pixel_project\", label: \"Pixel (project)\""),
+            "project extension must not collide with the global Pixel tool"
+        );
+        assert!(
+            !source.contains("const pixelToolAlreadyRegistered = pi.getAllTools()"),
+            "getAllTools is unavailable during extension loading"
+        );
+        assert!(
+            source.contains("pi.on(\"session_start\", activatePixelTool)"),
+            "an existing Pixel tool must be available after session restore"
+        );
         assert!(source.contains("pi.on(\"tool_call\""), "{source}");
         assert!(source.contains("return { block: true"), "{source}");
         assert!(

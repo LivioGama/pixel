@@ -1,6 +1,8 @@
 //! `pixel run-hook guard` — provider-aware, exact-subset search routing.
-//! Explicit providers preserve unsupported calls silently. Without a
-//! provider, legacy non-blocking task-scoping guidance remains available.
+//! Explicit providers preserve unsupported calls silently. The policy is
+//! advisory by default; `pixel config policy enforce` (or PIXEL_POLICY=enforce)
+//! opts into known retrieval denials, `off` disables Pixel policy. Without a
+//! provider, legacy task-scoping guidance remains.
 //!
 //! Legacy advisory contract (without `--provider`):
 //! 1. SCOPING (ADVISORY) — while `<repo>/.pixel/targets.json` is active
@@ -34,13 +36,17 @@
 //!
 //! Rewrites preserve native search bytes and status within a narrow
 //! literal-file subset; they do not substitute enriched Pixel output.
-//! Uncovered execution shapes fall back to the original native command.
+//! Uncovered execution shapes retain their original command and native permissions.
 //!
-//! The hook never blocks ordinary work: advisories exit 0 with a JSON note
+//! Claude and Devin preserve their native permission flow. Codex and Antigravity
+//! enforce recognized repository discovery only under the enforce policy.
+//! Bounded direct reads (<=200 lines), external paths, shell filters, execution
+//! and unknown syntax stay native. Enforcement requires an indexed repository
+//! at or above the effective tool workdir; unindexed trees are never denied.
+//! Claude advisories exit 0 with a JSON note
 //! (systemMessage + additionalContext), no permissionDecision, and transparent
-//! read-only rewrites use `updatedInput`. Claude/Devin retain their normal
-//! permission flow. Codex requires an explicit `allow` for the user-approved
-//! literal-file rewrite subset only; credential-shaped paths are excluded.
+//! read-only rewrites use `updatedInput`. Codex requires an explicit `allow`
+//! for the user-approved literal-file rewrite subset only.
 //! Fails open (exit 0) on any parse error or unexpected shape — a guard
 //! that crashes or wedges the session is worse than a guard that misses a
 //! case.
@@ -53,6 +59,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 
 use pixel_daemon::api::GRAPH_DB_FILE;
+
+use crate::config_cmd::PolicyMode;
 
 const COMPOSED_MAX_INPUT: usize = 1024 * 1024;
 const COMPOSED_MAX_OUTPUT: usize = 1024 * 1024;
@@ -72,21 +80,25 @@ fn deployed_agent_prompt() -> Option<String> {
     (!content.trim().is_empty()).then_some(content)
 }
 
-/// Claude's SessionStart contract: the doctrine reaches EVERY Claude process
+/// SessionStart contract: the doctrine reaches EVERY Claude process
 /// — including `claude` launched directly by cmux, agents and cron, which
 /// never saw the retired shell wrapper — because the hook injects the
 /// deployed agent prompt itself as `hookSpecificOutput.additionalContext`.
-/// The structured `pixel` capability block stays top-level for consumers
-/// that parse it. The context text carries it only when no prompt is
+/// Except on Codex, the structured `pixel` capability block stays top-level
+/// for consumers that parse it. The context text carries it only when no prompt is
 /// deployed: next to the prompt, its ~2 KB list of every command (internal
 /// ones included) cost ~860 tokens per session and no recorded agent run
 /// used a command only it named, so the prompt gets one line of index
 /// freshness instead.
-pub fn session_start_output(pixel_block: &Value) -> Value {
-    session_start_envelope(pixel_block, deployed_agent_prompt().as_deref())
+pub fn session_start_output(pixel_block: &Value, provider: Option<Provider>) -> Value {
+    session_start_envelope(pixel_block, deployed_agent_prompt().as_deref(), provider)
 }
 
-fn session_start_envelope(pixel_block: &Value, agent_prompt: Option<&str>) -> Value {
+fn session_start_envelope(
+    pixel_block: &Value,
+    agent_prompt: Option<&str>,
+    provider: Option<Provider>,
+) -> Value {
     let context = match agent_prompt {
         Some(prompt) => {
             let mut context = prompt.trim_end().to_string();
@@ -98,7 +110,13 @@ fn session_start_envelope(pixel_block: &Value, agent_prompt: Option<&str>) -> Va
         }
         None => serde_json::to_string_pretty(pixel_block).unwrap_or_default(),
     };
-    let mut output = pixel_block.clone();
+    // Codex rejects unknown root fields, including the structured pixel block.
+    // Other providers retain that block for existing consumers.
+    let mut output = if provider == Some(Provider::Codex) {
+        serde_json::json!({})
+    } else {
+        pixel_block.clone()
+    };
     output["hookSpecificOutput"] = serde_json::json!({
         "hookEventName": "SessionStart",
         "additionalContext": context,
@@ -148,6 +166,9 @@ pub enum Provider {
     Claude,
     Codex,
     Devin,
+    Zcode,
+    /// Uses toolCall input and decision/reason output; no input rewrites.
+    Antigravity,
 }
 
 const MANIFEST_MAX_AGE_SECS: u64 = 24 * 3600;
@@ -371,7 +392,7 @@ fn rewrite_json(provider: Provider, updated_input: Value) -> Value {
         "hookEventName": "PreToolUse",
         "updatedInput": updated_input,
     });
-    if provider == Provider::Codex {
+    if matches!(provider, Provider::Codex | Provider::Zcode) {
         output["permissionDecision"] = Value::String("allow".into());
         output["permissionDecisionReason"] =
             Value::String("Pixel compatibility routing: single-file literal read only.".into());
@@ -392,8 +413,14 @@ fn provider_rewrite(provider: Provider, payload: &Value) -> Option<Value> {
     let tool = payload.get("tool_name")?.as_str()?;
     let shell = match provider {
         Provider::Claude => tool == "Bash",
-        Provider::Codex => matches!(tool, "Bash" | "shell" | "unified_exec" | "local_shell"),
+        Provider::Codex => matches!(
+            tool,
+            "Bash" | "shell" | "unified_exec" | "local_shell" | "exec_command"
+        ),
         Provider::Devin => tool == "exec" || tool == "Bash",
+        Provider::Zcode => tool == "Bash" || tool == "exec",
+        // Antigravity has no documented input rewrite contract.
+        Provider::Antigravity => return None,
     };
     if !shell {
         return None;
@@ -405,7 +432,12 @@ fn provider_rewrite(provider: Provider, payload: &Value) -> Option<Value> {
     if input.contains_key("env") || input.contains_key("environment") {
         return None;
     }
-    let original_command = input.get("command")?;
+    let command_key = if input.contains_key("command") {
+        "command"
+    } else {
+        "cmd"
+    };
+    let original_command = input.get(command_key)?;
     let command = command_text(original_command);
     if command.is_empty() {
         return None;
@@ -420,27 +452,842 @@ fn provider_rewrite(provider: Provider, payload: &Value) -> Option<Value> {
         .and_then(Value::as_str)
         .map(|p| base.join(p))
         .unwrap_or(base);
-    let rewritten = crate::search_compat::rewrite(&command, &cwd)?;
+    let rewritten = if matches!(provider, Provider::Devin | Provider::Zcode) {
+        crate::search_compat::rewrite_retrieval(&command, &cwd)?
+    } else {
+        crate::search_compat::rewrite(&command, &cwd)?
+    };
     let rewritten_command = rewritten_command_value(original_command, rewritten)?;
     let mut updated = Value::Object(input.clone());
-    updated["command"] = rewritten_command;
+    updated[command_key] = rewritten_command;
     Some(rewrite_json(provider, updated))
+}
+
+/// Which repository's configuration layers decide the policy: the call's
+/// working directory, resolved the way every `pixel config` lookup resolves it.
+fn policy_root(payload: &Value) -> Option<PathBuf> {
+    let cwd = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())?;
+    crate::discover_root(&cwd).ok()
+}
+
+/// Pixel policy is advisory by default; `pixel config policy enforce` (or
+/// `PIXEL_POLICY=enforce`) opts into denials, `off` disables the policy.
+fn policy_mode(payload: &Value) -> crate::config_cmd::PolicyMode {
+    crate::config_cmd::policy(policy_root(payload).as_deref())
+}
+
+/// Normalize Antigravity's documented toolCall payload at the provider boundary.
+fn provider_payload(provider: Provider, mut payload: Value) -> Value {
+    if provider == Provider::Antigravity
+        && let Some(call) = payload.get("toolCall")
+    {
+        let tool = call.get("name").cloned().unwrap_or(Value::Null);
+        let input = call.get("args").cloned().unwrap_or(Value::Null);
+        let cwd = input
+            .get("Cwd")
+            .or_else(|| payload.get("workspacePaths")?.as_array()?.first())
+            .cloned()
+            .unwrap_or(Value::Null);
+        payload["tool_name"] = tool;
+        payload["tool_input"] = input;
+        payload["cwd"] = cwd;
+    }
+    payload
+}
+
+fn provider_cwd(payload: &Value, input: &Value) -> Option<PathBuf> {
+    let base = payload
+        .get("cwd")
+        .and_then(Value::as_str)
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())?;
+    Some(
+        input
+            .get("workdir")
+            .or_else(|| input.get("cwd"))
+            .or_else(|| input.get("Cwd"))
+            .and_then(Value::as_str)
+            .map_or_else(|| base.clone(), |path| base.join(path)),
+    )
+}
+
+/// Recognized retrieval gets guidance, or an opt-in denial on Codex/Antigravity.
+/// Unsupported capabilities remain the host's responsibility.
+fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
+    // Claude keeps its native permission flow (and its RTK delegate). Devin
+    // has a documented PreToolUse block contract, so its retrieval calls are
+    // subject to policy like Codex and Antigravity.
+    if provider == Provider::Claude {
+        return None;
+    }
+    let event = payload
+        .get("hook_event_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if !is_guard_event(payload, event) || event == "PostToolUse" {
+        return None;
+    }
+    let tool = payload.get("tool_name")?.as_str()?;
+    let input = payload.get("tool_input")?;
+    let cwd = provider_cwd(payload, input)?;
+    let root = crate::discover_root(&cwd).ok()?;
+    // A bare `.pixel` directory is not an index: the action logger creates it
+    // before the guard runs. Only a shard proves the repo is indexed, so only
+    // then may policy deny a call.
+    if !root
+        .join(pixel_index::index::SHARD_DIR)
+        .join(pixel_index::index::SHARD_FILE)
+        .is_file()
+    {
+        return None;
+    }
+    if matches!(
+        tool,
+        "Bash" | "shell" | "unified_exec" | "local_shell" | "exec_command" | "run_command" | "exec"
+    ) {
+        if input.get("env").is_some() || input.get("environment").is_some() {
+            return None;
+        }
+        let command = command_text(
+            input
+                .get("command")
+                .or_else(|| input.get("cmd"))
+                .or_else(|| input.get("CommandLine"))?,
+        );
+        return enforce_shell_for_provider(&command, &cwd, &root, provider == Provider::Devin);
+    }
+    let path = input
+        .get("path")
+        .or_else(|| input.get("file_path"))
+        .or_else(|| input.get("AbsolutePath"))
+        .or_else(|| input.get("SearchPath"))
+        .or_else(|| input.get("SearchDirectory"))
+        .or_else(|| input.get("DirectoryPath"))
+        .or_else(|| input.get("abs_path"))
+        .and_then(Value::as_str);
+    if path.is_some_and(|path| !arg_reads_repo(&root, &cwd, path)) {
+        return None;
+    }
+    match tool {
+        "grep_search" | "find_by_name" | "find_file_by_name" | "list_dir" | "file_search"
+        | "glob" | "ls" | "grep" => {
+            Some("repository discovery: use pixel search-content, find-code, or list-areas".into())
+        }
+        "read" if provider == Provider::Devin && path.is_some() => Some(
+            "repository read: use exec with pixel search-content or pixel pack-context <uid>"
+                .into(),
+        ),
+        "read" | "view_file" | "notebook_read" if path.is_some() && !bounded_read(input) => {
+            Some("repository read: use pixel search-content or pixel pack-context <uid>".into())
+        }
+        _ => None,
+    }
+}
+
+/// A read is bounded when the caller states a line window of at most 200
+/// (Codex `limit`, Antigravity `StartLine`/`EndLine`).
+fn bounded_read(input: &Value) -> bool {
+    if let Some(limit) = input.get("limit").and_then(Value::as_u64) {
+        return (1..=200).contains(&limit);
+    }
+    match (
+        input
+            .get("StartLine")
+            .or_else(|| input.get("start_line"))
+            .and_then(Value::as_u64),
+        input
+            .get("EndLine")
+            .or_else(|| input.get("end_line"))
+            .and_then(Value::as_u64),
+    ) {
+        (Some(start), Some(end)) => start > 0 && end >= start && end - start < 200,
+        _ => false,
+    }
+}
+
+/// Split only unquoted pipeline/sequence operators, retaining stdin provenance.
+/// The existing strict argv parser validates every leaf before any decision.
+fn split_segments(text: &str) -> Option<Vec<(&str, bool)>> {
+    let mut segments = Vec::new();
+    let mut quote = None;
+    let mut start = 0;
+    let mut piped = false;
+    let mut chars = text.char_indices().peekable();
+    while let Some((index, c)) = chars.next() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            Some(_) => {}
+            None if matches!(c, '\'' | '"') => quote = Some(c),
+            None if matches!(c, '|' | ';' | '&' | '\n') => {
+                let segment = text[start..index].trim();
+                if segment.is_empty() {
+                    return None;
+                }
+                segments.push((segment, piped));
+                let doubled =
+                    matches!(c, '|' | '&') && chars.peek().is_some_and(|(_, next)| *next == c);
+                let end = if doubled { chars.next()?.0 } else { index };
+                piped = c == '|' && !doubled;
+                start = end + c.len_utf8();
+            }
+            None => {}
+        }
+    }
+    if quote.is_some() || text[start..].trim().is_empty() {
+        return None;
+    }
+    segments.push((text[start..].trim(), piped));
+    Some(segments)
+}
+
+/// Only existing, canonical in-repository paths are known retrieval targets.
+/// Missing files, home expansion and other uncertain paths retain native handling.
+fn arg_reads_repo(root: &Path, cwd: &Path, word: &str) -> bool {
+    if word.is_empty() || word == "-" {
+        return false;
+    }
+    cwd.join(word)
+        .canonicalize()
+        .is_ok_and(|target| target.starts_with(canonical(root)))
+}
+
+/// Judge recognized leaves without rewriting or executing any part of a shell.
+/// A syntax outside the bounded parser (including redirection/substitution)
+/// leaves the complete original command under native host permissions.
+fn enforce_shell_for_provider(
+    command: &str,
+    cwd: &Path,
+    root: &Path,
+    enforce_retrieval: bool,
+) -> Option<String> {
+    let segments = split_segments(command)?;
+    let words = segments
+        .iter()
+        .map(|(segment, _)| crate::search_compat::shell_argv(segment))
+        .collect::<Option<Vec<_>>>()?;
+    // A preceding directory change alters relative operands. Leave this
+    // compound invocation native rather than guessing its runtime directory.
+    if words.iter().any(|words| {
+        words
+            .first()
+            .is_some_and(|bin| matches!(bin.as_str(), "cd" | "command" | "builtin"))
+    }) {
+        return None;
+    }
+    segments
+        .iter()
+        .zip(&words)
+        .find_map(|((segment, piped), words)| {
+            enforce_leaf(segment, words, *piped, cwd, root, enforce_retrieval)
+        })
+}
+
+fn enforce_leaf(
+    segment: &str,
+    words: &[String],
+    piped: bool,
+    cwd: &Path,
+    root: &Path,
+    enforce_retrieval: bool,
+) -> Option<String> {
+    let (bin, args) = words.split_first()?;
+    match bin.as_str() {
+        "rg" | "grep" => {
+            // Compatibility parsing rejects unknown flags and multi-path
+            // searches. Within that subset, two operands mean pattern+path.
+            let explicit_path = args.iter().filter(|arg| !arg.starts_with('-')).count() == 2;
+            if piped && !explicit_path {
+                return None;
+            }
+            crate::search_compat::rewrite(segment, cwd)
+                .map(|rewrite| format!("repository search: use {rewrite}"))
+                .or_else(|| {
+                    if !enforce_retrieval {
+                        return None;
+                    }
+                    let path = args
+                        .iter()
+                        .rfind(|arg| !arg.starts_with('-'))
+                        .map_or(".", String::as_str);
+                    arg_reads_repo(root, cwd, path)
+                        .then(|| "repository search: use pixel search-content".into())
+                })
+        }
+        "git" => {
+            // Global options and their values precede the subcommand
+            // (`git -C . log`, `git --no-pager show`). Skip them so the
+            // subcommand check cannot be dodged by prefixing an option.
+            let mut rest = args.iter();
+            let mut sub = None;
+            while let Some(word) = rest.next() {
+                if matches!(
+                    word.as_str(),
+                    "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace"
+                ) {
+                    let _ = rest.next();
+                    continue;
+                }
+                if word.starts_with('-') {
+                    continue;
+                }
+                sub = Some(word);
+                break;
+            }
+            if rest.len() != 0 {
+                return None;
+            }
+            let alternative = match sub.map(String::as_str) {
+                Some("status") => "repo-state",
+                Some("diff") => "review-changes",
+                Some("log") => "commit-history",
+                _ => return None,
+            };
+            Some(format!("repository inspection: use pixel {alternative}"))
+        }
+        "cat" => args
+            .iter()
+            .filter(|arg| !arg.starts_with('-'))
+            .any(|path| arg_reads_repo(root, cwd, path))
+            .then_some(())
+            .filter(|_| enforce_retrieval || !args.iter().any(|arg| arg.starts_with('-')))
+            .map(|_| {
+                "repository read: use pixel search-content or pixel pack-context <uid>".into()
+            }),
+        // Every operand but the destination is a read of that path.
+        "cp" => {
+            let sources: Vec<&String> = args.iter().filter(|arg| !arg.starts_with('-')).collect();
+            match sources.split_last() {
+                Some((_, sources)) => sources
+                    .iter()
+                    .any(|path| arg_reads_repo(root, cwd, path))
+                    .then(|| {
+                        "repository read: use pixel search-content or pixel pack-context <uid>"
+                            .into()
+                    }),
+                _ => None,
+            }
+        }
+        "ls" | "tree" => {
+            if args.iter().any(|arg| {
+                arg.starts_with('-')
+                    && !matches!(
+                        arg.as_str(),
+                        "-a" | "-l" | "-la" | "-al" | "--all" | "--long"
+                    )
+            }) {
+                return None;
+            }
+            let path = args
+                .iter()
+                .rev()
+                .find(|arg| !arg.starts_with('-'))
+                .map_or(".", String::as_str);
+            arg_reads_repo(root, cwd, path)
+                .then(|| "repository discovery: use pixel list-areas or find-code".into())
+        }
+        "find" => {
+            if !enforce_retrieval && !matches!(args, [_, option, _] if option == "-name") {
+                return None;
+            }
+            let path = args.first()?;
+            arg_reads_repo(root, cwd, path)
+                .then(|| "repository discovery: use pixel find-code or list-areas".into())
+        }
+        // Execution, filters, bounded reads and unknown capabilities remain
+        // native. Having the ability to open a file is not repo discovery.
+        _ => None,
+    }
+}
+
+/// Codex and Antigravity have different documented denial envelopes.
+fn enforce_deny(provider: Provider, reason: &str) -> Value {
+    let reason = format!("pixel policy: {reason}");
+    match provider {
+        // Antigravity and Devin both take a top-level decision envelope.
+        Provider::Antigravity => serde_json::json!({"decision": "deny", "reason": reason}),
+        Provider::Devin => serde_json::json!({"decision": "block", "reason": reason}),
+        _ => serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }),
+    }
+}
+
+fn policy_response(
+    provider: Provider,
+    payload: &Value,
+    mode: crate::config_cmd::PolicyMode,
+) -> Option<Value> {
+    if mode == PolicyMode::Off {
+        return None;
+    }
+    if matches!(provider, Provider::Devin | Provider::Zcode)
+        && let Some(response) = retrieval_permission_response(provider, payload)
+    {
+        return Some(response);
+    }
+    if let Some(response) = provider_rewrite(provider, payload) {
+        return Some(response);
+    }
+    let reason = enforce_reason(provider, payload)?;
+    match mode {
+        PolicyMode::Enforce => Some(enforce_deny(provider, &reason)),
+        PolicyMode::Advisory if provider == Provider::Codex => Some(advisory_json(&format!(
+            "Pixel suggestion: {reason}. Original call proceeds."
+        ))),
+        // Antigravity does not document an additionalContext response. No
+        // response leaves its own permissions authoritative.
+        _ => None,
+    }
+}
+
+/// Approve only standalone Pixel retrieval commands in supported permission hooks.
+fn retrieval_permission_response(provider: Provider, payload: &Value) -> Option<Value> {
+    const RETRIEVAL_COMMANDS: &[&str] = &[
+        "search-content",
+        "search-like-rg",
+        "find-code",
+        "find-symbol",
+        "search-meaning",
+        "pack-context",
+        "impact",
+        "who-calls",
+        "evaluate",
+        "list-areas",
+        "list-flows",
+        "status",
+        "search-history",
+        "dig-history",
+        "file-history",
+        "who-wrote",
+        "commit-history",
+        "repo-state",
+        "review-changes",
+        "list-branches",
+    ];
+
+    if payload.get("hook_event_name")?.as_str()? != "PermissionRequest"
+        || !match provider {
+            Provider::Devin => payload.get("tool_name")?.as_str()? == "exec",
+            Provider::Zcode => matches!(payload.get("tool_name")?.as_str()?, "Bash" | "exec"),
+            _ => return None,
+        }
+    {
+        return None;
+    }
+    let command = payload.get("tool_input")?.get("command")?.as_str()?;
+    let mut has_pixel_retrieval = false;
+    for command in split_safe_command_chain(command)? {
+        if is_static_echo(command) || is_bounded_sed_read(command) {
+            continue;
+        }
+        let command = pixel_retrieval_command(command)?;
+        let argv = crate::search_compat::shell_argv(command)?;
+        let (program, subcommand) = match argv.as_slice() {
+            [wrapper, program, subcommand, ..]
+                if wrapper == "rtk" && matches!(program.as_str(), "pixel" | "pixel-dev") =>
+            {
+                (program.as_str(), subcommand.as_str())
+            }
+            [program, subcommand, ..] => (program.as_str(), subcommand.as_str()),
+            _ => return None,
+        };
+        let executable = std::path::Path::new(program).file_name()?.to_str()?;
+        if !matches!(executable, "pixel" | "pixel-dev") || !RETRIEVAL_COMMANDS.contains(&subcommand)
+        {
+            return None;
+        }
+        has_pixel_retrieval = true;
+    }
+    if !has_pixel_retrieval {
+        return None;
+    }
+    Some(match provider {
+        Provider::Devin => serde_json::json!({"decision":"approve"}),
+        Provider::Zcode => serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PermissionRequest",
+                "decision": {"behavior": "allow"}
+            }
+        }),
+        _ => return None,
+    })
+}
+
+/// Splits only sequential shell chains; conditional fallbacks stay unapproved.
+fn split_safe_command_chain(command: &str) -> Option<Vec<&str>> {
+    let mut parts =
+        Vec::with_capacity(command.matches(';').count() + command.matches("&&").count() + 1);
+    let mut quote = None;
+    let mut start = 0;
+    let mut chars = command.char_indices().peekable();
+    while let Some((index, character)) = chars.next() {
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '\\' | '\n' | '\r' => return None,
+            ';' => {
+                parts.push(command[start..index].trim());
+                start = index + 1;
+            }
+            '&' => {
+                let (next_index, next) = chars.next()?;
+                if next == '1' && command[..index].ends_with("2>") {
+                    continue;
+                }
+                if next != '&' {
+                    return None;
+                }
+                parts.push(command[start..index].trim());
+                start = next_index + 1;
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    parts.push(command[start..].trim());
+    parts.iter().all(|part| !part.is_empty()).then_some(parts)
+}
+
+/// Accepts only a literal echo separator, never shell expansion or redirection.
+fn is_static_echo(command: &str) -> bool {
+    if command.chars().any(|character| {
+        matches!(
+            character,
+            '$' | '`' | '\\' | '>' | '<' | '|' | '&' | ';' | '\n' | '\r'
+        )
+    }) {
+        return false;
+    }
+    crate::search_compat::shell_argv(command).is_some_and(|argv| {
+        argv.first().is_some_and(|program| {
+            std::path::Path::new(program)
+                .file_name()
+                .is_some_and(|name| name == "echo")
+        })
+    })
+}
+
+/// Accepts a bounded, read-only sed line-range print used to inspect a Pixel hit.
+fn is_bounded_sed_read(command: &str) -> bool {
+    if command.chars().any(|character| {
+        matches!(
+            character,
+            '$' | '`' | '\\' | '>' | '<' | '|' | '&' | ';' | '\n' | '\r'
+        )
+    }) {
+        return false;
+    }
+    let Some(mut argv) = crate::search_compat::shell_argv(command) else {
+        return false;
+    };
+    if argv.first().is_some_and(|program| program == "rtk") {
+        argv.remove(0);
+    }
+    let [program, flag, range, path] = argv.as_slice() else {
+        return false;
+    };
+    if std::path::Path::new(program).file_name() != Some(std::ffi::OsStr::new("sed"))
+        || flag != "-n"
+        || path.starts_with('-')
+    {
+        return false;
+    }
+    let Some((start, end)) = range
+        .strip_suffix('p')
+        .and_then(|range| range.split_once(','))
+    else {
+        return false;
+    };
+    let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) else {
+        return false;
+    };
+    start > 0 && end >= start && end - start < 200
+}
+
+/// Returns only standalone Pixel retrieval or a Pixel retrieval with bounded `head` output.
+fn pixel_retrieval_command(command: &str) -> Option<&str> {
+    let parts = split_unquoted(command, '|')?;
+    let (retrieval, preview) = match parts.as_slice() {
+        [retrieval] => return Some(retrieval),
+        [retrieval, preview] => (*retrieval, *preview),
+        _ => return None,
+    };
+    let retrieval = retrieval.trim_end();
+    let retrieval = retrieval
+        .strip_suffix("2>&1")
+        .map_or(retrieval, str::trim_end);
+    let preview = crate::search_compat::shell_argv(preview.trim())?;
+    let bounded_head = match preview.as_slice() {
+        [program] if program == "head" => true,
+        [program, count] if program == "head" => count
+            .strip_prefix('-')
+            .and_then(|n| n.parse::<usize>().ok())
+            .is_some_and(|n| (1..=200).contains(&n)),
+        [program, flag, count] if program == "head" && flag == "-n" => count
+            .parse::<usize>()
+            .ok()
+            .is_some_and(|n| (1..=200).contains(&n)),
+        _ => false,
+    };
+    bounded_head.then_some(retrieval)
+}
+
+/// Splits shell text at unquoted separators, refusing ambiguous escapes or quotes.
+fn split_unquoted(command: &str, separator: char) -> Option<Vec<&str>> {
+    let mut parts = Vec::with_capacity(command.matches(separator).count() + 1);
+    let mut quote = None;
+    let mut start = 0;
+    for (index, character) in command.char_indices() {
+        if let Some(delimiter) = quote {
+            if character == delimiter {
+                quote = None;
+            }
+            continue;
+        }
+        match character {
+            '\'' | '"' => quote = Some(character),
+            '\\' => return None,
+            c if c == separator => {
+                parts.push(&command[start..index]);
+                start = index + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    parts.push(&command[start..]);
+    Some(parts)
 }
 
 fn run_provider_guard(provider: Provider, delegate_rtk: bool, raw: &str) -> ! {
     let Ok(payload) = serde_json::from_str::<Value>(raw) else {
         std::process::exit(0);
     };
-    if let Some(response) = provider_rewrite(provider, &payload) {
+    if provider == Provider::Antigravity
+        && let Some(response) = antigravity_pre_invocation(&payload)
+    {
+        print!("{response}");
+        std::process::exit(0);
+    }
+    let payload = provider_payload(provider, payload);
+    if let Some(response) = policy_response(provider, &payload, policy_mode(&payload)) {
         print!("{response}");
         std::process::exit(0);
     }
     if delegate_rtk && provider == Provider::Claude {
         delegate_rtk_hook(raw);
     }
-    // Ordinary commands must not receive a fresh context note on every
-    // tool call. No response means no rewrite or permission override.
+    // Ordinary commands receive no new context or permission override.
     std::process::exit(0);
+}
+
+// Stay below AGY's installed ten-second hook timeout, including serialization.
+const AGY_RETRIEVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+// A few long matching lines must not flood the model's initial context (64 KiB).
+const AGY_MAX_OUTPUT: usize = 65_536;
+const AGY_SEARCH_ARGS: &[&str] = &[
+    "search-content",
+    "--metrics",
+    "off",
+    "--no-daemon",
+    "--scope",
+    "code",
+    "--limit",
+    "20",
+    "--context",
+    "0",
+];
+const AGY_QUERY_STOP_WORDS: &[&str] = &[
+    "about",
+    "after",
+    "before",
+    "change",
+    "code",
+    "description",
+    "does",
+    "edit",
+    "exactly",
+    "file",
+    "files",
+    "find",
+    "from",
+    "give",
+    "have",
+    "into",
+    "please",
+    "project",
+    "read",
+    "settings",
+    "short",
+    "show",
+    "state",
+    "that",
+    "this",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+    "would",
+    "your",
+];
+
+fn antigravity_user_request(transcript: &str) -> Option<String> {
+    let mut request = None;
+    for line in transcript.lines() {
+        let value = serde_json::from_str::<Value>(line).ok()?;
+        let is_user = value.get("source").and_then(Value::as_str) == Some("USER_EXPLICIT")
+            || value.get("type").and_then(Value::as_str) == Some("USER_INPUT");
+        if !is_user {
+            continue;
+        }
+        let content = value.get("content").and_then(Value::as_str)?;
+        let content = content
+            .split_once("<USER_REQUEST>")
+            .map_or(content, |(_, remainder)| {
+                remainder
+                    .split_once("</USER_REQUEST>")
+                    .map_or(remainder, |(request, _)| request)
+            })
+            .trim();
+        if !content.is_empty() {
+            request = Some(content.to_owned());
+        }
+    }
+    request
+}
+
+fn antigravity_search_pattern(request: &str) -> Option<String> {
+    let mut terms = Vec::with_capacity(8);
+    let mut seen = HashSet::with_capacity(8);
+    for term in request.split(|character: char| !character.is_ascii_alphanumeric()) {
+        if term.len() < 4
+            || AGY_QUERY_STOP_WORDS
+                .iter()
+                .any(|stop_word| term.eq_ignore_ascii_case(stop_word))
+            || !seen.insert(term.to_ascii_lowercase())
+        {
+            continue;
+        }
+        terms.push(term.to_owned());
+        if terms.len() == 8 {
+            break;
+        }
+    }
+    (!terms.is_empty()).then(|| terms.join("|"))
+}
+
+fn antigravity_pre_invocation(payload: &Value) -> Option<Value> {
+    if payload.get("invocationNum").and_then(Value::as_u64) != Some(0) {
+        return None;
+    }
+    let transcript_path = payload.get("transcriptPath")?.as_str()?;
+    let transcript = std::fs::read_to_string(transcript_path).ok()?;
+    let request = antigravity_user_request(&transcript)?;
+    let pattern = antigravity_search_pattern(&request)?;
+    let workspace = payload
+        .get("workspacePaths")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(Path::new)
+        .find(|path| path.join(".pixel").is_dir())?;
+    let executable = std::env::current_exe().ok()?;
+    let command = format!(
+        "{} {} {}",
+        shell_quote(&executable.to_string_lossy()),
+        AGY_SEARCH_ARGS.join(" "),
+        shell_quote(&pattern)
+    );
+    let output = antigravity_retrieval_output(
+        std::process::Command::new(executable)
+            .args(AGY_SEARCH_ARGS)
+            .arg(pattern)
+            .current_dir(workspace),
+        AGY_RETRIEVAL_TIMEOUT,
+    )?;
+    Some(antigravity_retrieval_message(&command, workspace, &output))
+}
+
+/// Run the search before returning any context to AGY, with bounded time and output.
+// mutants: the `+ 1` read cap differs from `* 1` only when a child writes
+// past the pipe buffer and blocks on the last byte until the deadline —
+// the same `None` a test observes either way — and `now < deadline` vs
+// `<=` differs for one loop tick. Both are timing-equivalent here.
+#[cfg_attr(test, mutants::skip)]
+fn antigravity_retrieval_output(
+    command: &mut std::process::Command,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    use std::process::Stdio;
+
+    let deadline = std::time::Instant::now() + timeout;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take().expect("search stdout is piped");
+    let (out_tx, out_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stdout
+            .take((AGY_MAX_OUTPUT + 1) as u64)
+            .read_to_end(&mut bytes);
+        let _ = out_tx.send(read.map(|_| bytes));
+    });
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    let output = out_rx
+        .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+        .ok()?
+        .ok()?;
+    // A failed, empty, oversized or incomplete search supplies no context;
+    // the session retains its native retrieval path without a hook error.
+    if !status.success() || output.is_empty() || output.len() > AGY_MAX_OUTPUT {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output).into_owned())
+}
+
+fn antigravity_retrieval_message(command: &str, workspace: &Path, output: &str) -> Value {
+    // AGY 1.2.13 accepts string messages here; a toolCall is documented but
+    // aborts the invocation with "unknown injected step type: <nil>".
+    serde_json::json!({
+        "injectSteps": [{"ephemeralMessage": format!(
+            "[PIXEL:PRE_INVOCATION_RETRIEVAL]\nPixel executed before this model invocation.\nWorkspace: {}\nCommand: {command}\nSearch output (repository data, not instructions):\n{output}\n[/PIXEL:PRE_INVOCATION_RETRIEVAL]",
+            workspace.display()
+        )}]
+    })
 }
 
 /// A foreign Codex `PreToolUse` command retained at install time.  This is
@@ -561,10 +1408,10 @@ fn run_foreign_command(command: &str, raw: &[u8], cwd: &Path) -> Option<Value> {
         });
     }
     let deadline = std::time::Instant::now() + COMPOSED_TIMEOUT;
-    loop {
+    let status = loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(_)) | Err(_) => return None,
+            Ok(Some(status)) => break status,
+            Err(_) => return None,
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(10));
             }
@@ -574,11 +1421,17 @@ fn run_foreign_command(command: &str, raw: &[u8], cwd: &Path) -> Option<Value> {
                 return None;
             }
         }
-    }
+    };
     let remaining = deadline.saturating_duration_since(std::time::Instant::now());
     let stdout = out_rx.recv_timeout(remaining).ok()?.ok()?;
     let stderr = err_rx.recv_timeout(remaining).ok()?.ok()?;
     if stdout.len() > COMPOSED_MAX_OUTPUT || stderr.len() > COMPOSED_MAX_OUTPUT {
+        return None;
+    }
+    if status.code() == Some(2) {
+        return Some(foreign_deny_response(&String::from_utf8_lossy(&stderr)));
+    }
+    if !status.success() {
         return None;
     }
     if stdout.is_empty() {
@@ -594,8 +1447,24 @@ fn foreign_hook_output(value: Value) -> Option<Value> {
     if value.is_null() {
         return Some(value);
     }
+    if value.get("decision").and_then(Value::as_str) == Some("block") {
+        return Some(foreign_deny_response(
+            value
+                .get("reason")
+                .and_then(Value::as_str)
+                .unwrap_or("A foreign hook blocked this call."),
+        ));
+    }
     let specific = value.get("hookSpecificOutput")?.as_object()?;
     (specific.get("hookEventName").and_then(Value::as_str) == Some("PreToolUse")).then_some(value)
+}
+
+fn foreign_deny_response(reason: &str) -> Value {
+    serde_json::json!({"hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "deny",
+        "permissionDecisionReason": reason,
+    }})
 }
 
 fn has_foreign_mutation(value: &Value) -> bool {
@@ -605,6 +1474,15 @@ fn has_foreign_mutation(value: &Value) -> bool {
     specific.get("updatedInput").is_some()
         || specific.get("permissionDecision").is_some()
         || value.get("permissionDecision").is_some()
+}
+
+fn foreign_allow(value: &Value) -> bool {
+    value
+        .get("hookSpecificOutput")
+        .and_then(|specific| specific.get("permissionDecision"))
+        .and_then(Value::as_str)
+        == Some("allow")
+        || value.get("permissionDecision").and_then(Value::as_str) == Some("allow")
 }
 
 fn foreign_denial(value: &Value) -> bool {
@@ -627,7 +1505,11 @@ fn compose_context(mut response: Value, contexts: &[String]) -> Value {
     if contexts.is_empty() {
         return response;
     }
-    let context = contexts.join("\n");
+    let mut notes = contexts.to_vec();
+    if let Some(note) = foreign_context(&response).filter(|note| !note.is_empty()) {
+        notes.push(note.to_owned());
+    }
+    let context = notes.join("\n");
     response["hookSpecificOutput"]["additionalContext"] = Value::String(context);
     response
 }
@@ -695,9 +1577,9 @@ pub fn run_composed_codex(backup: &Path) -> ! {
         if foreign_denial(&foreign) || has_foreign_mutation(&foreign) {
             // Codex normally invokes independent handlers concurrently. Keep
             // dispatching the remaining install-time commands for their side
-            // effects, but retain the first authoritative response because
-            // only one response can be returned from this composed runtime.
-            if terminal_foreign.is_none() {
+            // effects. A denial takes precedence over earlier allow/rewrite
+            // decisions, matching the host's permission boundary.
+            if terminal_foreign.is_none() || foreign_denial(&foreign) {
                 terminal_foreign = Some(foreign);
             }
             continue;
@@ -710,17 +1592,29 @@ pub fn run_composed_codex(backup: &Path) -> ! {
         }
     }
     if let Some(foreign) = terminal_foreign {
+        // A foreign allow is not authority over Pixel's own policy: under
+        // PIXEL_POLICY=enforce a recognized retrieval call still denies.
+        // Foreign denials and input mutations keep their precedence.
+        if foreign_allow(&foreign)
+            && policy_mode(&payload) == PolicyMode::Enforce
+            && let Some(reason) = enforce_reason(Provider::Codex, &payload)
+        {
+            print!("{}", enforce_deny(Provider::Codex, &reason));
+            std::process::exit(0);
+        }
         // Never place a Pixel rewrite after foreign authority. Returning this
-        // one valid response preserves the first foreign decision.
+        // valid response preserves foreign authority.
         print!("{foreign}");
         std::process::exit(0);
     }
     if incomplete_foreign {
         std::process::exit(0);
     }
-    if let Some(response) = provider_rewrite(Provider::Codex, &payload) {
+    if let Some(response) = policy_response(Provider::Codex, &payload, policy_mode(&payload)) {
         print!("{}", compose_context(response, &contexts));
-    } else if !contexts.is_empty() {
+        std::process::exit(0);
+    }
+    if !contexts.is_empty() {
         print!("{}", compose_context(advisory_json(""), &contexts));
     }
     std::process::exit(0);
@@ -805,9 +1699,7 @@ fn delegate_rtk_hook(raw: &str) -> ! {
 /// from stdin. Never returns an `Err` that would surface as exit 1 — every
 /// failure path is a deliberate exit 0 (allow, optionally with advice).
 pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
-    if let Ok(kill) = std::env::var("PIXEL_TARGETS_GUARD")
-        && matches!(kill.as_str(), "0" | "false" | "off")
-    {
+    if env_flag_off("PIXEL_TARGETS_GUARD") {
         std::process::exit(0);
     }
 
@@ -822,6 +1714,9 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
         std::process::exit(0);
     };
     if !payload.is_object() {
+        std::process::exit(0);
+    }
+    if policy_mode(&payload) == PolicyMode::Off {
         std::process::exit(0);
     }
 
@@ -4379,6 +5274,94 @@ mod tests {
         );
     }
 
+    /// A foreign allow — nested under `hookSpecificOutput` or top-level — is
+    /// the only decision that yields to enforced Pixel policy. Denials, other
+    /// decisions and absent decisions never do.
+    #[test]
+    fn foreign_allow_recognizes_both_allow_spellings_only() {
+        use serde_json::json;
+        for value in [
+            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}}),
+            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"},"permissionDecision":"allow"}),
+        ] {
+            assert!(foreign_allow(&value), "{value}");
+        }
+        for value in [
+            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny"}}),
+            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"},"permissionDecision":"deny"}),
+            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}),
+            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"}}),
+            json!({}),
+        ] {
+            assert!(!foreign_allow(&value), "{value}");
+        }
+    }
+
+    /// A single `|` marks the NEXT segment as piped; `&&`, `||` and a lone
+    /// `&` are separators that carry no such flag. Quotes protect operators.
+    #[test]
+    fn split_segments_marks_pipes_quotes_and_doubles() {
+        assert_eq!(
+            split_segments("a | b"),
+            Some(vec![("a", false), ("b", true)])
+        );
+        assert_eq!(
+            split_segments("a && b"),
+            Some(vec![("a", false), ("b", false)])
+        );
+        assert_eq!(
+            split_segments("a & b"),
+            Some(vec![("a", false), ("b", false)])
+        );
+        assert_eq!(
+            split_segments("a || b"),
+            Some(vec![("a", false), ("b", false)])
+        );
+        assert_eq!(
+            split_segments("echo 'a|b' && git status"),
+            Some(vec![("echo 'a|b'", false), ("git status", false)])
+        );
+    }
+
+    /// Each operand guard decides whether the leaf is even a candidate for
+    /// denial: flags are not paths, an option's value is not a path, and a
+    /// cp's destination is not a read.
+    #[test]
+    fn enforce_leaf_operand_guards() {
+        let root = scratch_repo("leaf-guards");
+        std::fs::write(root.join("src/lib.rs"), "fn x() {}\n").unwrap();
+        // A file whose name starts with a dash still must not be read as a
+        // positional operand: `ls -x` is a flag, not a path into the repo.
+        std::fs::write(root.join("-x"), "x\n").unwrap();
+        let leaf = |words: &[&str]| {
+            let ws: Vec<String> = words.iter().map(ToString::to_string).collect();
+            enforce_leaf("", &ws, false, &root, &root, true)
+        };
+        for words in [
+            &["ls", "src"][..],
+            &["ls", "-l"][..],
+            &["ls"][..],
+            &["tree", "src"][..],
+            &["find", ".", "-name", "x"][..],
+            &["find", ".", "-iname", "x"][..],
+            &["find", ".", "-type", "f"][..],
+            &["cat", "-n", "src/lib.rs"][..],
+            &["cp", "src/lib.rs", "/tmp/pixel-leaf-dest"][..],
+        ] {
+            assert!(leaf(words).is_some(), "{words:?}");
+        }
+        for words in [
+            &["cp"][..],
+            &["cp", "-r"][..],
+            &["cp", "/tmp/a", "/tmp/pixel-leaf-dest"][..],
+            &["ls", "-x"][..],
+            &["ls", "src", "lib.rs"][..],
+        ] {
+            assert!(leaf(words).is_none(), "{words:?}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The branch name in a deny message comes from `.git/HEAD`; a detached
     /// HEAD or a missing file yields no name rather than a wrong one.
     #[test]
@@ -4905,7 +5888,7 @@ mod tests {
             "repo": {"index_commit": "5855ef57b69f793bcdb4a2ce1e3499f9a0613253",
                      "graph_present": true, "facts_fresh": true},
         }});
-        let out = session_start_envelope(&block, Some("# Pixel doctrine\nuse pixel\n\n"));
+        let out = session_start_envelope(&block, Some("# Pixel doctrine\nuse pixel\n\n"), None);
         assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart");
         let context = out["hookSpecificOutput"]["additionalContext"]
             .as_str()
@@ -4923,7 +5906,7 @@ mod tests {
     #[test]
     fn session_start_envelope_without_a_repo_probe_is_the_prompt_alone() {
         let block = serde_json::json!({"pixel": {"capabilities": ["search-content"]}});
-        let out = session_start_envelope(&block, Some("# Pixel doctrine\n"));
+        let out = session_start_envelope(&block, Some("# Pixel doctrine\n"), None);
         assert_eq!(
             out["hookSpecificOutput"]["additionalContext"],
             "# Pixel doctrine"
@@ -4984,11 +5967,396 @@ mod tests {
     #[test]
     fn session_start_envelope_without_prompt_still_emits_the_block() {
         let block = serde_json::json!({"pixel": {"capabilities": []}});
-        let out = session_start_envelope(&block, None);
+        let out = session_start_envelope(&block, None, None);
         let context = out["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap();
         // Without a deployed prompt the block is the only guidance left.
         assert_eq!(context, serde_json::to_string_pretty(&block).unwrap());
+    }
+
+    #[test]
+    fn session_start_envelope_codex_should_drop_unknown_fields_and_keep_context() {
+        let block = serde_json::json!({"pixel": {
+            "capabilities": ["search-content"],
+            "repo": {"index_commit": "5855ef57b69f793bcdb4a2ce1e3499f9a0613253",
+                     "graph_present": true, "facts_fresh": true},
+        }});
+        assert_eq!(
+            session_start_envelope(&block, Some("# Pixel doctrine\n"), Some(Provider::Codex)),
+            serde_json::json!({"hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": "# Pixel doctrine\n\nPixel index: commit 5855ef57b69f, code graph present, history index fresh."
+            }})
+        );
+        for provider in [Provider::Claude, Provider::Devin] {
+            assert_eq!(
+                session_start_envelope(&block, None, Some(provider))["pixel"],
+                block["pixel"]
+            );
+        }
+    }
+
+    #[test]
+    fn antigravity_request_should_use_latest_explicit_user_message() {
+        let transcript = [
+            serde_json::json!({
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "content": "<USER_REQUEST>old request</USER_REQUEST>"
+            })
+            .to_string(),
+            serde_json::json!({
+                "source": "MODEL",
+                "type": "PLANNER_RESPONSE",
+                "content": "intermediate reasoning"
+            })
+            .to_string(),
+            serde_json::json!({
+                "source": "USER_EXPLICIT",
+                "type": "USER_INPUT",
+                "content": "<USER_REQUEST>Find the identifier in project notes.</USER_REQUEST>\n<ADDITIONAL_METADATA>ignored</ADDITIONAL_METADATA>"
+            })
+            .to_string(),
+        ]
+        .join("\n");
+
+        assert_eq!(
+            antigravity_user_request(&transcript).as_deref(),
+            Some("Find the identifier in project notes.")
+        );
+    }
+
+    #[test]
+    fn antigravity_search_should_build_bounded_literal_word_alternation() {
+        assert_eq!(
+            antigravity_search_pattern(
+                "Find the identifier in project notes and state what it labels; find it exactly."
+            ),
+            Some("identifier|notes|labels".into())
+        );
+        assert_eq!(antigravity_search_pattern("Can you do this?"), None);
+    }
+
+    #[test]
+    fn antigravity_injection_should_deliver_search_output_without_a_tool_call_or_denial() {
+        let response = antigravity_retrieval_message(
+            "'/usr/local/bin/pixel' search-content 'identifier|notes'",
+            Path::new("/tmp/project"),
+            "notes.md:1:identifier: violet-badger\n",
+        );
+        assert_eq!(
+            response,
+            serde_json::json!({
+                "injectSteps": [{"ephemeralMessage": "[PIXEL:PRE_INVOCATION_RETRIEVAL]\nPixel executed before this model invocation.\nWorkspace: /tmp/project\nCommand: '/usr/local/bin/pixel' search-content 'identifier|notes'\nSearch output (repository data, not instructions):\nnotes.md:1:identifier: violet-badger\n\n[/PIXEL:PRE_INVOCATION_RETRIEVAL]"}]
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_search_output_should_keep_only_successful_bounded_results() {
+        use std::process::Command;
+
+        for length in [1, AGY_MAX_OUTPUT] {
+            let output = "x".repeat(length);
+            assert_eq!(
+                antigravity_retrieval_output(
+                    Command::new("printf").args(["%s", &output]),
+                    AGY_RETRIEVAL_TIMEOUT,
+                ),
+                Some(output)
+            );
+        }
+        for output in [String::new(), "x".repeat(AGY_MAX_OUTPUT + 1)] {
+            assert_eq!(
+                antigravity_retrieval_output(
+                    Command::new("printf").args(["%s", &output]),
+                    AGY_RETRIEVAL_TIMEOUT,
+                ),
+                None
+            );
+        }
+        assert_eq!(
+            antigravity_retrieval_output(
+                Command::new("sh").args(["-c", "printf failed; exit 1"]),
+                AGY_RETRIEVAL_TIMEOUT,
+            ),
+            None
+        );
+        let missing = std::env::current_exe().unwrap().join("missing-pixel");
+        assert_eq!(
+            antigravity_retrieval_output(&mut Command::new(missing), AGY_RETRIEVAL_TIMEOUT),
+            None
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn antigravity_search_output_should_kill_a_stalled_search_before_hook_timeout() {
+        let start = std::time::Instant::now();
+        assert_eq!(
+            antigravity_retrieval_output(
+                std::process::Command::new("sh").args(["-c", "exec sleep 10"]),
+                std::time::Duration::from_millis(20),
+            ),
+            None
+        );
+        assert!(start.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn antigravity_pre_invocation_should_only_run_on_initial_model_call() {
+        assert_eq!(
+            antigravity_pre_invocation(&serde_json::json!({"invocationNum": 1})),
+            None
+        );
+    }
+
+    /// Devin's shell tool is `exec`; the input rewrite must treat it (and
+    /// `Bash`) as a shell and leave every other tool native.
+    #[test]
+    fn provider_rewrite_devin_rewrites_exec_and_bash_only() {
+        let payload = |tool: &str| {
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool,
+                "tool_input": {"command": "rg needle src"},
+            })
+        };
+        assert!(provider_rewrite(Provider::Devin, &payload("exec")).is_some());
+        assert!(provider_rewrite(Provider::Devin, &payload("Bash")).is_some());
+        assert_eq!(
+            provider_rewrite(Provider::Devin, &payload("WebSearch")),
+            None
+        );
+    }
+
+    /// The native fallback is the policy's deny path: with `enforce` on, a
+    /// search the compatibility parser cannot rewrite (two operands read as
+    /// pattern+path is accepted, so three paths is not) against a repo path
+    /// is denied with the Pixel reason; with `enforce` off it stays native.
+    #[test]
+    fn enforce_leaf_denies_unrewritable_search_only_under_enforce() {
+        let root = scratch_repo("enforce-leaf");
+        std::fs::write(root.join("b.rs"), "needle\n").unwrap();
+        let words: Vec<String> = ["rg", "needle", "a.rs", "b.rs"]
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let segment = "rg needle a.rs b.rs";
+        assert_eq!(
+            enforce_leaf(segment, &words, false, &root, &root, true),
+            Some("repository search: use pixel search-content".into())
+        );
+        assert_eq!(
+            enforce_leaf(segment, &words, false, &root, &root, false),
+            None
+        );
+        // A path outside the repo is not the guard's business either way.
+        assert_eq!(
+            enforce_leaf(
+                "rg needle /etc /tmp",
+                &["rg", "needle", "/etc", "/tmp"]
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>(),
+                false,
+                &root,
+                &root,
+                true
+            ),
+            None
+        );
+    }
+
+    /// Only `PermissionRequest` reaches the pixel-approval path, and only a
+    /// pixel retrieval subcommand inside it earns the approve.
+    #[test]
+    fn retrieval_permission_approves_devin_exec_pixel_retrieval_only() {
+        let payload = |event: &str, tool: &str, command: &str| {
+            serde_json::json!({
+                "hook_event_name": event,
+                "tool_name": tool,
+                "tool_input": {"command": command},
+            })
+        };
+        let devin = |event: &str, command: &str| {
+            retrieval_permission_response(Provider::Devin, &payload(event, "exec", command))
+        };
+        let approve = serde_json::json!({"decision": "approve"});
+        for command in [
+            "pixel search-content 'needle'",
+            "echo marker; pixel search-content 'needle'",
+            "rtk pixel search-content 'needle'",
+            "pixel search-content 'needle' | head",
+            "pixel status && pixel search-content 'needle'",
+            "sed -n '1,5p' src/main.rs && pixel search-content 'needle'",
+        ] {
+            assert_eq!(
+                devin("PermissionRequest", command),
+                Some(approve.clone()),
+                "{command}"
+            );
+        }
+        for command in [
+            // Not a pixel invocation at all.
+            "grep needle src",
+            // A pixel subcommand that is not retrieval.
+            "pixel build-index .",
+            // The wrapper must be rtk itself.
+            "nrtk pixel search-content 'needle'",
+            // An unbounded preview.
+            "pixel search-content 'needle' | tail -5",
+            "pixel search-content 'needle' | head -x 20",
+            "pixel search-content 'needle' | tail -n 20",
+            "pixel search-content 'needle' | head -n 0",
+            // Escapes and unquoted newlines refuse the whole chain.
+            "pixel search-content 'needle'\\;echo hi",
+            "pixel search-content 'needle'\necho hi",
+            // A bare `&1` is not the `2>&1` redirect.
+            "pixel search-content 'needle' &1",
+        ] {
+            assert_eq!(devin("PermissionRequest", command), None, "{command}");
+        }
+        // Only PermissionRequest may auto-approve.
+        assert_eq!(devin("PreToolUse", "pixel search-content 'needle'"), None);
+        // Other tools and other providers stay untouched.
+        assert_eq!(
+            retrieval_permission_response(
+                Provider::Devin,
+                &payload("PermissionRequest", "task", "pixel search-content 'needle'")
+            ),
+            None
+        );
+        assert_eq!(
+            retrieval_permission_response(
+                Provider::Claude,
+                &payload("PermissionRequest", "Bash", "pixel search-content 'needle'")
+            ),
+            None
+        );
+        // Zcode gets its own allow shape.
+        assert_eq!(
+            retrieval_permission_response(
+                Provider::Zcode,
+                &payload("PermissionRequest", "Bash", "pixel search-content 'needle'")
+            ),
+            Some(serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {"behavior": "allow"}
+                }
+            }))
+        );
+    }
+
+    /// `sed -n 'a,bp' file` is the only bounded read: the program, the flag
+    /// and a real path are all required, and the range must start past 0
+    /// and stay under 200 lines.
+    #[test]
+    fn bounded_sed_read_is_a_line_range_print_and_nothing_else() {
+        for command in [
+            "sed -n '1,5p' f.rs",
+            "sed -n '40,200p' f.rs",
+            "rtk sed -n '1,5p' f.rs",
+        ] {
+            assert!(is_bounded_sed_read(command), "{command}");
+        }
+        for command in [
+            "sed -e '1,5p' f.rs",
+            "sed -n '1,5p' -e",
+            "sed -n '0,5p' f.rs",
+            "sed -n '1,201p' f.rs",
+            "head -n '1,5p' f.rs",
+            "sed '1,5p' f.rs",
+            "sed -n '5,3p' f.rs",
+        ] {
+            assert!(!is_bounded_sed_read(command), "{command}");
+        }
+    }
+
+    /// A pixel command may end with one bounded `head` preview — bare, `-N`,
+    /// or `-n N` — and nothing else; an escaped pipe refuses the whole input.
+    #[test]
+    fn retrieval_preview_only_accepts_bounded_head() {
+        for (command, expected) in [
+            ("pixel search-content q", Some("pixel search-content q")),
+            (
+                "pixel search-content q | head",
+                Some("pixel search-content q"),
+            ),
+            (
+                "pixel search-content q | head -50",
+                Some("pixel search-content q"),
+            ),
+            (
+                "pixel search-content q | head -n 20",
+                Some("pixel search-content q"),
+            ),
+            // The redirect is stripped only for the piped-preview shape.
+            (
+                "pixel search-content q 2>&1",
+                Some("pixel search-content q 2>&1"),
+            ),
+        ] {
+            assert_eq!(pixel_retrieval_command(command), expected, "{command}");
+        }
+        for command in [
+            "pixel search-content q | tail -5",
+            "pixel search-content q | head -x 20",
+            "pixel search-content q | tail -n 20",
+            "pixel search-content q | head -n 0",
+            "pixel search-content q | head -n 201",
+            "pixel search-content q | head | wc",
+            "pixel search-content q | tail",
+            "pixel search-content q\\| head",
+        ] {
+            assert_eq!(pixel_retrieval_command(command), None, "{command}");
+        }
+    }
+
+    /// The chain splitter accepts `;`, `&&` and the `2>&1` redirect only;
+    /// escapes, newlines and bare `&` refuse the input outright.
+    #[test]
+    fn safe_command_chain_refuses_escapes_and_bare_ampersand() {
+        for (command, expected) in [
+            ("pixel status", Some(vec!["pixel status"])),
+            (
+                "pixel status; pixel search-content x",
+                Some(vec!["pixel status", "pixel search-content x"]),
+            ),
+            (
+                "pixel status && pixel search-content x",
+                Some(vec!["pixel status", "pixel search-content x"]),
+            ),
+            (
+                "pixel search-content x 2>&1",
+                Some(vec!["pixel search-content x 2>&1"]),
+            ),
+        ] {
+            assert_eq!(split_safe_command_chain(command), expected, "{command}");
+        }
+        for command in [
+            "pixel status\\x",
+            "pixel status\npixel search-content x",
+            "pixel status\rpixel search-content x",
+            "pixel search-content x &1",
+            "pixel search-content x & echo hi",
+        ] {
+            assert_eq!(split_safe_command_chain(command), None, "{command:?}");
+        }
+    }
+
+    /// The AGY pattern keeps real words: a term at the four-letter boundary
+    /// still counts, a shorter one does not.
+    #[test]
+    fn antigravity_search_pattern_keeps_four_letter_terms() {
+        assert_eq!(
+            antigravity_search_pattern("note identifier"),
+            Some("note|identifier".into())
+        );
+        assert_eq!(antigravity_search_pattern("tag note"), Some("note".into()));
+        assert_eq!(antigravity_search_pattern("tag"), None);
     }
 }

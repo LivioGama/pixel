@@ -87,3 +87,6 @@ Both commands target the account's login shell (from the user database, not `$SH
 
 - Pure read-only exploration (no edits to `crates/` or rules).
 - The turn only touched docs, prompts, or bench scripts — nothing that changes binary behavior or installed rules.
+<!-- pixel:warp-retrieval:begin -->
+For repository retrieval, your first tool action must attempt Pixel before any search or read. Do not run `ls`, `command -v`, status probes, or native retrieval first. For a known identifier, start with `pixel search-content -F '<identifier>'`; for behavior described without a name, start with `pixel find-code '<concept>'`. Read matching source after the Pixel attempt to verify the result. If Pixel is unavailable, the repository is not indexed, or Pixel cannot answer, continue with the appropriate native tool; never block or deny repository access.
+<!-- pixel:warp-retrieval:end -->

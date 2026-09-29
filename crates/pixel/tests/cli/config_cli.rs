@@ -230,6 +230,102 @@ fn classify_off_should_block_every_engine_and_batch_before_reading_input() {
 }
 
 #[test]
+fn policy_should_resolve_environment_then_repository_then_global_and_write_each_layer() {
+    let home = Scratch::for_test("config", "policy-home");
+    let repo = Scratch::for_test("config", "policy-repo");
+    crate::support::git(&repo, &["init", "-q"]);
+    let global = home.join(".pixel/config.yaml");
+    let repo_file = repo.join(".pixel/config.yaml");
+    let query = |cwd: &Path, args: &[&str]| {
+        pixel_command()
+            .env("HOME", &*home)
+            .env_remove("PIXEL_POLICY")
+            .env_remove("PIXEL_TARGETS_GUARD")
+            .current_dir(cwd)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let policy = |args: &[&str]| stdout(&query(&repo, args));
+
+    assert_eq!(
+        policy(&["config", "policy"]),
+        "policy: advisory — default (no config sets it)\n"
+    );
+    assert!(policy(&["config"]).contains("policy: advisory (default)\n"));
+    let report = |cwd: &Path| -> serde_json::Value {
+        let out = stdout(&query(cwd, &["config", "policy", "--json"]));
+        assert!(out.ends_with('\n'), "{out}");
+        serde_json::from_str(&out).unwrap()
+    };
+    assert_eq!(
+        report(&repo),
+        serde_json::json!({"policy":"advisory", "source":"default"})
+    );
+
+    // The global layer decides where no repository overrides it.
+    fs::create_dir_all(home.join(".pixel")).unwrap();
+    fs::write(&global, "policy: enforce\n").unwrap();
+    assert_eq!(
+        policy(&["config", "policy"]),
+        format!("policy: enforce — global {}\n", global.display())
+    );
+
+    // `pixel config policy` writes the repository layer; only --global
+    // touches the machine-wide file.
+    assert_eq!(
+        policy(&["config", "policy", "off"]),
+        format!("policy: off — wrote {}\n", repo_file.display())
+    );
+    assert_eq!(
+        report(&repo),
+        serde_json::json!({
+            "policy":"off", "source":"repo", "file": repo_file.display().to_string()
+        })
+    );
+    assert_eq!(
+        policy(&["config", "policy", "advisory", "--global"]),
+        format!("policy: advisory — wrote {}\n", global.display())
+    );
+    let doc: serde_json::Value =
+        serde_saphyr::from_str(&fs::read_to_string(&repo_file).unwrap()).unwrap();
+    assert_eq!(doc, serde_json::json!({"policy":"off"}));
+
+    // The environment overrides every file layer for one process.
+    assert_eq!(
+        stdout(
+            &pixel_command()
+                .env("HOME", &*home)
+                .env("PIXEL_POLICY", "enforce")
+                .current_dir(&*repo)
+                .args(["config", "policy"])
+                .output()
+                .unwrap()
+        ),
+        "policy: enforce — PIXEL_POLICY (environment)\n"
+    );
+
+    // An unknown argument is refused instead of written.
+    let out = query(&repo, &["config", "policy", "loudly"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("possible values: advisory, enforce, off"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // A hand-written value the reader cannot use is a validation error, not a
+    // half-applied setting.
+    fs::write(&repo_file, "policy: loudly\n").unwrap();
+    let out = query(&repo, &["config"]);
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("policy must be advisory, enforce, or off"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
 fn setup_should_refuse_piped_input_without_writing_configuration() {
     let home = Scratch::for_test("config", "setup-piped-home");
     let out = run(&home, &home, &["config", "setup"]);

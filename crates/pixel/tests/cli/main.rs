@@ -13,6 +13,7 @@ mod execution_brief;
 #[cfg(unix)]
 mod flow_cli;
 mod guard_deny;
+mod guard_enforce;
 mod json_contract;
 mod metrics_cli;
 mod post_edit_cli;

@@ -3340,6 +3340,14 @@ fn repo_install_writes_all_five_artifacts() {
     // .codex/hooks.json — exactly the composed guard group + sidecar backup.
     let hooks: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(repo.join(".codex/hooks.json")).unwrap()).unwrap();
+    assert_eq!(
+        hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+        format!(
+            "'{}' run-hook session-start --provider codex",
+            home.join("pixel").canonicalize().unwrap().display()
+        ),
+        "the installed Codex hook must select its strict response schema"
+    );
     let pre = hooks["hooks"]["PreToolUse"].as_array().unwrap();
     assert_eq!(pre.len(), 1, "{hooks}");
     let command = pre[0]["hooks"][0]["command"].as_str().unwrap();
@@ -3366,6 +3374,14 @@ fn repo_install_writes_all_five_artifacts() {
             .unwrap();
     let devin_pre = devin["hooks"]["PreToolUse"].as_array().unwrap();
     assert!(
+        devin_pre.iter().any(|group| {
+            group["matcher"]
+                .as_str()
+                .is_some_and(|matcher| matcher.contains("glob"))
+        }),
+        "native Devin glob must reach the Pixel guard: {devin}"
+    );
+    assert!(
         devin_pre.iter().any(|g| {
             g["hooks"].as_array().is_some_and(|h| {
                 h.iter().any(|hook| {
@@ -3376,6 +3392,33 @@ fn repo_install_writes_all_five_artifacts() {
             })
         }),
         "{devin}"
+    );
+    let devin_prompt = devin["hooks"]["UserPromptSubmit"].as_array().unwrap();
+    assert!(
+        devin_prompt.iter().any(|group| {
+            group["hooks"].as_array().is_some_and(|hooks| {
+                hooks.iter().any(|hook| {
+                    hook["command"].as_str().is_some_and(|command| {
+                        command.contains("run-hook prompt-submit --provider devin")
+                    })
+                })
+            })
+        }),
+        "Devin must receive Pixel-first context on every prompt without blocking: {devin}"
+    );
+    let devin_permission = devin["hooks"]["PermissionRequest"].as_array().unwrap();
+    assert!(
+        devin_permission.iter().any(|group| {
+            group["matcher"] == "exec"
+                && group["hooks"].as_array().is_some_and(|hooks| {
+                    hooks.iter().any(|hook| {
+                        hook["command"].as_str().is_some_and(|command| {
+                            command.contains("run-hook guard --provider devin")
+                        })
+                    })
+                })
+        }),
+        "Devin must silently approve only Pixel retrieval execs: {devin}"
     );
 
     // .pi/extensions/pixel-guard.ts, the project directory pi discovers
@@ -4031,7 +4074,7 @@ fn repo_install_should_keep_machine_local_artifacts_out_of_git() {
         .iter()
         .find(|s| s.id == "repo.git-exclude")
         .unwrap();
-    assert!(dry_step.summary.contains("6 machine-local"), "{dry_step:?}");
+    assert!(dry_step.summary.contains("7 machine-local"), "{dry_step:?}");
 
     let report = install(&repo_install_options(&repo, &home)).unwrap();
     assert!(report.ok, "{report:?}");
@@ -4237,6 +4280,42 @@ fn doctor_repo_checks_should_go_red_on_a_broken_pixel_install() {
         assert_eq!(c.status, CheckStatus::Red, "{id}: {c:?}");
     }
 
+    fs::create_dir_all(repo.join(".warp")).unwrap();
+    fs::write(
+        repo.join(".warp/.mcp.json"),
+        r#"{"mcpServers":{"pixel":{"command":"/old/pixel","args":["mcp","/other/repo"],"working_directory":"/other/repo"}}}"#,
+    )
+    .unwrap();
+    let report = doctor(&doctor_options).unwrap();
+    assert_eq!(
+        check(&report, "repo.warp-mcp").status,
+        CheckStatus::Red,
+        "{:?}",
+        check(&report, "repo.warp-mcp")
+    );
+
+    let devin_without_permission_approval = serde_json::json!({
+        "hooks": {
+            "PreToolUse": [{"matcher":"exec|Bash","hooks":[{"type":"command","command":"'/p/pixel' run-hook guard --provider devin"}]}],
+            "UserPromptSubmit": [{"hooks":[{"type":"command","command":"'/p/pixel' run-hook prompt-submit --provider devin"}]}]
+        }
+    });
+    fs::write(
+        repo.join(".devin/config.local.json"),
+        serde_json::to_string_pretty(&devin_without_permission_approval).unwrap(),
+    )
+    .unwrap();
+    let report = doctor(&doctor_options).unwrap();
+    let devin = check(&report, "repo.devin-hooks");
+    assert_eq!(devin.status, CheckStatus::Red, "{devin:?}");
+    assert!(
+        devin
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("PermissionRequest")),
+        "{devin:?}"
+    );
+
     // An RTK backup alone is evidence too.
     fs::write(repo.join(".claude/settings.local.json"), "{}").unwrap();
     fs::write(
@@ -4395,7 +4474,7 @@ fn fake_exe_named(home: &std::path::Path, name: &str) -> std::path::PathBuf {
 /// runs that hook several times on every prompt, edit or session.
 fn lifecycle_counts(settings: &serde_json::Value) -> Vec<(&'static str, usize)> {
     [
-        ("SessionStart", "run-hook session-start"),
+        ("SessionStart", "run-hook session-start --provider claude"),
         ("SessionStart", "run-hook post-compaction --provider claude"),
         (
             "UserPromptSubmit",
@@ -4417,7 +4496,7 @@ fn lifecycle_counts(settings: &serde_json::Value) -> Vec<(&'static str, usize)> 
 }
 
 const ONE_EACH: [(&str, usize); 4] = [
-    ("run-hook session-start", 1),
+    ("run-hook session-start --provider claude", 1),
     ("run-hook post-compaction --provider claude", 1),
     ("run-hook prompt-submit --provider claude", 1),
     ("run-hook post-tool-use --provider claude", 1),
@@ -4738,6 +4817,77 @@ fn repo_artifacts_should_name_every_file_a_repo_install_writes() {
         .collect();
     listed.sort();
     assert_eq!(written, listed);
+}
+
+/// Repo installation makes Pixel-first instructions available to project-aware
+/// agents and doctor detects drift without treating an unconfigured repo as broken.
+#[test]
+#[cfg(unix)]
+fn repo_install_should_manage_pixel_first_project_rules_fail_open() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    fs::write(
+        repo.join("AGENTS.md"),
+        "# Existing project rules\nPreserve this instruction.\n",
+    )
+    .unwrap();
+    let doctor_options = DoctorOptions {
+        home: Some(home.clone()),
+        repo_root: Some(repo.clone()),
+        only: vec!["repo.pixel-first".into()],
+        ..Default::default()
+    };
+
+    let absent = doctor(&doctor_options).unwrap();
+    assert_eq!(
+        check(&absent, "repo.pixel-first").status,
+        CheckStatus::Green
+    );
+
+    let installed = install(&repo_install_options(&repo, &home)).unwrap();
+    assert!(installed.ok, "{installed:?}");
+    let rules_path = repo.join("AGENTS.md");
+    let managed = fs::read_to_string(&rules_path).unwrap();
+    assert!(managed.starts_with("# Existing project rules\nPreserve this instruction."));
+    assert!(managed.contains("pixel:warp-retrieval:begin"));
+    assert!(
+        managed.contains("your first tool action must attempt Pixel before any search or read")
+    );
+    assert!(managed.contains("never block or deny repository access"));
+    let current = doctor(&doctor_options).unwrap();
+    assert_eq!(
+        check(&current, "repo.pixel-first").status,
+        CheckStatus::Green
+    );
+
+    let stale_text = managed.replace(
+        "your first tool action must attempt Pixel",
+        "your first tool action must attempt native search",
+    );
+    assert_ne!(
+        stale_text, managed,
+        "the test mutation must alter managed policy"
+    );
+    fs::write(&rules_path, &stale_text).unwrap();
+    let stale = doctor(&doctor_options).unwrap();
+    let stale_check = check(&stale, "repo.pixel-first");
+    assert_eq!(stale_check.status, CheckStatus::Red, "{stale_check:?}");
+
+    uninstall(&UninstallOptions {
+        home: Some(home),
+        repo: Some(repo),
+        ..Default::default()
+    })
+    .unwrap();
+    let remaining = fs::read_to_string(&rules_path).unwrap();
+    assert_eq!(
+        remaining,
+        "# Existing project rules\nPreserve this instruction.\n"
+    );
 }
 
 /// A global RTK backup with no delegating guard is a leftover (an

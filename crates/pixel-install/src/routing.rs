@@ -63,7 +63,10 @@ impl Provider {
     fn shell_matcher(self) -> &'static str {
         match self {
             Self::Codex => "Bash|shell|unified_exec|local_shell",
-            _ => self.shell(),
+            // Devin's native read/search tools bypass exec rewrites and must
+            // reach the guard so it can return its documented block response.
+            Self::Devin => "exec|read|grep|glob|find_file_by_name",
+            Self::Claude => self.shell(),
         }
     }
 
@@ -145,11 +148,16 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
                 "guard --provider claude",
                 "guard --provider codex",
                 "guard --provider devin",
+                "guard --provider zcode",
                 "guard --provider claude --delegate-rtk",
                 "composed-guard --provider codex",
                 "session-start",
+                "session-start --provider claude",
+                "session-start --provider codex",
+                "session-start --provider devin",
                 "prompt-submit",
                 "prompt-submit --provider claude",
+                "prompt-submit --provider devin",
                 "post-compaction",
                 "post-compaction --provider claude",
                 "post-tool-use",
@@ -602,14 +610,20 @@ fn configure_scoped(
             .as_array_mut()
             .ok_or_else(|| format!("{event} is not an array"))?;
         // Claude's task runtime is session-scoped. Make that provider choice
-        // explicit at the lifecycle boundary without changing Codex/Devin's
-        // established hook command shape.
-        let provider_arg = if provider == Provider::Claude
-            && matches!(verb, "prompt-submit" | "post-compaction" | "post-tool-use")
-        {
-            " --provider claude"
-        } else {
-            ""
+        // explicit at the lifecycle boundary. Session-start carries the
+        // provider for every host: Codex rejects unknown output fields.
+        let provider_arg = match verb {
+            "session-start" => match provider {
+                Provider::Claude => " --provider claude",
+                Provider::Codex => " --provider codex",
+                Provider::Devin => " --provider devin",
+            },
+            "prompt-submit" | "post-compaction" | "post-tool-use"
+                if provider == Provider::Claude =>
+            {
+                " --provider claude"
+            }
+            _ => "",
         };
         groups.push(hook_group(
             format!("{} run-hook {verb}{provider_arg}", quoted_executable(exe)),
@@ -865,6 +879,97 @@ pub(crate) fn install_at(
     dry_run: bool,
 ) -> crate::Result<install::InstallStep> {
     install_at_scoped(home, path, exe, provider, HookScope::All, &[], dry_run)
+}
+
+/// Install ZCode's user-level hooks only when its config already exists.
+/// ZCode ignores project-level hooks; preserve every unrelated config key and
+/// hook group, replacing only Pixel's own matching entries.
+pub(crate) fn install_zcode_at(
+    home: &Path,
+    exe: &Path,
+    dry_run: bool,
+) -> crate::Result<install::InstallStep> {
+    let path = home.join(config::ZCODE_CONFIG_FILE);
+    if !path.is_file() {
+        return Ok(install::InstallStep {
+            id: "hooks.zcode".into(),
+            status: install::CheckStatus::Green,
+            summary: "no ZCode CLI config — skipped (live unverified)".into(),
+            detail: None,
+        });
+    }
+    let mut value = install::read_settings(&path)?;
+    let hooks = value
+        .as_object_mut()
+        .ok_or_else(|| InstallError::InvalidSettings {
+            path: path.clone(),
+            reason: "expected a JSON object".into(),
+        })?
+        .entry("hooks")
+        .or_insert_with(|| json!({}));
+    let hooks = hooks
+        .as_object_mut()
+        .ok_or_else(|| InstallError::InvalidSettings {
+            path: path.clone(),
+            reason: "hooks must be an object".into(),
+        })?;
+    let enabled = hooks
+        .entry("enabled")
+        .or_insert(Value::Bool(true))
+        .as_bool()
+        == Some(true);
+    let events = hooks
+        .entry("events")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| InstallError::InvalidSettings {
+            path: path.clone(),
+            reason: "hooks.events must be an object".into(),
+        })?;
+    let command = format!("{} run-hook guard --provider zcode", quoted_executable(exe));
+    for (event, matcher) in [
+        ("PreToolUse", "Bash|exec"),
+        ("PermissionRequest", "Bash|exec"),
+    ] {
+        let groups = events
+            .entry(event)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| InstallError::InvalidSettings {
+                path: path.clone(),
+                reason: format!("hooks.events.{event} must be an array"),
+            })?;
+        groups.retain(|group| {
+            !group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .is_some_and(|entries| {
+                    entries.iter().any(|entry| {
+                        entry.get("command").and_then(Value::as_str) == Some(command.as_str())
+                    })
+                })
+        });
+        groups.push(json!({
+            "matcher": matcher,
+            "hooks": [{"type":"command", "command": command, "timeout":10}]
+        }));
+    }
+    install::write_settings(&path, &value, dry_run)?;
+    Ok(install::InstallStep {
+        id: "hooks.zcode".into(),
+        status: if enabled {
+            install::CheckStatus::Green
+        } else {
+            install::CheckStatus::Yellow
+        },
+        summary: if enabled {
+            "ZCode Pixel rewrite and retrieval-only approval hooks configured (live unverified)"
+                .into()
+        } else {
+            "ZCode hooks remain disabled by the existing hooks.enabled=false setting".into()
+        },
+        detail: Some(path.display().to_string()),
+    })
 }
 
 /// Scoped install: lifecycle hooks only (global Claude doctrine delivery) or
@@ -1198,11 +1303,45 @@ pub(crate) fn has_pixel_guard(value: &Value, verb: &str, exe: &Path) -> bool {
         .any(|command| is_pixel_hook(command, exe) && command.contains(verb))
 }
 
-/// Merge a pixel `run-hook guard --provider devin` PreToolUse group into the
+/// Whether Devin's project config registers Pixel's non-blocking prompt context.
+pub(crate) fn has_pixel_prompt_context(value: &Value, exe: &Path) -> bool {
+    value
+        .get("hooks")
+        .and_then(|hooks| hooks.get("UserPromptSubmit"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+        .any(|command| {
+            is_pixel_hook(command, exe)
+                && command.contains("run-hook prompt-submit --provider devin")
+        })
+}
+
+/// Whether Devin's local config pre-approves Pixel retrieval via PermissionRequest.
+pub(crate) fn has_pixel_permission_approval(value: &Value, exe: &Path) -> bool {
+    value
+        .get("hooks")
+        .and_then(|hooks| hooks.get("PermissionRequest"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|group| group.get("matcher").and_then(Value::as_str) == Some("exec"))
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+        .any(|command| {
+            is_pixel_hook(command, exe) && command.contains("run-hook guard --provider devin")
+        })
+}
+
+/// Merge Pixel's silent exec rewrite, retrieval approval, and prompt context hooks into the
 /// repository's personal Devin config, `<repo>/.devin/config.local.json`
 /// (the command names this machine's binary, so not the shared
-/// `.devin/config.json`). Devin's PreToolUse accepts multiple independent
-/// groups, so the pixel group is appended after any foreign entries and a
+/// `.devin/config.json`). Devin accepts multiple independent hook groups, so
+/// each Pixel group is appended after any foreign entries and a
 /// reinstall replaces only pixel's own group. A guard an earlier install
 /// wrote into `.devin/hooks.json`, a file Devin CLI does not read, is removed.
 pub(crate) fn install_project_devin_at(
@@ -1233,18 +1372,43 @@ pub(crate) fn install_project_devin_at(
             quoted_executable(exe),
             Provider::Devin.name()
         ),
-        Some(Provider::Devin.shell()),
+        Some(Provider::Devin.shell_matcher()),
     );
     let merged = config::merge_hook_entry(
         hooks.get("PreToolUse"),
         "run-hook guard --provider devin",
         pixel_group,
     );
-    let unchanged = hooks.get("PreToolUse") == Some(&merged);
+    let prompt_group = hook_group(
+        format!(
+            "{} run-hook prompt-submit --provider devin",
+            quoted_executable(exe)
+        ),
+        None,
+    );
+    let merged_prompt = config::merge_hook_entry(
+        hooks.get("UserPromptSubmit"),
+        "run-hook prompt-submit --provider devin",
+        prompt_group,
+    );
+    let permission_group = hook_group(
+        format!("{} run-hook guard --provider devin", quoted_executable(exe)),
+        Some("exec"),
+    );
+    let merged_permission = config::merge_hook_entry(
+        hooks.get("PermissionRequest"),
+        "run-hook guard --provider devin",
+        permission_group,
+    );
+    let unchanged = hooks.get("PreToolUse") == Some(&merged)
+        && hooks.get("UserPromptSubmit") == Some(&merged_prompt)
+        && hooks.get("PermissionRequest") == Some(&merged_permission);
     let backup = if unchanged {
         None
     } else {
         hooks.insert("PreToolUse".into(), merged);
+        hooks.insert("UserPromptSubmit".into(), merged_prompt);
+        hooks.insert("PermissionRequest".into(), merged_permission);
         install::write_settings(path, &value, dry_run)?
     };
     Ok(install::InstallStep {
@@ -1253,9 +1417,9 @@ pub(crate) fn install_project_devin_at(
         summary: install::dry_run_summary(
             dry_run,
             if unchanged {
-                "devin project guard verified (live unverified)"
+                "devin Pixel rewrite, no-prompt retrieval approval, and prompt-context hooks verified (live unverified)"
             } else {
-                "devin project guard configured (live unverified)"
+                "devin Pixel rewrite, no-prompt retrieval approval, and prompt-context hooks configured (live unverified)"
             },
         ),
         detail: Some(install::with_backup_note(
@@ -1515,6 +1679,13 @@ mod tests {
             assert_eq!(value["unrelated"], true);
             assert_eq!(value["hooks"]["SessionStart"][0], foreign);
             assert!(value["hooks"]["SessionStart"][1].get("matcher").is_none());
+            assert_eq!(
+                value["hooks"]["SessionStart"][1]["hooks"][0]["command"],
+                format!(
+                    "'/tmp/Pixel tools/pixel' run-hook session-start --provider {}",
+                    provider.name()
+                )
+            );
             assert_eq!(
                 value["hooks"]["PreToolUse"][0]["matcher"],
                 provider.shell_matcher()
@@ -2037,6 +2208,65 @@ mod tests {
         .unwrap();
     }
 
+    fn pixel_command(verb: &str) -> Value {
+        json!({"hooks": [{"type": "command", "command": format!("'/p/pixel' {verb}")}]})
+    }
+
+    #[test]
+    fn devin_context_and_approval_probes_need_pixels_own_command() {
+        let exe = Path::new("/p/pixel");
+        let prompt = json!({"hooks": {"UserPromptSubmit": [pixel_command("run-hook prompt-submit --provider devin")]}});
+        let approval = json!({"hooks": {"PermissionRequest": [{"matcher": "exec", "hooks": [
+            {"type": "command", "command": "'/p/pixel' run-hook guard --provider devin"}
+        ]}]}});
+        assert!(has_pixel_prompt_context(&prompt, exe));
+        assert!(has_pixel_permission_approval(&approval, exe));
+
+        for empty in [json!({}), json!({"hooks": {}})] {
+            assert!(!has_pixel_prompt_context(&empty, exe), "{empty}");
+            assert!(!has_pixel_permission_approval(&empty, exe), "{empty}");
+        }
+        // Another verb of Pixel's own binary is not the prompt context.
+        let guard_only = json!({"hooks": {"UserPromptSubmit": [pixel_command("run-hook guard --provider devin")]}});
+        assert!(!has_pixel_prompt_context(&guard_only, exe));
+        // A foreign command carrying the same words is not Pixel's hook.
+        let foreign_prompt = json!({"hooks": {"UserPromptSubmit": [{"hooks": [{"type": "command", "command": "other run-hook prompt-submit --provider devin"}]}]}});
+        assert!(!has_pixel_prompt_context(&foreign_prompt, exe));
+        let foreign_approval = json!({"hooks": {"PermissionRequest": [{"matcher": "exec", "hooks": [{"type": "command", "command": "other run-hook guard --provider devin"}]}]}});
+        assert!(!has_pixel_permission_approval(&foreign_approval, exe));
+        // Only the exec matcher pre-approves a native shell call.
+        let read_matcher = json!({"hooks": {"PermissionRequest": [{"matcher": "read", "hooks": [{"type": "command", "command": "'/p/pixel' run-hook guard --provider devin"}]}]}});
+        assert!(!has_pixel_permission_approval(&read_matcher, exe));
+    }
+
+    #[test]
+    fn devin_install_verifies_only_an_untouched_triple_and_repairs_each_group() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        fs::create_dir_all(repo.join(".devin")).unwrap();
+        let config = repo.join(DEVIN_LOCAL_CONFIG);
+        let install = || install_project_devin_at(&repo, release(), false).unwrap();
+
+        assert!(install().summary.contains("configured"));
+        assert!(
+            install().summary.contains("verified"),
+            "an untouched reinstall verifies"
+        );
+        for event in ["PreToolUse", "UserPromptSubmit", "PermissionRequest"] {
+            let mut value: Value =
+                serde_json::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+            value["hooks"].as_object_mut().unwrap().remove(event);
+            fs::write(&config, serde_json::to_string(&value).unwrap()).unwrap();
+            let step = install();
+            assert!(
+                step.summary.contains("configured"),
+                "{event} removed: {}",
+                step.summary
+            );
+            assert!(install().summary.contains("verified"), "{event} restored");
+        }
+    }
+
     #[test]
     fn orphan_rtk_backup_should_name_a_backup_no_guard_delegates_to() {
         let home = tempfile::tempdir().unwrap();
@@ -2068,5 +2298,83 @@ mod tests {
         assert_eq!(orphan_rtk_backup(home.path(), release()), None);
         global_install(home.path(), false);
         assert!(home.path().join(RTK_BACKUP).is_file());
+    }
+
+    #[test]
+    fn zcode_install_adds_pixel_hooks_and_preserves_foreign_config() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(config::ZCODE_CONFIG_FILE);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            serde_json::to_vec(&json!({
+                "custom": {"keep": true},
+                "hooks": {
+                    "enabled": true,
+                    "events": {
+                        "PreToolUse": [{"matcher":"Write", "hooks":[{"command":"foreign"}]}]
+                    }
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let exe = Path::new("/tmp/pixel-dev");
+        let first = install_zcode_at(home.path(), exe, false).unwrap();
+        assert_eq!(first.status, install::CheckStatus::Green);
+        let installed = install::read_settings(&path).unwrap();
+        assert_eq!(installed["custom"]["keep"], true);
+        assert_eq!(
+            installed["hooks"]["events"]["PreToolUse"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            installed["hooks"]["events"]["PermissionRequest"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        install_zcode_at(home.path(), exe, false).unwrap();
+        let rerun = install::read_settings(&path).unwrap();
+        assert_eq!(
+            rerun["hooks"]["events"]["PreToolUse"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            rerun["hooks"]["events"]["PermissionRequest"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn zcode_install_preserves_an_existing_disabled_hooks_setting() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join(config::ZCODE_CONFIG_FILE);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"hooks":{"enabled":false}}"#).unwrap();
+
+        let step = install_zcode_at(home.path(), Path::new("/tmp/pixel-dev"), false).unwrap();
+        assert_eq!(step.status, install::CheckStatus::Yellow);
+        let installed = install::read_settings(&path).unwrap();
+        assert_eq!(installed["hooks"]["enabled"], false);
+        assert_eq!(
+            installed["hooks"]["events"]["PreToolUse"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

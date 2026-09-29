@@ -503,7 +503,10 @@ fn dot_paths(text: &str) -> BTreeSet<String> {
     text.split('`')
         .skip(1)
         .step_by(2)
-        .filter(|token| token.starts_with('.') && token.contains('/') && !token.contains(' '))
+        .filter(|token| {
+            (*token == "AGENTS.md")
+                || (token.starts_with('.') && token.contains('/') && !token.contains(' '))
+        })
         .map(str::to_string)
         .collect()
 }
@@ -538,11 +541,11 @@ fn install_repo_help_should_name_exactly_the_repo_install_files() {
 
 #[test]
 fn repo_paths_should_read_only_backticked_repo_prefixed_tokens() {
-    let text = "`<repo>/.a/b` and <repo>/.c/d, `.e/f`, `<repo>/.g/h`";
+    let text = "`<repo>/.a/b` and <repo>/.c/d, `.e/f`, `<repo>/.g/h`, `AGENTS.md`";
     let got: Vec<String> = repo_paths(text).into_iter().collect();
     assert_eq!(got, [".a/b", ".g/h"]);
     let got: Vec<String> = dot_paths(text).into_iter().collect();
-    assert_eq!(got, [".e/f"]);
+    assert_eq!(got, [".e/f", "AGENTS.md"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -641,6 +644,9 @@ fn claim_mismatch_should_match_files_and_whole_directories() {
 /// writing or moves fails here until `website/data/agents.toml` says so.
 #[test]
 fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
+    // Written only when `agy` is present and registers the plugin.
+    const CONDITIONAL: &[&str] = &[".gemini/config/import_manifest.json"];
+
     let home = crate::support::Scratch::for_test("docs-drift", "agents-global");
     for dir in [".config/opencode", ".gemini/config"] {
         std::fs::create_dir_all(home.join(dir)).unwrap();
@@ -667,11 +673,15 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
         })
         .collect();
     let (unclaimed, unmatched) = claim_mismatch(&claimed, &written);
+    let unwritten: Vec<_> = unmatched
+        .into_iter()
+        .filter(|p| !CONDITIONAL.contains(&p.as_str()))
+        .collect();
     assert!(
-        unclaimed.is_empty() && unmatched.is_empty(),
+        unclaimed.is_empty() && unwritten.is_empty(),
         "website/data/agents.toml disagrees with `pixel install`:\n\
          written but not listed: {unclaimed:?}\n\
-         listed but not written: {unmatched:?}"
+         listed but not written: {unwritten:?}"
     );
 }
 
@@ -682,7 +692,9 @@ fn agents_data_should_name_exactly_the_files_a_global_install_writes() {
 fn agents_data_should_name_exactly_the_files_a_repo_install_writes() {
     // Written only when the guard takes over an `rtk hook claude` group.
     const CONDITIONAL: &[&str] = &[".claude/pixel-rtk-hooks.json"];
-    let claimed = agents_field(&agents_data(), "repo");
+    let data = agents_data();
+    let mut claimed = agents_field(&data, "repo");
+    claimed.extend(string_list(data.get("repo_shared")));
     let listed: BTreeSet<String> = claimed.iter().cloned().collect();
     assert_eq!(
         listed.len(),
@@ -834,7 +846,9 @@ fn agents_data_checks_should_be_exactly_the_agent_checks_of_doctor() {
         "install.rtk-backup",
         "install.legacy-wrappers",
     ];
-    let named = agents_field(&agents_data(), "checks");
+    let data = agents_data();
+    let mut named = agents_field(&data, "checks");
+    named.extend(string_list(data.get("repo_shared_checks")));
     let named_set: BTreeSet<&str> = named.iter().map(String::as_str).collect();
     assert_eq!(
         named_set.len(),

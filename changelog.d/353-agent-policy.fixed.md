@@ -1,0 +1,1 @@
+**install:** Make retrieval policy advisory by default, configurable with `pixel config policy advisory|enforce|off` (environment `PIXEL_POLICY` still overrides it), preserve shell compositions, correct Codex and Antigravity hook contracts, and retain Pi edit results while adding automatic task context and post-edit impact. ([#353](https://github.com/LivioGama/pixel/pull/353))

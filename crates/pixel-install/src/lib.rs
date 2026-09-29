@@ -19,6 +19,7 @@ mod pi_project;
 mod repo_git;
 mod routing;
 pub mod uninstall;
+mod warp;
 
 /// Shared error type for the install/doctor/migrate surface.
 #[derive(Debug, Error)]

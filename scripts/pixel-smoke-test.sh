@@ -33,6 +33,7 @@ if [ -z "$PIXEL" ] || [ ! -x "$PIXEL" ]; then
     exit 2
 fi
 REPO="$ROOT"
+PIXEL_NAME="${PIXEL##*/}"
 DOCTOR_SHELL=""
 [ -n "${PIXEL_SHELL:-}" ] && DOCTOR_SHELL="--shell $PIXEL_SHELL"
 
@@ -162,7 +163,7 @@ done
 
 echo "=== 10. Mandatory workflows + release gate — help surface ==="
 for cmd in scope-task find-code plan-rollback sync-branch check-release self-update; do
-    "$PIXEL" "$cmd" --help 2>&1 | grep -q "Usage: pixel $cmd" && ok "$cmd --help" || no "$cmd --help" "no usage line"
+    "$PIXEL" "$cmd" --help 2>&1 | grep -F -q "Usage: $PIXEL_NAME $cmd" && ok "$cmd --help" || no "$cmd --help" "no usage line"
 done
 "$PIXEL" uninstall --help 2>&1 | grep -q -- "--wrappers-only" && ok "uninstall --wrappers-only documented" || no "uninstall --help" "no --wrappers-only"
 
@@ -197,10 +198,14 @@ OUT=$(PIXEL_METRICS=1 "$PIXEL" --metrics on impact run_command --json "$REPO" 2>
 if [ "$CODE" -eq 0 ] && [ -n "$(json_field "$OUT" "'json'")" ] && ! grep -q "^note: '" "$ERR"; then ok "impact answers with JSON and no rename note"
 else no "impact" "exit $CODE: $(printf '%s' "$OUT" | head -c 200)"; fi
 rm -f "$ERR"
-# PIXEL_METRICS=0 silences the note like the metrics line.
+# Alias teaching is independent of metrics reporting.
 ERR=$(mktemp)
 PIXEL_METRICS=0 "$PIXEL" symbol run_command --json "$REPO" >/dev/null 2>"$ERR"
-grep -q "^note: '" "$ERR" && no "PIXEL_METRICS=0" "rename note still printed" || ok "PIXEL_METRICS=0 silences the rename note"
+if grep -q "^note: 'symbol' is now 'find-symbol'; the old name stays accepted until 1.0$" "$ERR" && ! grep -q '🟩 Pixel' "$ERR"; then
+    ok "PIXEL_METRICS=0 preserves rename teaching without metrics"
+else
+    no "PIXEL_METRICS=0" "expected rename note without metrics reporting"
+fi
 rm -f "$ERR"
 
 echo ""

@@ -1,0 +1,1156 @@
+//! Provider policy contracts: advisory by default, explicit enforcement, native fallbacks.
+use crate::support::{Scratch, pixel_command};
+use serde_json::{Value, json};
+use std::io::Write;
+use std::path::Path;
+use std::process::Stdio;
+
+fn hook(args: &[&str], payload: &Value, envs: &[(&str, &str)]) -> Value {
+    let mut command = pixel_command();
+    command
+        .args(args)
+        .env_remove("PIXEL_POLICY")
+        .env_remove("PIXEL_TARGETS_GUARD")
+        .env_remove("RIPGREP_CONFIG_PATH")
+        .env_remove("GREP_OPTIONS")
+        .env("PIXEL_TEST", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let mut child = command.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.to_string().as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    if output.stdout.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
+}
+
+fn guard(provider: &str, payload: &Value, envs: &[(&str, &str)]) -> Value {
+    hook(
+        &["run-hook", "guard", "--provider", provider],
+        payload,
+        envs,
+    )
+}
+
+fn indexed_dir(tag: &str) -> Scratch {
+    let dir = Scratch::for_test("pixel-guard-policy", tag);
+    crate::support::git(&dir, &["init", "-q"]);
+    std::fs::create_dir_all(dir.join(".pixel")).unwrap();
+    // Policy enforcement requires a real index: a bare `.pixel` directory
+    // (e.g. one the action logger just created) must not enable denials.
+    std::fs::write(dir.join(".pixel/base.shard"), "").unwrap();
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::write(dir.join("src/lib.rs"), "fn needle() {}\n").unwrap();
+    dir
+}
+
+fn payload(tool: &str, input: Value, cwd: &Path) -> Value {
+    json!({"hook_event_name":"PreToolUse", "tool_name":tool, "tool_input":input, "cwd":cwd})
+}
+
+fn shell(command: &str, cwd: &Path) -> Value {
+    payload("shell", json!({"command":command}), cwd)
+}
+
+fn devin_exec(command: &str, cwd: &Path) -> Value {
+    payload("exec", json!({"command":command}), cwd)
+}
+
+fn devin_permission_request(command: &str, cwd: &Path) -> Value {
+    json!({
+        "hook_event_name":"PermissionRequest",
+        "tool_name":"exec",
+        "tool_input":{"command":command},
+        "cwd":cwd
+    })
+}
+
+fn zcode_permission_request(command: &str, cwd: &Path) -> Value {
+    json!({
+        "hook_event_name":"PermissionRequest",
+        "tool_name":"Bash",
+        "tool_input":{"command":command},
+        "cwd":cwd
+    })
+}
+
+fn denied(reason: &str) -> Value {
+    json!({"hookSpecificOutput":{"hookEventName":"PreToolUse", "permissionDecision":"deny",
+        "permissionDecisionReason":format!("pixel policy: {reason}")}})
+}
+
+#[test]
+fn policy_should_advise_without_permission_override_by_default_and_on_invalid_mode() {
+    let dir = indexed_dir("default");
+    for envs in [
+        vec![],
+        vec![("PIXEL_POLICY", "advisory")],
+        vec![("PIXEL_POLICY", "invalid")],
+    ] {
+        let note = "Pixel suggestion: repository inspection: use pixel repo-state. Original call proceeds.";
+        assert_eq!(
+            guard("codex", &shell("git status", &dir), &envs),
+            json!({"systemMessage":note, "hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":note}})
+        );
+    }
+    for (command, alternative) in [
+        ("git status", "repo-state"),
+        ("git diff", "review-changes"),
+        ("git log", "commit-history"),
+    ] {
+        assert_eq!(
+            guard(
+                "codex",
+                &shell(command, &dir),
+                &[("PIXEL_POLICY", "enforce")]
+            ),
+            denied(&format!("repository inspection: use pixel {alternative}"))
+        );
+    }
+}
+
+#[test]
+fn policy_files_should_enable_enforcement_while_the_environment_still_outranks_them() {
+    let home = Scratch::for_test("pixel-guard-policy", "config-home");
+    let repo = indexed_dir("config-repo");
+    let home = home.to_str().unwrap();
+    let global = global_config_under(home);
+    let note =
+        "Pixel suggestion: repository inspection: use pixel repo-state. Original call proceeds.";
+    let advisory = json!({"systemMessage":note, "hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":note}});
+    let status = shell("git status", &repo);
+    let with_home = |envs: Vec<(&str, &str)>| {
+        let mut all = vec![("HOME", home)];
+        all.extend(envs);
+        guard("codex", &status, &all)
+    };
+
+    // A global `enforce` reaches a repository that sets nothing.
+    std::fs::write(&global, "policy: enforce\n").unwrap();
+    assert_eq!(
+        with_home(vec![]),
+        denied("repository inspection: use pixel repo-state")
+    );
+
+    // The repository layer beats the global one, in both directions.
+    std::fs::write(repo.join(".pixel/config.yaml"), "policy: advisory\n").unwrap();
+    assert_eq!(with_home(vec![]), advisory);
+    std::fs::write(repo.join(".pixel/config.yaml"), "policy: enforce\n").unwrap();
+    std::fs::write(&global, "policy: advisory\n").unwrap();
+    assert_eq!(
+        with_home(vec![]),
+        denied("repository inspection: use pixel repo-state")
+    );
+
+    // `off` (quoted: a bare `off` is a YAML boolean) silences every decision,
+    // and the environment still outranks both files.
+    std::fs::write(repo.join(".pixel/config.yaml"), "policy: \"off\"\n").unwrap();
+    assert_eq!(with_home(vec![]), Value::Null);
+    assert_eq!(
+        with_home(vec![("PIXEL_POLICY", "enforce")]),
+        denied("repository inspection: use pixel repo-state")
+    );
+    std::fs::write(repo.join(".pixel/config.yaml"), "policy: enforce\n").unwrap();
+    assert_eq!(with_home(vec![("PIXEL_POLICY", "off")]), Value::Null);
+}
+
+/// The global configuration path under a test home.
+fn global_config_under(home: &str) -> std::path::PathBuf {
+    let dir = std::path::Path::new(home).join(".pixel");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("config.yaml")
+}
+
+#[test]
+fn off_and_legacy_switches_should_disable_pixel_rewrites_and_advice() {
+    let dir = indexed_dir("off");
+    for envs in [
+        vec![("PIXEL_POLICY", "off")],
+        vec![("PIXEL_POLICY", "enforce"), ("PIXEL_TARGETS_GUARD", "0")],
+        vec![("PIXEL_TARGETS_GUARD", "false")],
+        vec![("PIXEL_TARGETS_GUARD", "off")],
+    ] {
+        for command in ["git status", "grep -n needle src/lib.rs"] {
+            for provider in ["codex", "claude", "devin", "antigravity"] {
+                assert_eq!(
+                    guard(provider, &shell(command, &dir), &envs),
+                    Value::Null,
+                    "{provider}: {command}"
+                );
+            }
+        }
+    }
+    assert_eq!(
+        guard(
+            "codex",
+            &shell("git status", &dir),
+            &[("PIXEL_POLICY", "enforce"), ("PIXEL_TARGETS_GUARD", "1")]
+        ),
+        denied("repository inspection: use pixel repo-state")
+    );
+}
+
+#[test]
+fn ordinary_commands_filters_and_unknown_syntax_should_stay_native_in_enforce_mode() {
+    let dir = indexed_dir("native");
+    for command in [
+        "cargo test | tail -20",
+        "cargo test | rg error",
+        "cargo test | grep -n error",
+        "pixel repo-state --json | jq .branch",
+        "cargo test > output.log",
+        "rg needle . > matches.txt",
+        "echo $(rg needle .)",
+        "cargo test 2>&1 | rg error",
+        "cd src && cat lib.rs",
+        "command cd /tmp && cat src/lib.rs",
+        "builtin cd /tmp && cat src/lib.rs",
+        "head -n 200 src/lib.rs",
+        "sed -n '1,200p' src/lib.rs",
+        "node --check src/lib.rs",
+        "python3 -c pass",
+        "gh pr view 353",
+        "some-new-tool --query needle",
+        "git push origin main",
+        "git log --oneline",
+        "git -c core.pager=cat cat-file -p HEAD:src/lib.rs",
+        "cp /tmp/a /tmp/b",
+        "cp src/lib.rs",
+        "cp",
+        "cp -r",
+        "cat -n src/lib.rs",
+        "ls -x",
+        "ls src lib.rs",
+        "ls -la /tmp",
+        "find . -iname x",
+        "find . -type f",
+        "echo 'a; git status'",
+        "echo \"a; git status\"",
+        "echo 'a && git status'",
+        "grep -P needle src/lib.rs",
+        "grep -F needle #comment",
+        "env LC_ALL=C grep needle src/lib.rs",
+        "rtk grep needle src/lib.rs",
+        "echo 'oops",
+        "echo \\\"oops",
+        "git status &&",
+        "| git status",
+        "git status ; ; echo x",
+        "git status ;; echo x",
+        "pixel search-content 'a || b' --json",
+        "cargo test -- --nocapture 'a|b'",
+        "",
+        "cat -",
+        "find . -exec echo x",
+    ] {
+        assert_eq!(
+            guard(
+                "codex",
+                &shell(command, &dir),
+                &[("PIXEL_POLICY", "enforce")]
+            ),
+            Value::Null,
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn known_leaf_should_advise_or_deny_the_whole_composition_without_partial_rewrites() {
+    let dir = indexed_dir("leaves");
+    for command in [
+        "printf x; find . -name '*.rs'",
+        "echo x && ls",
+        "echo x || tree",
+        "echo x\ngit status",
+        "git -C src status",
+        "git -C . log",
+        "git --no-pager diff",
+        "git -c core.pager=cat log",
+        "cp src/lib.rs /tmp/x",
+        "cp src/lib.rs /dev/stdout",
+        "cp -r src /tmp/x",
+        "echo 'a|b' && git status",
+        "echo \"a;b\" ; git status",
+        "ls -l",
+        "ls -la",
+        "ls src",
+        "tree src",
+        "cargo test | rg needle src/lib.rs",
+        "cargo test | grep -n needle src/lib.rs",
+        "echo x & cat src/lib.rs",
+    ] {
+        let advisory = guard("codex", &shell(command, &dir), &[]);
+        let output = &advisory["hookSpecificOutput"];
+        assert!(
+            output["additionalContext"]
+                .as_str()
+                .unwrap()
+                .starts_with("Pixel suggestion: repository"),
+            "{command}: {advisory}"
+        );
+        assert!(output.get("permissionDecision").is_none());
+        assert!(output.get("updatedInput").is_none());
+        let enforced = guard(
+            "codex",
+            &shell(command, &dir),
+            &[("PIXEL_POLICY", "enforce")],
+        );
+        assert_eq!(
+            enforced["hookSpecificOutput"]["permissionDecision"], "deny",
+            "{command}: {enforced}"
+        );
+        assert!(enforced["hookSpecificOutput"].get("updatedInput").is_none());
+    }
+}
+
+#[test]
+fn unindexed_workdirs_outside_paths_and_symlinks_should_remain_native() {
+    let dir = indexed_dir("paths");
+    let outside = Scratch::for_test("pixel-guard-policy", "outside");
+    std::fs::write(outside.join("file.rs"), "outside\n").unwrap();
+    let journal = Scratch::for_test("pixel-guard-policy", "journal-ancestor");
+    std::fs::create_dir(journal.join(".pixel")).unwrap();
+    std::fs::write(journal.join(".pixel/actions.jsonl"), "").unwrap();
+    let unindexed_child = journal.join("unindexed");
+    std::fs::create_dir(&unindexed_child).unwrap();
+    for event in [
+        shell("git status", &outside),
+        shell("git status", &unindexed_child),
+        payload(
+            "shell",
+            json!({"command":"git status","workdir":outside.to_str()}),
+            &dir,
+        ),
+        shell(
+            &format!("cat '{}'", outside.join("file.rs").display()),
+            &dir,
+        ),
+        payload("read", json!({"path":outside.join("file.rs")}), &dir),
+        payload("read", json!({"path":"src/../../missing.rs"}), &dir),
+        payload("read", json!({"path":""}), &dir),
+        payload("read", json!({}), &dir),
+        payload(
+            "find_by_name",
+            json!({"SearchDirectory":outside.to_str()}),
+            &dir,
+        ),
+    ] {
+        for provider in ["codex", "antigravity"] {
+            assert_eq!(
+                guard(provider, &event, &[("PIXEL_POLICY", "enforce")]),
+                Value::Null,
+                "{provider}: {event}"
+            );
+        }
+    }
+    let inside = payload(
+        "shell",
+        json!({"command":"cat lib.rs","workdir":"src"}),
+        &dir,
+    );
+    assert_eq!(
+        guard("codex", &inside, &[("PIXEL_POLICY", "enforce")]),
+        denied("repository read: use pixel search-content or pixel pack-context <uid>")
+    );
+    std::os::unix::fs::symlink(outside.join("file.rs"), dir.join("src/outside.rs")).unwrap();
+    assert_eq!(
+        guard(
+            "codex",
+            &shell("cat src/outside.rs", &dir),
+            &[("PIXEL_POLICY", "enforce")]
+        ),
+        Value::Null
+    );
+    // The hook must not mint a `.pixel` directory in an unindexed repo: the
+    // action logger used to create it before the guard's index check ran,
+    // which then read as "indexed" and enabled denials.
+    let plain = Scratch::for_test("pixel-guard-policy", "plain");
+    crate::support::git(&plain, &["init", "-q"]);
+    assert_eq!(
+        guard(
+            "codex",
+            &shell("git status", &plain),
+            &[("PIXEL_POLICY", "enforce")]
+        ),
+        Value::Null
+    );
+    assert!(!plain.join(".pixel").exists());
+}
+
+#[test]
+fn direct_reads_should_check_inclusive_bounds_and_missing_bounds() {
+    let dir = indexed_dir("bounds");
+    for (bound, deny) in [
+        (json!({}), true),
+        (json!({"limit":1}), false),
+        (json!({"limit":200}), false),
+        (json!({"limit":201}), true),
+        (json!({"limit":0}), true),
+        (json!({"StartLine":1,"EndLine":200}), false),
+        (json!({"StartLine":5,"EndLine":204}), false),
+        (json!({"StartLine":1,"EndLine":201}), true),
+        (json!({"StartLine":2,"EndLine":1}), true),
+        (json!({"StartLine":0,"EndLine":100}), true),
+        (json!({"start_line":5,"end_line":5}), false),
+        (json!({"start_line":5}), true),
+        (json!({"end_line":5}), true),
+    ] {
+        for tool in ["read", "view_file", "notebook_read"] {
+            let mut input = bound.clone();
+            input["path"] = json!("src/lib.rs");
+            let response = guard(
+                "codex",
+                &payload(tool, input, &dir),
+                &[("PIXEL_POLICY", "enforce")],
+            );
+            assert_eq!(
+                response,
+                if deny {
+                    denied("repository read: use pixel search-content or pixel pack-context <uid>")
+                } else {
+                    Value::Null
+                },
+                "{tool}: {bound}"
+            );
+        }
+    }
+}
+
+#[test]
+fn antigravity_should_use_real_payload_and_documented_response_contract() {
+    let dir = indexed_dir("agy");
+    let outside = Scratch::for_test("pixel-guard-policy", "agy-outside");
+    for event in [
+        json!({"workspacePaths":[dir.to_str()],"toolCall":{"name":"run_command","args":{"CommandLine":"git status"}}}),
+        json!({"workspacePaths":[outside.to_str()],"toolCall":{"name":"run_command","args":{"CommandLine":"git status","Cwd":dir.to_str()}}}),
+    ] {
+        assert_eq!(guard("antigravity", &event, &[]), Value::Null);
+        assert_eq!(
+            guard("antigravity", &event, &[("PIXEL_POLICY", "enforce")]),
+            json!({"decision":"deny","reason":"pixel policy: repository inspection: use pixel repo-state"})
+        );
+    }
+    for (directory, expected) in [
+        (
+            dir.to_str().unwrap(),
+            json!({"decision":"deny","reason":"pixel policy: repository discovery: use pixel search-content, find-code, or list-areas"}),
+        ),
+        (outside.to_str().unwrap(), Value::Null),
+    ] {
+        let event = json!({"workspacePaths":[dir.to_str()],"toolCall":{"name":"find_by_name","args":{"SearchDirectory":directory,"Pattern":"*.rs"}}});
+        assert_eq!(
+            guard("antigravity", &event, &[("PIXEL_POLICY", "enforce")]),
+            expected
+        );
+    }
+    let event = json!({"workspacePaths":[dir.to_str()],"toolCall":{"name":"view_file","args":{"AbsolutePath":dir.join("src/lib.rs"),"StartLine":1,"EndLine":200}}});
+    assert_eq!(
+        guard("antigravity", &event, &[("PIXEL_POLICY", "enforce")]),
+        Value::Null
+    );
+}
+
+#[test]
+fn claude_should_preserve_native_permissions_in_every_mode() {
+    let dir = indexed_dir("native-claude");
+    for mode in ["advisory", "enforce", "off"] {
+        for event in [
+            shell("git status", &dir),
+            payload("grep_search", json!({"query":"needle"}), &dir),
+            payload("read", json!({"path":"src/lib.rs"}), &dir),
+        ] {
+            assert_eq!(
+                guard("claude", &event, &[("PIXEL_POLICY", mode)]),
+                Value::Null,
+                "{mode}"
+            );
+        }
+    }
+}
+
+/// Devin rewrites supported exec retrieval without blocking native tools by
+/// default; explicit enforce/off modes remain under the user's control.
+#[test]
+fn devin_should_rewrite_exec_and_allow_native_retrieval_by_default() {
+    let dir = indexed_dir("native-devin");
+    for (command, rewritten) in [
+        (
+            "rg -n needle src/lib.rs",
+            "pixel search-like-rg rg -- '-n' 'needle' 'src/lib.rs'",
+        ),
+        (
+            "grep -r needle src",
+            "pixel search-like-rg grep -- '-r' 'needle' 'src'",
+        ),
+        (
+            "rtk grep -r needle src",
+            "pixel search-like-rg grep -- '-r' 'needle' 'src'",
+        ),
+        (
+            "cat src/lib.rs",
+            "pixel search-content --limit 200 '.*' 'src/lib.rs'",
+        ),
+        (
+            "ls src",
+            "pixel search-content --files-with-matches '.*' 'src'",
+        ),
+        (
+            "find src -type f",
+            "pixel search-content --files-with-matches '.*' 'src'",
+        ),
+    ] {
+        assert_eq!(
+            guard("devin", &devin_exec(command, &dir), &[]),
+            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"command":rewritten}}}),
+            "{command}"
+        );
+    }
+    for event in [
+        payload("read", json!({"path":"src/lib.rs","limit":50}), &dir),
+        payload("grep", json!({"path":"src","pattern":"needle"}), &dir),
+        payload("glob", json!({"path":"src","pattern":"*.rs"}), &dir),
+    ] {
+        let response = guard("devin", &event, &[]);
+        assert!(
+            response.is_null(),
+            "native retrieval proceeds without a hook denial by default: {response}"
+        );
+    }
+    assert_eq!(
+        guard("devin", &devin_exec("git status", &dir), &[]),
+        Value::Null
+    );
+    assert_eq!(
+        guard(
+            "devin",
+            &devin_exec("rg needle src/lib.rs", &dir),
+            &[("PIXEL_POLICY", "advisory")]
+        ),
+        json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"command":"pixel search-like-rg rg -- 'needle' 'src/lib.rs'"}}})
+    );
+    for mode in ["advisory", "off"] {
+        for event in [
+            devin_exec("git status", &dir),
+            payload("read", json!({"path":"src/lib.rs"}), &dir),
+        ] {
+            assert_eq!(
+                guard("devin", &event, &[("PIXEL_POLICY", mode)]),
+                Value::Null,
+                "{mode}"
+            );
+        }
+    }
+    let envs = [("PIXEL_POLICY", "enforce")];
+    assert_eq!(
+        guard("devin", &devin_exec("git status", &dir), &envs),
+        json!({"decision":"block","reason":"pixel policy: repository inspection: use pixel repo-state"})
+    );
+    assert_eq!(
+        guard(
+            "devin",
+            &payload("read", json!({"path":"src/lib.rs"}), &dir),
+            &envs
+        ),
+        json!({"decision":"block","reason":"pixel policy: repository read: use exec with pixel search-content or pixel pack-context <uid>"})
+    );
+    assert_eq!(
+        guard(
+            "devin",
+            &payload("read", json!({"path":"src/lib.rs","limit":50}), &dir),
+            &envs
+        ),
+        json!({"decision":"block","reason":"pixel policy: repository read: use exec with pixel search-content or pixel pack-context <uid>"})
+    );
+    assert_eq!(
+        guard("devin", &devin_exec("cargo test", &dir), &envs),
+        Value::Null
+    );
+}
+
+#[test]
+fn devin_should_auto_approve_only_safe_pixel_retrieval_commands() {
+    let dir = indexed_dir("permission-request");
+    for command in [
+        "pixel search-like-rg grep -- '-r' 'needle' 'src'",
+        "pixel search-content -F needle src",
+        "pixel find-code 'authentication flow'",
+        "rtk pixel find-symbol Provider",
+        "/opt/homebrew/bin/pixel-dev who-calls Provider",
+        "pixel search-content -F 'permissionDecision|permission_response'",
+        "rtk pixel search-content -F 'permissionDecision' -g '*.rs'; rtk pixel search-content -F 'permission_response' -g '*.rs'",
+        "pixel search-content -F permissionDecision && echo --- && pixel search-content -F permission_response",
+        "pixel search-content permissionDecision; echo ---; rtk pixel search-content permission_response",
+        "pixel find-code hook && sed -n '920,960p' crates/pixel/src/guard.rs",
+        "pixel find-code hook; rtk sed -n '1,200p' crates/pixel/src/guard.rs",
+        "pixel search-content -F 'one;two'",
+        "pixel find-code \"decides the permission response for retrieval commands\" 2>&1 | head -40",
+        "rtk pixel search-content -F provider_rewrite | head -n 40",
+    ] {
+        assert_eq!(
+            guard("devin", &devin_permission_request(command, &dir), &[]),
+            json!({"decision":"approve"}),
+            "{command}"
+        );
+    }
+    for (command, envs) in [
+        ("pixel install --repo .", vec![]),
+        ("pixel self-update", vec![]),
+        ("pixel commit --files src/lib.rs -m change", vec![]),
+        ("pixel search-content needle src && rm -rf .", vec![]),
+        (
+            "pixel search-content needle src && echo $(touch marker)",
+            vec![],
+        ),
+        (
+            "pixel search-content needle src && echo separator > marker",
+            vec![],
+        ),
+        ("pixel search-content needle src || grep needle src", vec![]),
+        ("echo ---", vec![]),
+        ("sed -n '1,20p' crates/pixel/src/guard.rs", vec![]),
+        (
+            "pixel find-code hook && sed -n '1,201p' crates/pixel/src/guard.rs",
+            vec![],
+        ),
+        (
+            "pixel find-code hook && sed -n '1,20p' crates/pixel/src/guard.rs; rm marker",
+            vec![],
+        ),
+        ("pixel find-code concept; rm -rf .", vec![]),
+        ("pixel find-code concept; grep needle src", vec![]),
+        ("pixel find-code concept | head -1000", vec![]),
+        ("pixel find-code concept | head -20 | sort", vec![]),
+        ("pixel find-code concept | cat", vec![]),
+        ("grep -r needle src", vec![]),
+        ("pixel find-code concept", vec![("PIXEL_POLICY", "off")]),
+    ] {
+        assert_eq!(
+            guard("devin", &devin_permission_request(command, &dir), &envs),
+            Value::Null,
+            "must leave Devin's normal permission flow intact for {command}"
+        );
+    }
+}
+
+#[test]
+fn zcode_rewrites_and_approves_only_standalone_pixel_retrieval() {
+    let dir = indexed_dir("zcode-hook-contract");
+    assert_eq!(
+        guard(
+            "zcode",
+            &payload("Bash", json!({"command":"grep -r needle src"}), &dir),
+            &[]
+        ),
+        json!({"hookSpecificOutput":{
+            "hookEventName":"PreToolUse",
+            "updatedInput":{"command":"pixel search-like-rg grep -- '-r' 'needle' 'src'"},
+            "permissionDecision":"allow",
+            "permissionDecisionReason":"Pixel compatibility routing: single-file literal read only."
+        }})
+    );
+    for command in [
+        "pixel find-code 'authentication flow'",
+        "rtk pixel search-content -F Provider",
+    ] {
+        assert_eq!(
+            guard("zcode", &zcode_permission_request(command, &dir), &[]),
+            json!({"hookSpecificOutput":{
+                "hookEventName":"PermissionRequest",
+                "decision":{"behavior":"allow"}
+            }}),
+            "{command}"
+        );
+    }
+    for command in [
+        "pixel install --repo .",
+        "pixel search-content needle src && rm -rf .",
+        "grep -r needle src",
+    ] {
+        assert_eq!(
+            guard("zcode", &zcode_permission_request(command, &dir), &[]),
+            Value::Null,
+            "must preserve ZCode's normal prompt for {command}"
+        );
+    }
+}
+
+#[test]
+fn devin_prompt_submit_injects_pixel_first_guidance_without_blocking() {
+    let dir = indexed_dir("devin-prompt-context");
+    let response = hook(
+        &["run-hook", "prompt-submit", "--provider", "devin"],
+        &json!({
+            "hook_event_name":"UserPromptSubmit",
+            "prompt":"Find the caller of provider_rewrite and explain its behavior",
+            "cwd":dir.as_ref()
+        }),
+        &[],
+    );
+    let context = response["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("Devin prompt hook should inject Pixel guidance");
+    assert!(context.contains("Pixel-first retrieval"), "{context}");
+    assert!(
+        context.contains("before any repository search, file read, or other retrieval tool call"),
+        "{context}"
+    );
+    assert!(
+        context.contains("Make that the first tool action"),
+        "{context}"
+    );
+    assert!(context.contains("pixel search-content -F"), "{context}");
+    assert!(
+        context.contains("do not start with `ls`, `command -v`, `pixel status`, native grep/rg/glob/find, or a native file read"),
+        "{context}"
+    );
+    assert!(context.contains("non-blocking"), "{context}");
+    assert!(context.contains("never block the task"), "{context}");
+    assert!(!response.get("decision").is_some(), "{response}");
+}
+
+#[test]
+fn codex_exec_command_should_preserve_cmd_key_and_metadata_on_exact_rewrite() {
+    let dir = indexed_dir("cmd");
+    let event = payload(
+        "exec_command",
+        json!({"cmd":"grep -n needle lib.rs","workdir":"src","yield_time_ms":500,"extra":true}),
+        &dir,
+    );
+    let response = guard("codex", &event, &[]);
+    assert_eq!(
+        response["hookSpecificOutput"]["updatedInput"],
+        json!({"cmd":"pixel search-like-rg grep -- '-n' 'needle' 'lib.rs'","workdir":"src","yield_time_ms":500,"extra":true})
+    );
+    assert_eq!(
+        response["hookSpecificOutput"]["permissionDecision"],
+        "allow"
+    );
+    for key in ["env", "environment"] {
+        let mut event = event.clone();
+        event["tool_input"][key] = json!({"RIPGREP_CONFIG_PATH":"custom"});
+        assert_eq!(
+            guard("codex", &event, &[("PIXEL_POLICY", "enforce")]),
+            Value::Null
+        );
+    }
+}
+
+#[test]
+fn unsupported_events_should_never_receive_enforcement() {
+    let dir = indexed_dir("events");
+    for name in ["SessionStart", "PostToolUse", "Stop"] {
+        let mut event = shell("git status", &dir);
+        event["hook_event_name"] = json!(name);
+        assert_eq!(
+            guard("codex", &event, &[("PIXEL_POLICY", "enforce")]),
+            Value::Null
+        );
+    }
+}
+
+#[test]
+fn policy_off_should_preserve_adopted_claude_rtk_delegation() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = indexed_dir("rtk-off");
+    let bin = dir.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let script = bin.join("rtk");
+    std::fs::write(
+        &script,
+        "#!/bin/sh\n/bin/cat > \"$PIXEL_TEST_RTK_INPUT\"\nprintf '%s' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"additionalContext\":\"foreign RTK\"}}'\n",
+    ).unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let captured = dir.join("rtk-input.json");
+    let event = payload(
+        "Bash",
+        json!({"command":"grep needle src/lib.rs", "timeout_ms":1234}),
+        &dir,
+    );
+    let args = [
+        "run-hook",
+        "guard",
+        "--provider",
+        "claude",
+        "--delegate-rtk",
+    ];
+    let response = hook(
+        &args,
+        &event,
+        &[
+            ("PIXEL_POLICY", "off"),
+            ("PATH", bin.to_str().unwrap()),
+            ("PIXEL_TEST_RTK_INPUT", captured.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        response,
+        json!({"hookSpecificOutput":{"hookEventName":"PreToolUse", "additionalContext":"foreign RTK"}})
+    );
+    assert_eq!(
+        std::fs::read_to_string(&captured).unwrap(),
+        event.to_string()
+    );
+    let kill_capture = dir.join("legacy-kill.json");
+    assert_eq!(
+        hook(
+            &args,
+            &event,
+            &[
+                ("PIXEL_POLICY", "off"),
+                ("PIXEL_TARGETS_GUARD", "0"),
+                ("PATH", bin.to_str().unwrap()),
+                ("PIXEL_TEST_RTK_INPUT", kill_capture.to_str().unwrap()),
+            ]
+        ),
+        Value::Null
+    );
+    assert!(!kill_capture.exists());
+    assert_eq!(
+        hook(&["run-hook", "guard"], &event, &[("PIXEL_POLICY", "off")]),
+        Value::Null
+    );
+}
+
+fn composed(dir: &Path, commands: &[String], event: &Value, envs: &[(&str, &str)]) -> Value {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("foreign-hooks.json");
+    let hooks: Vec<_> = commands
+        .iter()
+        .map(|command| json!({"type":"command","command":command}))
+        .collect();
+    std::fs::write(&path,json!({"version":1,"provider":"codex","pre_tool_use":[{"matcher":"shell","hooks":hooks}],"managed_pre_tool_use":[]}).to_string()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    hook(
+        &[
+            "run-hook",
+            "composed-guard",
+            "--provider",
+            "codex",
+            "--backup",
+            path.to_str().unwrap(),
+        ],
+        event,
+        envs,
+    )
+}
+
+fn reply(value: &Value) -> String {
+    format!("printf '%s' '{value}'")
+}
+
+#[test]
+fn composed_off_should_preserve_foreign_context_and_denials() {
+    let dir = indexed_dir("composed-off");
+    let context = json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"foreign context"}});
+    for envs in [
+        vec![("PIXEL_POLICY", "off")],
+        vec![("PIXEL_POLICY", "enforce"), ("PIXEL_TARGETS_GUARD", "0")],
+    ] {
+        for command in ["git status", "grep -n needle src/lib.rs"] {
+            let response = composed(&dir, &[reply(&context)], &shell(command, &dir), &envs);
+            assert_eq!(
+                response["hookSpecificOutput"]["additionalContext"],
+                "foreign context"
+            );
+            assert!(
+                response["hookSpecificOutput"]
+                    .get("permissionDecision")
+                    .is_none()
+            );
+            assert!(response["hookSpecificOutput"].get("updatedInput").is_none());
+            assert_eq!(
+                composed(&dir, &[], &shell(command, &dir), &envs),
+                Value::Null
+            );
+        }
+        let denial = denied("foreign authority");
+        assert_eq!(
+            composed(
+                &dir,
+                &[reply(&denial)],
+                &shell("grep needle src/lib.rs", &dir),
+                &envs
+            ),
+            denial
+        );
+        let legacy = json!({"decision":"block","reason":"legacy authority"});
+        assert_eq!(
+            composed(
+                &dir,
+                &[reply(&legacy)],
+                &shell("grep needle src/lib.rs", &dir),
+                &envs
+            ),
+            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"legacy authority"}})
+        );
+        assert_eq!(
+            composed(
+                &dir,
+                &["printf 'shell authority' >&2; exit 2".into()],
+                &shell("grep needle src/lib.rs", &dir),
+                &envs
+            ),
+            json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"shell authority"}})
+        );
+    }
+}
+
+#[test]
+fn composed_policy_should_merge_guidance_and_preserve_any_foreign_denial() {
+    let dir = indexed_dir("composed-policy");
+    let context = json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"foreign context"}});
+    let response = composed(&dir, &[reply(&context)], &shell("git status", &dir), &[]);
+    assert_eq!(
+        response["hookSpecificOutput"]["additionalContext"],
+        "foreign context\nPixel suggestion: repository inspection: use pixel repo-state. Original call proceeds."
+    );
+    let allow =
+        json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"allow"}});
+    let deny = denied("foreign authority");
+    assert_eq!(
+        composed(
+            &dir,
+            &[reply(&allow), reply(&deny)],
+            &shell("grep needle src/lib.rs", &dir),
+            &[]
+        ),
+        deny
+    );
+    assert_eq!(
+        composed(
+            &dir,
+            &[],
+            &shell("git status", &dir),
+            &[("PIXEL_POLICY", "enforce")]
+        ),
+        denied("repository inspection: use pixel repo-state")
+    );
+    // A foreign allow is not authority over Pixel policy: enforce still
+    // denies a recognized retrieval call, while a call outside the policy
+    // returns the foreign allow untouched.
+    assert_eq!(
+        composed(
+            &dir,
+            &[reply(&allow)],
+            &shell("git status", &dir),
+            &[("PIXEL_POLICY", "enforce")]
+        ),
+        denied("repository inspection: use pixel repo-state")
+    );
+    assert_eq!(
+        composed(
+            &dir,
+            &[reply(&allow)],
+            &shell("cargo test", &dir),
+            &[("PIXEL_POLICY", "enforce")]
+        ),
+        allow
+    );
+    // Advisory mode never overrides a foreign allow.
+    assert_eq!(
+        composed(&dir, &[reply(&allow)], &shell("git status", &dir), &[]),
+        allow
+    );
+    // The top-level allow spelling is equally non-authoritative.
+    let top_allow =
+        json!({"hookSpecificOutput":{"hookEventName":"PreToolUse"},"permissionDecision":"allow"});
+    assert_eq!(
+        composed(
+            &dir,
+            &[reply(&top_allow)],
+            &shell("git status", &dir),
+            &[("PIXEL_POLICY", "enforce")]
+        ),
+        denied("repository inspection: use pixel repo-state")
+    );
+    // An input mutation is not an allow: it stays authoritative under enforce.
+    let updated = json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"command":"echo x"}}});
+    assert_eq!(
+        composed(
+            &dir,
+            &[reply(&updated)],
+            &shell("git status", &dir),
+            &[("PIXEL_POLICY", "enforce")]
+        ),
+        updated
+    );
+    assert_eq!(
+        composed(&dir, &[], &shell("cargo test", &dir), &[]),
+        Value::Null
+    );
+}
+
+#[test]
+fn antigravity_pre_invocation_should_inject_pixel_matches_without_denial() {
+    let dir = Scratch::for_test("pixel-guard-policy", "agy-injection");
+    crate::support::git(&dir, &["init", "-q"]);
+    std::fs::write(
+        dir.join("PROJECT_NOTES.md"),
+        "Fixture notes. Identifier: AGY-PIXEL-7319. It labels a private test parcel.\n",
+    )
+    .unwrap();
+    let indexed = pixel_command()
+        .args(["build-index", "."])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(indexed.status.success(), "{indexed:?}");
+
+    let transcript = Scratch::for_test("pixel-guard-policy", "agy-transcript");
+    let transcript_path = transcript.join("transcript.jsonl");
+    std::fs::write(
+        &transcript_path,
+        serde_json::json!({
+            "source": "USER_EXPLICIT",
+            "type": "USER_INPUT",
+            "content": "<USER_REQUEST>Find the private test parcel identifier in project notes and describe it.</USER_REQUEST>"
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let payload = json!({
+        "invocationNum": 0,
+        "transcriptPath": transcript_path,
+        "workspacePaths": [dir.to_str().unwrap()],
+    });
+
+    let response = guard("antigravity", &payload, &[]);
+    let message = response["injectSteps"][0]["ephemeralMessage"]
+        .as_str()
+        .expect("retrieval output reaches the model as an ephemeral message");
+    assert_eq!(
+        response,
+        json!({"injectSteps": [{"ephemeralMessage": message}]})
+    );
+    assert!(
+        message.contains(
+            "search-content --metrics off --no-daemon --scope code --limit 20 --context 0"
+        )
+    );
+    assert!(message.contains(dir.to_str().unwrap()), "{message}");
+    assert!(
+        message.contains("PROJECT_NOTES.md:1:Fixture notes. Identifier: AGY-PIXEL-7319. It labels a private test parcel."),
+        "{message}"
+    );
+    let searches = antigravity_search_events(&dir);
+    assert_eq!(searches.len(), 1, "{searches:?}");
+    assert_eq!(searches[0]["outcome"], "ok");
+    assert_eq!(
+        searches[0]["cwd"],
+        dir.canonicalize().unwrap().to_str().unwrap()
+    );
+    assert!(searches[0]["args"].as_str().unwrap().contains("parcel"));
+
+    let mut later = payload.clone();
+    later["invocationNum"] = json!(1);
+    assert_eq!(guard("antigravity", &later, &[]), Value::Null);
+    assert_eq!(antigravity_search_events(&dir), searches);
+}
+
+fn antigravity_search_events(root: &Path) -> Vec<Value> {
+    std::fs::read_to_string(root.join(".pixel/actions.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|event| event["command"] == "search-content")
+        .collect()
+}
+
+#[test]
+fn antigravity_pre_invocation_should_skip_unusable_requests_without_retrieval() {
+    let dir = Scratch::for_test("pixel-guard-policy", "agy-invalid-request");
+    crate::support::git(&dir, &["init", "-q"]);
+    std::fs::write(dir.join("notes.md"), "parcel identifier AGY-PIXEL-7319\n").unwrap();
+    let indexed = pixel_command()
+        .args(["build-index", "."])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(indexed.status.success(), "{indexed:?}");
+    let transcripts = Scratch::for_test("pixel-guard-policy", "agy-invalid-transcript");
+    let path = transcripts.join("transcript.jsonl");
+    let payload = json!({
+        "invocationNum": 0,
+        "transcriptPath": path,
+        "workspacePaths": [dir.to_str().unwrap()],
+    });
+    assert_eq!(guard("antigravity", &payload, &[]), Value::Null);
+    for transcript in [
+        "not valid JSON".to_owned(),
+        json!({"source":"USER_EXPLICIT","content":false}).to_string(),
+        json!({"source":"MODEL","content":"parcel identifier"}).to_string(),
+        json!({"source":"USER_EXPLICIT","content":"Can you do this?"}).to_string(),
+    ] {
+        std::fs::write(&path, &transcript).unwrap();
+        assert_eq!(
+            guard("antigravity", &payload, &[]),
+            Value::Null,
+            "{transcript}"
+        );
+        assert_eq!(antigravity_search_events(&dir), Vec::<Value>::new());
+    }
+    std::fs::write(
+        &path,
+        json!({"source":"USER_EXPLICIT","content":"parcel identifier"}).to_string(),
+    )
+    .unwrap();
+    for field in ["invocationNum", "transcriptPath", "workspacePaths"] {
+        let mut missing = payload.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert_eq!(guard("antigravity", &missing, &[]), Value::Null, "{field}");
+        assert_eq!(antigravity_search_events(&dir), Vec::<Value>::new());
+    }
+}
+
+#[test]
+fn antigravity_pre_invocation_should_fail_open_when_retrieval_cannot_return_matches() {
+    let dir = Scratch::for_test("pixel-guard-policy", "agy-unavailable-search");
+    crate::support::git(&dir, &["init", "-q"]);
+    std::fs::write(dir.join("notes.md"), "an unrelated sentence\n").unwrap();
+    let transcripts = Scratch::for_test("pixel-guard-policy", "agy-no-match-transcript");
+    let path = transcripts.join("transcript.jsonl");
+    std::fs::write(
+        &path,
+        json!({"source":"USER_EXPLICIT","content":"parcel identifier"}).to_string(),
+    )
+    .unwrap();
+    let payload = json!({
+        "invocationNum": 0,
+        "transcriptPath": path,
+        "workspacePaths": [dir.to_str().unwrap()],
+    });
+    assert_eq!(guard("antigravity", &payload, &[]), Value::Null);
+    assert_eq!(antigravity_search_events(&dir), Vec::<Value>::new());
+    std::fs::create_dir_all(dir.join(".pixel")).unwrap();
+    assert_eq!(guard("antigravity", &payload, &[]), Value::Null);
+
+    let indexed = pixel_command()
+        .args(["build-index", "."])
+        .current_dir(&dir)
+        .output()
+        .unwrap();
+    assert!(indexed.status.success(), "{indexed:?}");
+    let before = antigravity_search_events(&dir).len();
+    assert_eq!(guard("antigravity", &payload, &[]), Value::Null);
+    let searches = antigravity_search_events(&dir);
+    assert_eq!(searches.len(), before + 1);
+    assert_eq!(searches.last().unwrap()["outcome"], "ok");
+
+    std::fs::write(dir.join(".pixel/base.shard"), "invalid index bytes").unwrap();
+    assert_eq!(guard("antigravity", &payload, &[]), Value::Null);
+}

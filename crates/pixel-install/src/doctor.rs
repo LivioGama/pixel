@@ -95,6 +95,8 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("repo.codex-config", FIX_REPO_INSTALL),
     entry("repo.codex-hooks", FIX_REPO_INSTALL),
     entry("repo.devin-hooks", FIX_REPO_INSTALL),
+    entry("repo.warp-mcp", FIX_REPO_INSTALL),
+    entry("repo.pixel-first", FIX_REPO_INSTALL),
     entry("repo.claude-hooks", FIX_REPO_INSTALL),
     entry("repo.pi-guard", FIX_REPO_INSTALL),
     entry("daemon.health", Some("pixel daemon start {root}")),
@@ -824,13 +826,84 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     path.display()
                 ));
             }
+            if !crate::routing::has_pixel_prompt_context(&value, &exe) {
+                return Err(format!(
+                    "Pixel Devin guard in {} has no non-blocking UserPromptSubmit context hook — run `pixel install --repo`",
+                    path.display()
+                ));
+            }
+            if !crate::routing::has_pixel_permission_approval(&value, &exe) {
+                return Err(format!(
+                    "Pixel Devin guard in {} has no narrow PermissionRequest approval hook — run `pixel install --repo`",
+                    path.display()
+                ));
+            }
             Ok((
                 CheckStatus::Green,
                 DoctorCheckDetail {
-                    summary: format!("devin guard registered in {}", path.display()),
+                    summary: format!(
+                        "devin Pixel rewrite, no-prompt retrieval approval, and prompt-context hooks registered in {}",
+                        path.display()
+                    ),
                     detail: Some(serde_json::json!({ "path": path.display().to_string() })),
                 },
             ))
+        });
+
+        runner.check_status("repo.warp-mcp", || {
+            let path = root.join(crate::warp::CONFIG_FILE);
+            match crate::warp::check(root, &exe).map_err(|e| e.to_string())? {
+                None => Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary: "no Pixel Warp MCP server configured".into(),
+                        detail: None,
+                    },
+                )),
+                Some(true) => Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary: format!(
+                            "Pixel retrieval MCP configured in {} (Warp requires project trust approval)",
+                            path.display()
+                        ),
+                        detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                    },
+                )),
+                Some(false) => Err(format!(
+                    "Pixel MCP entry in {} is stale or incomplete — run `pixel install --repo {}`",
+                    path.display(),
+                    crate::routing::quoted_executable(root)
+                )),
+            }
+        });
+
+        runner.check_status("repo.pixel-first", || {
+            let path = root.join("AGENTS.md");
+            match crate::warp::check_rules(root).map_err(|e| e.to_string())? {
+                None => Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary: "no Pixel-first project rule configured".into(),
+                        detail: None,
+                    },
+                )),
+                Some(true) => Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary: format!(
+                            "Pixel-first retrieval rule configured in {}",
+                            path.display()
+                        ),
+                        detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+                    },
+                )),
+                Some(false) => Err(format!(
+                    "Pixel-first rule in {} is stale — run `pixel install --repo {}`",
+                    path.display(),
+                    crate::routing::quoted_executable(root)
+                )),
+            }
         });
 
         runner.check_status("repo.claude-hooks", || {

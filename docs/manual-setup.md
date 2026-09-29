@@ -172,14 +172,73 @@ Pi reads `~/.pi/agent/APPEND_SYSTEM.md` automatically — no flag needed:
 
 ```bash
 mkdir -p ~/.pi/agent
-printf '%s\n' 'Use the pixel tool for repository retrieval and repository Git workflows. Request the outcome through a stable action and goal. Native repository discovery is guarded.' >> ~/.pi/agent/APPEND_SYSTEM.md
+printf '%s\n' 'Use the pixel tool for repository retrieval and repository Git workflows. Request the outcome through a stable action and goal. Pixel guidance is advisory by default.' >> ~/.pi/agent/APPEND_SYSTEM.md
 pixel install --repo .
 ```
 
 The repository install writes `.pi/extensions/pixel-guard.ts`, which Pi loads
 after the project is trusted. The extension registers the structured `pixel`
-tool and enforces the [Pi policy](pi-rms.md) at `tool_call` time. Copying the
-short prompt alone does not install that boundary.
+tool and applies the [Pi policy](pi-harness.md) at `tool_call` time. Copying the
+short prompt alone does not install the extension.
+
+Warp reads project MCP servers from `.warp/.mcp.json`. `pixel install --repo .`
+adds Pixel's read-only retrieval tools there, alongside any other configured
+servers. Warp requires explicitly trusting and starting project-scoped MCP
+servers; Pixel does not bypass that approval. Its server instructions steer
+repository discovery through Pixel, while native tools remain available for
+focused follow-up and when the index is unavailable.
+
+The same command also adds a Pixel-managed block to the repository-root
+`AGENTS.md`. It tells agents to try Pixel first for repository retrieval, but
+does not block native tools: if Pixel is unavailable, the repository is not
+indexed, or Pixel cannot answer, the agent can continue with native search or
+file reading. Existing text before and after the managed block is preserved.
+
+### Antigravity CLI (agy)
+
+In an indexed workspace, Pixel's `PreInvocation` hook extracts search terms
+from the initial user request, runs `pixel search-content` itself, and sends
+the actual matches to the same model invocation as an `ephemeralMessage`.
+The search runs before the model can call native retrieval tools. It is
+limited to 20 matching lines, 64 KiB of output and five seconds. Missing
+request terms, unavailable indexes, failed searches and empty results leave
+native retrieval available without a hook error or denial.
+
+AGY 1.2.13 documents `toolCall` injection but rejects Pixel's injected
+`run_command` with `unknown injected step type: <nil>`. Pixel therefore uses
+the [documented string-message response](https://antigravity.google/docs/hooks?tab=ide)
+to deliver a search that has already executed. Plugin installation or injected
+instructions alone do not prove retrieval: verify a fresh session's hook
+output and tool order. `pixel doctor` checks the `PreInvocation` registration
+in the global hooks and both installed plugin copies.
+
+### Optional retrieval enforcement
+
+Pixel's retrieval policy defaults to advice. Run `pixel config policy enforce`
+to opt into supported repository retrieval restrictions in Codex,
+Antigravity, Pi, or Devin — the repository file by default, the machine-wide
+`~/.pixel/config.yaml` with `--global` — or set `PIXEL_POLICY=enforce` in the
+environment that launches the agent to override every file layer.
+`pixel config policy` reports the effective value and the layer that set it.
+Devin's installed project hook keeps supported `exec` rewrites enabled by
+default, while native `read`, `grep` and `glob` calls proceed without a hook
+denial. The hook cannot silently turn a native tool call into `exec`; use the
+injected Pixel workflow instructions to steer retrieval, or enforce the policy
+if visible denials are acceptable. The simple `cat`, `ls` and `find` forms
+Pixel can map are rewritten too; larger reads and unsupported syntax are not
+guessed. Use `pixel config policy off` to disable policy decisions and
+rewrites. The existing `PIXEL_TARGETS_GUARD=0` (also `false` or `off`) remains
+an opt-out. Restart Devin after changing its environment.
+
+Claude retains its native permission flow and supported compatible rewrites.
+Codex and Antigravity use their own hook response contracts; a Pixel
+recommendation does not grant host permissions. Composed Codex hooks still
+honour foreign hook decisions even when Pixel's policy is off.
+
+Shell syntax the policy cannot interpret reliably falls back to the original
+command, including its complete pipeline or sequence. Enforcement is a
+workflow preference, not a security sandbox. Pi's automatic context and
+post-edit feedback operate independently of the policy mode.
 
 ### Any other agent
 

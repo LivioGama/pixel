@@ -37,6 +37,15 @@ const MAX_SESSION_AGE_MS: i64 = 4 * 3600 * 1000;
 const HOOK_DEADLINE: Duration = Duration::from_millis(750);
 const TASK_CONTEXT_BYTES: usize = 4096;
 const TASK_TARGET_LIMIT: usize = 8;
+const DEVIN_PIXEL_GUIDANCE: &str = concat!(
+    "Pixel-first retrieval (non-blocking): before any repository search, file read, or other retrieval tool call, use Pixel first. ",
+    "For a known identifier or call-site request, run `pixel search-content -F '<identifier>'`; for behavior, run `pixel find-code '<concept>'`. ",
+    "Make that the first tool action: do not start with `ls`, `command -v`, `pixel status`, native grep/rg/glob/find, or a native file read. ",
+    "Do not merely mention Pixel or answer from another retrieval tool before calling it. ",
+    "Supported shell grep/rg/cat/ls/find retrieval is silently rewritten to Pixel; use its result. ",
+    "Native retrieval remains available for bounded follow-up and unsupported or out-of-index files after the Pixel attempt. ",
+    "If Pixel or the index is unavailable, continue normally with native tools; never block the task."
+);
 
 /// Commands in actions.jsonl that signal task completion, under their current
 /// names. Entries logged before the command rename (`publish`, `ship`) are
@@ -79,10 +88,12 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         std::process::exit(0);
     }
 
-    let cwd = payload.cwd.as_deref().map_or_else(
-        || std::env::current_dir().unwrap_or_default(),
-        PathBuf::from,
-    );
+    let cwd = payload
+        .cwd
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("DEVIN_PROJECT_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
     let root = crate::discover_root(&cwd).ok();
     let task_context =
@@ -134,11 +145,14 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     }
     drop(tx);
     let notes = collect_notes(rx, deadline);
-    let context = if is_claude_runtime {
+    let mut context = if is_claude_runtime {
         render_claude_runtime(&payload, &cwd, notes.targets, notes.boundary.as_ref())
     } else {
         render_legacy_context(notes.targets, notes.boundary.as_ref())
     };
+    if matches!(provider, Some(crate::guard::Provider::Devin)) {
+        context = render_devin_context(&context);
+    }
     if !context.is_empty() {
         emit_context(&context, event_name);
     }
@@ -361,6 +375,14 @@ fn render_legacy_context(targets: Option<Value>, boundary: Option<&BoundaryEvent
         notes.push(boundary_note(boundary));
     }
     notes.join("\n\n")
+}
+
+fn render_devin_context(context: &str) -> String {
+    if context.is_empty() {
+        DEVIN_PIXEL_GUIDANCE.to_string()
+    } else {
+        format!("{DEVIN_PIXEL_GUIDANCE}\n\n{context}")
+    }
 }
 
 fn render_claude_runtime(
@@ -787,6 +809,20 @@ mod tests {
         }
     }
     use super::*;
+
+    #[test]
+    fn devin_context_requires_pixel_before_retrieval_and_keeps_fallback_open() {
+        let context = render_devin_context("task targets");
+
+        assert!(context.starts_with("Pixel-first retrieval"));
+        assert!(context.contains("before any repository search, file read"));
+        assert!(context.contains("do not start with `ls`, `command -v`, `pixel status`"));
+        assert!(
+            context.contains("Do not merely mention Pixel or answer from another retrieval tool")
+        );
+        assert!(context.contains("If Pixel or the index is unavailable, continue normally with native tools; never block the task."));
+        assert!(context.ends_with("task targets"));
+    }
     use std::process::Command;
 
     #[test]

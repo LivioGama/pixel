@@ -101,9 +101,91 @@ jobs:
   scope:
     uses: ./.github/workflows/release-prepare-scope.yml
 
+  # Which files a pull request touched, so a commit that cannot affect a
+  # step does not pay for it. `cargo` covers the compiled suite AND every
+  # file its tests read (the docs-drift, install and plugin-surface inputs
+  # re-included in the paths filter above); `scripts` covers the Python
+  # and Bun contract tests' inputs; `deps` covers the graph cargo-deny
+  # resolves. A push to main reports all three so every merge keeps the
+  # complete run the concurrency comment promises. Both lists err toward
+  # inclusion: a false negative skips a needed check, a false positive
+  # only costs a minute.
+  changes:
+    outputs:
+      cargo: ${{ steps.diff.outputs.cargo }}
+      scripts: ${{ steps.diff.outputs.scripts }}
+      deps: ${{ steps.diff.outputs.deps }}
+    runs-on: ubuntu-26.04
+    steps:
+      # Full history so the merge base with the target branch is available.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Classify the diff
+        id: diff
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            printf 'cargo=true\nscripts=true\ndeps=true\n' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
+
+          # Everything that compiles Rust or that a compiled test asserts
+          # on: crates, the workspace manifest and cargo config, the files
+          # docs_drift.rs compares command-for-command, the plugin surfaces
+          # install_tests.rs regenerates, and the scripts those tests run.
+          cat > cargo.re <<'EOF'
+          ^crates/
+          ^Cargo\.(toml|lock)$
+          ^\.cargo/
+          ^\.config/
+          ^deny\.toml$
+          ^rust-toolchain
+          ^(README|ARCHITECTURE|CONTRIBUTING|AGENTS|CHANGELOG|PIXEL|PIXEL-SUBAGENT)\.md$
+          ^docs/manual-setup\.md$
+          ^website/
+          ^\.agents/(rules|skills/(rust-guidelines|release|pixel))/
+          ^skills/
+          ^\.(openclaw|clinerules|kiro|qoder|windsurf)/
+          ^scripts/gen-plugin-assets\.sh$
+          EOF
+
+          # The contract tests' own inputs: their scripts, the fixtures and
+          # shells they exercise, the workflows verify-action-pins parses,
+          # the fragments test-prepare validates, prepare.sh under the
+          # release skill, and the pi extension test-pi-policy.mjs imports.
+          cat > scripts.re <<'EOF'
+          ^scripts/
+          ^changelog\.d/
+          ^\.github/workflows/
+          ^\.agents/skills/release/
+          ^\.cargo/mutants\.toml$
+          (^|/)Cargo\.toml$
+          ^crates/pixel-install/assets/pi-pixel\.ts$
+          EOF
+
+          # Only the dependency graph feeds cargo-deny.
+          cat > deps.re <<'EOF'
+          (^|/)Cargo\.toml$
+          ^Cargo\.lock$
+          ^deny\.toml$
+          EOF
+
+          flag() { grep -Eqf "$1" changed.txt && echo true || echo false; }
+          {
+            echo "cargo=$(flag cargo.re)"
+            echo "scripts=$(flag scripts.re)"
+            echo "deps=$(flag deps.re)"
+          } >> "$GITHUB_OUTPUT"
+          cat changed.txt
+
   test:
     name: Test + Format
-    needs: scope
+    needs: [scope, changes]
     if: needs.scope.outputs.release-prepare != 'true'
     runs-on: ubuntu-26.04
     steps:
@@ -116,9 +198,11 @@ jobs:
       # would run unreviewed code next to the tap token and the signing
       # identity. Contract in scripts/test-verify-action-pins.py below.
       - name: Action pins (every uses on a full commit SHA)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/verify-action-pins.py
 
       - name: Install Rust toolchain
+        if: ${{ needs.changes.outputs.cargo == 'true' }}
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           # The SHA pin no longer names the toolchain through the ref, so
@@ -127,6 +211,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Cache Rust build
+        if: ${{ needs.changes.outputs.cargo == 'true' }}
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           # One key for every job that builds the debug profile on Linux
@@ -142,15 +227,18 @@ jobs:
           cache-on-failure: true
 
       - name: Install system dependencies
+        if: ${{ needs.changes.outputs.cargo == 'true' }}
         run: |
           sudo apt-get update
           sudo apt-get install -y perl make
 
       - name: Check formatting
+        if: ${{ needs.changes.outputs.cargo == 'true' }}
         run: cargo fmt --all -- --check
 
       # Prebuilt binary; the profile lives in .config/nextest.toml.
       - name: Install cargo-nextest
+        if: ${{ needs.changes.outputs.cargo == 'true' }}
         uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
         with:
           tool: cargo-nextest
@@ -160,10 +248,12 @@ jobs:
       # nextest runs one process per test, retries once and still fails the
       # run on a flaky result, and kills a test that hangs past 3 minutes.
       - name: Test
+        if: ${{ needs.changes.outputs.cargo == 'true' }}
         run: cargo nextest run --workspace --locked --profile ci
 
       # nextest does not run doctests.
       - name: Doctests
+        if: ${{ needs.changes.outputs.cargo == 'true' }}
         run: cargo test --workspace --locked --doc
 
       # Nothing runs pixel in this checkout before the tests, so any action
@@ -171,6 +261,7 @@ jobs:
       # working directory (`crates/<crate>`) instead of a fixture. The CLI
       # suite's `support::pixel_command()` starts every run elsewhere.
       - name: Tests left the checkout's action log alone
+        if: ${{ needs.changes.outputs.cargo == 'true' }}
         run: |
           if [ -e .pixel/actions.jsonl ]; then
             echo "::error::the test suite wrote $(wc -l < .pixel/actions.jsonl) entries into this checkout's .pixel/actions.jsonl"
@@ -188,24 +279,31 @@ jobs:
       # request -- search latency is a perf fix of its own, not a CI-hygiene
       # one.
       - name: Ranking gates (NDCG@10, bench test mode)
+        if: ${{ needs.changes.outputs.cargo == 'true' }}
         run: cargo bench -p pixel-bench --bench ndcg_relevance --locked -- --test
 
       - name: Installer contracts (isolated release substitutes)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-install.py
 
       - name: Local gate runner contract (stub cargo, disposable repo)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-gates.py
 
       - name: Release prepare contract (stub gh and cargo, disposable repo)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-prepare.py
 
       - name: Release-prepare skip contract (disposable repo)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-release-prepare-only.py
 
       - name: Mutation gate config contract (no module silently excluded)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-mutants-config.py
 
       - name: Action pin check contract (tags, short SHAs, unparsed forms refused)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-verify-action-pins.py
 
       # clean.sh removes whole directories. The cases that matter are the ones
@@ -213,30 +311,33 @@ jobs:
       # symlink, the index under `just clean`, the daemon sockets beside the
       # shard cache.
       - name: Clean contract (disposable repo with a second worktree)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-clean.py
 
       - name: Warnings-denied Clippy
+        if: ${{ needs.changes.outputs.cargo == 'true' }}
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Supported CLI feature lanes
+        if: ${{ needs.changes.outputs.cargo == 'true' }}
         run: |
           cargo check -p pixel-cli --no-default-features
           cargo check -p pixel-cli --no-default-features --features model2vec
 
       - name: Install Bun
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: |
           curl -fsSL https://bun.sh/install | bash
           echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
 
-      # The Pi extension guard ships as an install asset; its policy test was
-      # only runnable by hand. Bun handles the .ts import natively.
-      - name: Pi guard policy contract (pi-pixel.ts)
+      - name: Pi extension policy and event contracts
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: bun scripts/test-pi-policy.mjs
 
   msrv:
     name: MSRV (rust-version in Cargo.toml)
-    needs: scope
-    if: needs.scope.outputs.release-prepare != 'true'
+    needs: [scope, changes]
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true'
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -277,8 +378,8 @@ jobs:
 
   deny:
     name: Dependency policy (cargo-deny)
-    needs: scope
-    if: needs.scope.outputs.release-prepare != 'true'
+    needs: [scope, changes]
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.deps == 'true'
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
