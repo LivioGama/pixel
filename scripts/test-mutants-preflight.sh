@@ -13,10 +13,20 @@ cp "$repo/scripts/mutants-preflight.sh" "$fixture/scripts/"
 cat > "$tmp/bin/cargo" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "$CARGO_LOG"
-if [ "${CARGO_FAIL:-0}" = 1 ]; then
-    echo "fake cargo failure" >&2
-    exit 7
-fi
+case "$*" in
+    "mutants --list"*)
+        if [ "${CARGO_FAIL:-0}" = 1 ]; then
+            echo "fake cargo failure" >&2
+            exit 7
+        fi
+        ;;
+    *)
+        if [ "${CARGO_RUN_FAIL:-0}" = 1 ]; then
+            echo "fake cargo run failure" >&2
+            exit 5
+        fi
+        ;;
+esac
 printf '%b' "${CARGO_LISTING:-}"
 EOF
 chmod +x "$tmp/bin/cargo"
@@ -84,5 +94,24 @@ if (cd "$fixture" && CARGO_FAIL=1 run --check > "$tmp/cargo-failure.out" 2>&1); 
     exit 1
 fi
 grep -q 'cargo mutants --list failed' "$tmp/cargo-failure.out"
+
+: > "$tmp/cargo.log"
+(cd "$fixture" && run --run > "$tmp/run.out")
+grep -q 'local run caught every listed mutant' "$tmp/run.out"
+grep -q '^mutants -vV --no-shuffle --in-place --in-diff ' "$tmp/cargo.log"
+grep -q -- '-- --all-targets' "$tmp/cargo.log"
+
+: > "$tmp/cargo.log"
+(cd "$fixture" && run --run 'changed|other' > "$tmp/run-filter.out")
+grep -q -- "-F 'changed|other'\|-F changed|other" "$tmp/cargo.log" \
+    || grep -q 'F.*changed|other' "$tmp/cargo.log"
+
+if (cd "$fixture" && CARGO_RUN_FAIL=1 run --run > "$tmp/run-fail.out" 2>&1); then
+    echo "expected a failed local run to exit nonzero" >&2
+    exit 1
+fi
+grep -q 'cargo mutants exited 5' "$tmp/run-fail.out"
+test ! -d "$fixture/tree"
+git -C "$fixture" worktree list | grep -c . | grep -q '^1$'
 
 echo "mutants preflight contract: ok"

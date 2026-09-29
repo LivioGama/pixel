@@ -1,12 +1,16 @@
 #!/bin/sh
-# Fast pre-push mutation exposure gate. It only lists CI's prospective
-# mutants; CI remains responsible for running them and rejecting survivors.
+# Fast pre-push mutation exposure gate. --check/--ack only list CI's
+# prospective mutants; CI remains responsible for the verdict. --run executes
+# them locally in a throwaway worktree (optionally bounded by a -F-style
+# regex over function names) so a fix can be verified before pushing.
 set -eu
 
 mode=${1:---check}
+filter=
 case "$mode" in
     --check|--ack) ;;
-    *) echo "usage: scripts/mutants-preflight.sh [--check|--ack]" >&2; exit 2 ;;
+    --run) filter=${2:-} ;;
+    *) echo "usage: scripts/mutants-preflight.sh [--check|--ack|--run [regex]]" >&2; exit 2 ;;
 esac
 
 repo=$(git rev-parse --show-toplevel 2>/dev/null) \
@@ -78,6 +82,39 @@ if [ "$mode" = --ack ]; then
     printf '%s\n' "$fingerprint" > "$receipt"
     echo "mutation exposure: receipt recorded for $count prospective mutant(s)"
     exit 0
+fi
+
+if [ "$mode" = --run ]; then
+    worktree="$tmp_dir/tree"
+    git worktree add --detach "$worktree" "$head_oid" >/dev/null
+    run_status=0
+    (
+        cd "$worktree" || exit 2
+        if [ -n "$filter" ]; then
+            exec cargo mutants -vV --no-shuffle --in-place --in-diff "$diff_file" \
+                -F "$filter" -- --all-targets
+        else
+            exec cargo mutants -vV --no-shuffle --in-place --in-diff "$diff_file" \
+                -- --all-targets
+        fi
+    ) || run_status=$?
+    outcomes="$worktree/mutants.out/mutants.out"
+    if [ -f "$outcomes" ]; then
+        survivors=$(grep -Ei '^(missed|timeout)' "$outcomes" || true)
+        if [ -n "$survivors" ]; then
+            echo "mutation exposure: surviving mutant(s) in this run:" >&2
+            printf '%s\n' "$survivors" >&2
+        fi
+    fi
+    git worktree remove --force "$worktree" 2>/dev/null || true
+    case "$run_status" in
+        0) echo "mutation exposure: local run caught every listed mutant" ;;
+        2) echo "mutation exposure: local run has MISSED mutants; fix before pushing" >&2 ;;
+        3) echo "mutation exposure: local run timed out mutants; fix before pushing" >&2 ;;
+        4) echo "mutation exposure: baseline tests already fail; fix before pushing" >&2 ;;
+        *) echo "mutation exposure: cargo mutants exited $run_status" >&2 ;;
+    esac
+    exit "$run_status"
 fi
 
 if [ -f "$receipt" ] && [ "$(cat "$receipt")" = "$fingerprint" ]; then
