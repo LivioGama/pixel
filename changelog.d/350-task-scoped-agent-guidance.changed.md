@@ -1,1 +1,0 @@
-**install:** agent guidance now distinguishes read-only task scoping from an active edit manifest and warns that clearing the manifest affects other concurrent tasks. ([#350](https://github.com/LivioGama/pixel/pull/350))

@@ -1,2 +1,0 @@
-**install:** Run Antigravity's initial Pixel search inside its hook and deliver actual results through `ephemeralMessage`, avoiding AGY 1.2.13's injected-tool crash. Doctor detects missing or disabled retrieval hooks.
-([#353](https://github.com/LivioGama/pixel/pull/353))
