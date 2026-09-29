@@ -215,11 +215,30 @@ fn claude_prompt_hook_should_hand_off_only_in_a_repository_that_opted_in() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert_eq!(out.status.code(), Some(2), "{stderr}");
     assert!(stderr.contains("foreground prompt handed off"), "{stderr}");
-    assert!(sandboxes.is_dir(), "the opted-in handoff owns a sandbox");
-    let _ = std::process::Command::new("git")
-        .current_dir(&*repo)
-        .args(["worktree", "prune"])
-        .status();
+    let task_id = stderr
+        .split_once("Pixel started task ")
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("no task id in {stderr}"))
+        .to_string();
+    let candidate = sandboxes.join(&task_id).join("initial");
+    assert!(candidate.is_dir(), "the opted-in handoff owns a sandbox");
+    // The worker runs asynchronously: stop it before its worktree goes, and
+    // let the sandbox lifecycle remove the worktree and its git registration.
+    for op in ["worker-stop", "sandbox-cleanup"] {
+        let out = pixel_command()
+            .env("HOME", &*home)
+            .current_dir(&*repo)
+            .args(["task-state", op, &task_id, "initial"])
+            .arg(&*repo)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{op}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    assert!(!candidate.exists(), "sandbox-cleanup removed the worktree");
     let _ = fs::remove_dir_all(&sandboxes);
 }
 
