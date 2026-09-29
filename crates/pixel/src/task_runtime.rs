@@ -27,6 +27,18 @@ const LEDGER_VERSION: u8 = 1;
 const MAX_PROVIDER_BYTES: usize = 32;
 const MAX_EVENTS: usize = 256;
 const MAX_TRANSITION_BYTES: usize = 64;
+/// Marks a task the rendered packet had to cut to fit its byte budget.
+const TASK_CUT_MARK: &str = "…";
+/// What a packet appends after its targets when none fit the budget.
+const NO_TARGETS_NOTE: &str = "No ranked targets were available; investigate from source.\n";
+/// The packet's closing line.
+const PACKET_CLOSING: &str =
+    "Evidence is bounded; omitted files and unresolved dependencies may exist.";
+/// Bytes the render keeps after the task line for one target row.
+const TARGET_ROW_BYTES: usize = 96;
+/// Bytes the render keeps after the task line: one target row, the
+/// no-targets note and the closing line.
+const RENDER_TAIL_RESERVE: usize = TARGET_ROW_BYTES + NO_TARGETS_NOTE.len() + PACKET_CLOSING.len();
 
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -149,19 +161,32 @@ impl Packet {
         if budget < MIN_RENDER_BUDGET {
             return None;
         }
-        let mut text = format!(
-            "[PIXEL:TASK_RUNTIME v1] Factual local task packet, not an exhaustive task map or read/edit boundary. Expand investigation when evidence is insufficient.\nTask ID: {}\nGeneration: {} | revision: {}\nHEAD: {}\nTask: {}\n",
-            self.task_id, self.generation, self.revision, self.head_oid, self.task,
-        );
-        if let Some(line) = self
+        let intent = self
             .intent
             .as_ref()
-            .and_then(crate::prompt_intent::render_line)
-        {
+            .and_then(crate::prompt_intent::render_line);
+        let tail = format!("Impact: {}\nTargets:\n", self.evidence.impact);
+        // The store bounds `task` in characters, the render measures bytes: a
+        // long multibyte task plus the intent line would otherwise push the
+        // header past the budget, return None here and cost the packet its
+        // impact and targets. Reserve the rest of the render up front and cut
+        // the task to what remains, marking the cut.
+        let reserve = intent.as_ref().map_or(0, String::len) + tail.len() + RENDER_TAIL_RESERVE;
+        let mut text = format!(
+            "[PIXEL:TASK_RUNTIME v1] Factual local task packet, not an exhaustive task map or read/edit boundary. Expand investigation when evidence is insufficient.\nTask ID: {}\nGeneration: {} | revision: {}\nHEAD: {}\nTask: ",
+            self.task_id, self.generation, self.revision, self.head_oid,
+        );
+        let task = truncate_bytes(&self.task, budget.saturating_sub(text.len() + reserve));
+        text.push_str(task);
+        if task.len() < self.task.len() {
+            text.push_str(TASK_CUT_MARK);
+        }
+        text.push('\n');
+        if let Some(line) = intent {
             text.push_str(&line);
             text.push('\n');
         }
-        text.push_str(&format!("Impact: {}\nTargets:\n", self.evidence.impact));
+        text.push_str(&tail);
         if text.len() >= budget {
             return None;
         }
@@ -187,9 +212,9 @@ impl Packet {
             emitted += 1;
         }
         if emitted == 0 {
-            text.push_str("No ranked targets were available; investigate from source.\n");
+            text.push_str(NO_TARGETS_NOTE);
         }
-        text.push_str("Evidence is bounded; omitted files and unresolved dependencies may exist.");
+        text.push_str(PACKET_CLOSING);
         Some(text)
     }
 }
@@ -680,6 +705,18 @@ fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+/// `value` cut to at most `max` bytes, never through a character.
+fn truncate_bytes(value: &str, max: usize) -> &str {
+    let mut end = 0;
+    for (index, character) in value.char_indices() {
+        if index + character.len_utf8() > max {
+            break;
+        }
+        end = index + character.len_utf8();
+    }
+    &value[..end]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -956,6 +993,80 @@ mod tests {
             "kept as a claim"
         );
         assert!(!packet.render_context(4096).unwrap().contains("Intent"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_long_multibyte_task_should_keep_its_packet_context_and_intent() {
+        let root = root("intent-multibyte");
+        // The store's 1024-character bound in four-byte characters is the
+        // render's whole 4096-byte budget: before the render cut the task to
+        // size, the header pushed it over and the packet was dropped.
+        let long = "😀".repeat(MAX_TASK_CHARS);
+        let packet = upsert_with_intent(&root, &long, Some(intent("bugfix", 0.82)), 100);
+        assert_eq!(packet.task.chars().count(), MAX_TASK_CHARS);
+
+        let rendered = packet.render_context(4096).unwrap();
+        assert!(rendered.len() <= 4096, "{}", rendered.len());
+        assert!(rendered.contains("Task: 😀"), "the task survives, cut");
+        assert!(rendered.contains(TASK_CUT_MARK), "a cut task is marked");
+        assert!(
+            rendered.contains("Intent (classifier verdict, not fact): bugfix p=0.82"),
+            "the intent keeps its place"
+        );
+        assert!(rendered.contains("Impact: deferred_no_symbol"));
+        assert!(
+            rendered.contains("src/a.rs"),
+            "the packet keeps its targets"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn truncate_bytes_should_cut_only_on_a_character_boundary() {
+        assert_eq!(truncate_bytes("verbose", 7), "verbose");
+        assert_eq!(truncate_bytes("verbose", 3), "ver");
+        assert_eq!(truncate_bytes("é", 1), "");
+        assert_eq!(truncate_bytes("é", 2), "é");
+        assert_eq!(truncate_bytes("漢漢", 4), "漢");
+        assert_eq!(truncate_bytes("a漢", 2), "a");
+        assert_eq!(truncate_bytes("漢", 0), "");
+    }
+
+    #[test]
+    fn packet_should_say_when_no_targets_were_available_and_not_when_some_were() {
+        let root = root("no-targets");
+        let bare = upsert_plain(
+            &root,
+            "session-1",
+            "task",
+            serde_json::json!({"targets": []}),
+            false,
+            "abc",
+            100,
+        )
+        .unwrap();
+        assert!(
+            bare.render_context(4096).unwrap().contains(NO_TARGETS_NOTE),
+            "an empty packet names the absence"
+        );
+
+        let ranked = upsert_plain(
+            &root,
+            "session-2",
+            "task",
+            targets("src/a.rs"),
+            false,
+            "abc",
+            100,
+        )
+        .unwrap();
+        let rendered = ranked.render_context(4096).unwrap();
+        assert!(rendered.contains("src/a.rs"));
+        assert!(
+            !rendered.contains("No ranked targets"),
+            "a packet with targets never claims there were none: {rendered}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
