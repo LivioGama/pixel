@@ -4307,16 +4307,21 @@ fn doctor_repo_checks_should_stay_green_on_a_project_with_its_own_configs() {
     }
 }
 
-/// Append `[projects."<repo>"] trust_level = "<level>"` to the global Codex
-/// config the way Codex itself records a project's trust.
+/// Record `[projects."<repo>"] trust_level = "<level>"` in the global Codex
+/// config, the way Codex itself does. The whole file is rewritten: Codex keeps
+/// one table per project, and appending a second one for the same key makes the
+/// document a duplicate-key error rather than a trust level.
 fn set_codex_trust(home: &std::path::Path, repo: &std::path::Path, level: &str) {
     let path = home.join(".codex/config.toml");
-    let mut text = fs::read_to_string(&path).unwrap_or_default();
-    text.push_str(&format!(
-        "\n[projects.\"{}\"]\ntrust_level = \"{level}\"\n",
-        repo.display()
-    ));
-    fs::write(&path, text).unwrap();
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(
+        &path,
+        format!(
+            "[projects.\"{}\"]\ntrust_level = \"{level}\"\n",
+            repo.display()
+        ),
+    )
+    .unwrap();
 }
 
 /// An installed repo-local Codex guard is byte-correct, but Codex composes the
@@ -4340,28 +4345,32 @@ fn doctor_repo_codex_hooks_summary_reports_codex_project_trust() {
     };
 
     // Unspecified: the install is correct, the project is simply not listed.
-    let c = check(&doctor(&doctor_options).unwrap(), "repo.codex-hooks");
+    let doctor_report = doctor(&doctor_options).unwrap();
+    let c = check(&doctor_report, "repo.codex-hooks");
     assert_eq!(c.status, CheckStatus::Green, "{c:?}");
     assert!(c.summary.contains("will not load until it does"), "{c:?}");
     assert!(!c.summary.contains("codex trusts this project"), "{c:?}");
 
     // Untrusted: an explicit refusal reads the same way.
     set_codex_trust(&home, &repo, "untrusted");
-    let c = check(&doctor(&doctor_options).unwrap(), "repo.codex-hooks");
+    let doctor_report = doctor(&doctor_options).unwrap();
+    let c = check(&doctor_report, "repo.codex-hooks");
     assert_eq!(c.status, CheckStatus::Green, "{c:?}");
     assert!(c.summary.contains("will not load until it does"), "{c:?}");
     assert!(!c.summary.contains("codex trusts this project"), "{c:?}");
 
     // Trusted: the guard loads, and the summary says so.
     set_codex_trust(&home, &repo, "trusted");
-    let c = check(&doctor(&doctor_options).unwrap(), "repo.codex-hooks");
+    let doctor_report = doctor(&doctor_options).unwrap();
+    let c = check(&doctor_report, "repo.codex-hooks");
     assert_eq!(c.status, CheckStatus::Green, "{c:?}");
     assert!(c.summary.contains("codex trusts this project"), "{c:?}");
     assert!(!c.summary.contains("will not load"), "{c:?}");
 
     // A trust file that does not parse degrades to "unknown", green as ever.
     fs::write(home.join(".codex/config.toml"), "not toml = = =\n").unwrap();
-    let c = check(&doctor(&doctor_options).unwrap(), "repo.codex-hooks");
+    let doctor_report = doctor(&doctor_options).unwrap();
+    let c = check(&doctor_report, "repo.codex-hooks");
     assert_eq!(c.status, CheckStatus::Green, "{c:?}");
     assert!(c.summary.contains("codex trust unknown"), "{c:?}");
 }
