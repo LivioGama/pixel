@@ -159,6 +159,11 @@ jobs:
     if: needs.plan.outputs.mutants != '0'
     runs-on: ubuntu-26.04
     timeout-minutes: 90
+    # The Test job's value (ci.yml), at the same job level: rust-cache hashes
+    # it into the `linux-debug` key, so a shard without it would restore
+    # nothing. Every mutant's rebuild and link then skips full debug info.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
     strategy:
       # Every shard runs to the end even when another one has a survivor:
       # the author needs the whole list of MISSED lines from one push.
