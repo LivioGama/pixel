@@ -269,7 +269,7 @@ fn uninstall_project(
         },
         crate::pi_project::uninstall(repo, dry_run)?,
         crate::warp::uninstall(repo, exe, dry_run)?,
-        crate::warp::uninstall_rules(repo, dry_run)?,
+        crate::pixel_first::uninstall_rules(repo, dry_run)?,
     ];
 
     let green = steps

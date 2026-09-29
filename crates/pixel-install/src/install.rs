@@ -260,7 +260,7 @@ fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Resul
         crate::routing::install_project_devin_at(repo, exe, dry_run)?,
         crate::pi_project::install(repo, exe, dry_run)?,
         crate::warp::install(repo, exe, dry_run)?,
-        crate::warp::install_rules(repo, dry_run)?,
+        crate::pixel_first::install_rules(repo, dry_run)?,
         exclude_project_artifacts(repo, dry_run)?,
     ];
 

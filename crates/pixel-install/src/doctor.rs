@@ -917,7 +917,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
 
         runner.check_status("repo.pixel-first", || {
             let path = root.join("AGENTS.md");
-            match crate::warp::check_rules(root).map_err(|e| e.to_string())? {
+            match crate::pixel_first::check_rules(root).map_err(|e| e.to_string())? {
                 None => Ok((
                     CheckStatus::Green,
                     DoctorCheckDetail {
