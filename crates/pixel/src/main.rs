@@ -42,6 +42,7 @@ mod guard;
 mod index_cmd;
 mod mcp_cmd;
 mod operation_metrics;
+mod overview_intent;
 mod plan_cmd;
 mod plan_state;
 mod post_compaction;
@@ -3574,6 +3575,17 @@ fn group_by_root(paths: &[PathBuf]) -> Result<Vec<(PathBuf, Vec<String>)>, Strin
     Ok(groups)
 }
 
+/// The stderr line of a search that matched nothing: where it ran and where
+/// the repository starts, so a search from a subdirectory is not read as
+/// "absent from the repo".
+fn no_match_note(cwd: &Path, root: &Path) -> String {
+    format!(
+        "0 matches under {}; repo root {}",
+        cwd.display(),
+        root.display()
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_search(
     pattern: String,
@@ -3830,6 +3842,14 @@ fn run_search_one(
     } else {
         print_search_matches(&data, &enriched, &positions, json)?
     };
+    // An empty answer from a subdirectory is easy to misread as "not in the
+    // repo": say where the search ran and where the repo starts. On stderr so
+    // a pipe still sees an empty stdout, which the savings box counts as no
+    // answer.
+    if !json && page.printed == 0 && offset == 0 {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| root.to_path_buf());
+        eprintln!("{}", no_match_note(&cwd, root));
+    }
     // Warn the user when results were truncated so the default row cap
     // is never a surprise.
     let match_count = data.get("match_count").and_then(Value::as_u64).unwrap_or(0);
@@ -5761,6 +5781,12 @@ fn run_command(
             let task =
                 task.ok_or_else(|| "missing task description (or pass --clear)".to_string())?;
             let root = discover_root(&path)?;
+            if overview_intent::is_overview_prompt(&task) {
+                // Keyword targets for "what does this repo do" are files named
+                // `repo*`; write no manifest, so nothing is scoped to them.
+                println!("{}", overview_intent::overview_answer(&root));
+                return Ok(());
+            }
             let manifest_path = root
                 .join(pixel_index::index::SHARD_DIR)
                 .join("targets.json");
@@ -6825,6 +6851,16 @@ fn run_command(
         } => {
             if call_guard_check("find-code", &format!("{phrase} {}", path.display())) {
                 return Err("circuit breaker: repeated resolve calls".to_string());
+            }
+            if overview_intent::is_overview_prompt(&phrase) {
+                let root = discover_root(&path).unwrap_or_else(|_| path.clone());
+                let answer = overview_intent::overview_answer(&root);
+                return if json {
+                    print_data(&json!({ "matches": [], "note": answer }), true)
+                } else {
+                    println!("{answer}");
+                    Ok(())
+                };
             }
             let mut data = execute(&path, Request::Resolve { phrase, limit }, false)?;
             if let Ok(root) = discover_root(&path) {

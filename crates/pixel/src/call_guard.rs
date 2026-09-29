@@ -59,8 +59,24 @@ const MAX_CALL_HISTORY: usize = 2048;
 /// Warn after this many prior identical calls; do not infer unchanged results.
 const HARD_LOOP_THRESHOLD: usize = 2;
 
-/// Warn after this many prior calls to the same command, regardless of args.
+/// Warn a caller that declared a session after this many of its own prior
+/// calls to the same command, regardless of args.
 const SOFT_LOOP_THRESHOLD: usize = 5;
+
+/// Warn an undeclared caller after this many prior calls. Without an identity
+/// the count is repo-wide, so it includes every agent and human sharing the
+/// log; a low bar there fired on nearly every call of a busy repo.
+const UNSCOPED_SOFT_LOOP_THRESHOLD: usize = 20;
+
+/// The soft-loop bar for a caller: its own history when it declared a
+/// session, the higher repo-wide bar when it did not.
+const fn soft_loop_threshold(session: &str) -> usize {
+    if session.is_empty() {
+        UNSCOPED_SOFT_LOOP_THRESHOLD
+    } else {
+        SOFT_LOOP_THRESHOLD
+    }
+}
 
 /// Commands subject to the circuit breaker. `targets` is excluded
 /// because re-running targets with a different task description is
@@ -258,7 +274,7 @@ pub fn check_and_record(command: &str, args: &str, cwd: &Path) -> CallGuardResul
         .filter(mine)
         .filter(|c| pixel_proto::commands::current_name(&c.command) == command)
         .count();
-    if soft_count >= SOFT_LOOP_THRESHOLD {
+    if soft_count >= soft_loop_threshold(&session) {
         let msg = format!(
             "note: `pixel {command}` has {soft_count} prior calls in 10 minutes; counts alone do not establish a loop. Continuing retrieval."
         );
@@ -372,6 +388,21 @@ mod tests {
                 ("resolve", "c"),
                 ("resolve", "d"),
                 ("resolve", "e"),
+                ("resolve", "f"),
+                ("resolve", "g"),
+                ("resolve", "h"),
+                ("resolve", "i"),
+                ("resolve", "j"),
+                ("resolve", "k"),
+                ("resolve", "l"),
+                ("resolve", "m"),
+                ("resolve", "n"),
+                ("resolve", "o"),
+                ("resolve", "p"),
+                ("resolve", "q"),
+                ("resolve", "r"),
+                ("resolve", "s"),
+                ("resolve", "t"),
             ],
         );
         let soft = with_session(None, || check_and_record("find-code", "f", &dir2));
@@ -433,8 +464,7 @@ mod tests {
     fn warns_on_frequent_retrieval() {
         let dir = temp_dir();
         with_session(None, || {
-            // Call 5 times with different args (threshold is 5).
-            for i in 0..5 {
+            for i in 0..UNSCOPED_SOFT_LOOP_THRESHOLD {
                 check_and_record("search-content", &format!("query{i} ."), &dir);
             }
             match check_and_record("search-content", "another-query .", &dir) {
@@ -454,15 +484,16 @@ mod tests {
     fn does_not_block_different_commands() {
         let dir = temp_dir();
         with_session(None, || {
-            // 4 searches + 4 resolves — neither hits the soft threshold.
-            for i in 0..4 {
+            // One call below the bar for each command, so only a combined count
+            // would trip.
+            for i in 0..UNSCOPED_SOFT_LOOP_THRESHOLD - 1 {
                 check_and_record("search-content", &format!("q{i} ."), &dir);
                 check_and_record("find-code", &format!("p{i} ."), &dir);
             }
             match check_and_record("search-content", "another .", &dir) {
                 CallGuardResult::Allow => {}
                 CallGuardResult::Warn(msg) => {
-                    panic!("5th search with mixed commands should be allowed: {msg}")
+                    panic!("mixed commands must not pool into one count: {msg}")
                 }
             }
         });
@@ -538,6 +569,34 @@ mod tests {
     }
 
     #[test]
+    fn the_soft_bar_is_exact_for_each_kind_of_caller() {
+        let prior_then_next = |session: Option<&str>, prior: usize| {
+            let dir = temp_dir();
+            let out = with_session(session, || {
+                for i in 0..prior {
+                    check_and_record("impact", &format!("q{i} ."), &dir);
+                }
+                matches!(
+                    check_and_record("impact", "next .", &dir),
+                    CallGuardResult::Warn(_)
+                )
+            });
+            std::fs::remove_dir_all(&dir).ok();
+            out
+        };
+        // Declared session: below, at, above its own bar.
+        assert!(!prior_then_next(Some("s"), SOFT_LOOP_THRESHOLD - 1));
+        assert!(prior_then_next(Some("s"), SOFT_LOOP_THRESHOLD));
+        assert!(prior_then_next(Some("s"), SOFT_LOOP_THRESHOLD + 1));
+        // Undeclared caller: the repo-wide bar is higher, and quiet at the
+        // session bar.
+        assert!(!prior_then_next(None, SOFT_LOOP_THRESHOLD));
+        assert!(!prior_then_next(None, UNSCOPED_SOFT_LOOP_THRESHOLD - 1));
+        assert!(prior_then_next(None, UNSCOPED_SOFT_LOOP_THRESHOLD));
+        assert!(prior_then_next(None, UNSCOPED_SOFT_LOOP_THRESHOLD + 1));
+    }
+
+    #[test]
     fn a_single_session_still_trips_the_hard_loop() {
         let dir = temp_dir();
         with_session(Some("looper2"), || {
@@ -555,7 +614,7 @@ mod tests {
     fn unscoped_callers_keep_the_old_repo_wide_behaviour() {
         let dir = temp_dir();
         with_session(None, || {
-            for i in 0..SOFT_LOOP_THRESHOLD {
+            for i in 0..UNSCOPED_SOFT_LOOP_THRESHOLD {
                 check_and_record("impact", &format!("q{i} ."), &dir);
             }
             match check_and_record("impact", "another .", &dir) {
@@ -574,7 +633,7 @@ mod tests {
         let dir = temp_dir();
         let calls_path = dir.join(".pixel").join("calls.json");
         let now = now_unix();
-        let legacy: Vec<Value> = (0..SOFT_LOOP_THRESHOLD)
+        let legacy: Vec<Value> = (0..UNSCOPED_SOFT_LOOP_THRESHOLD)
             .map(|i| {
                 serde_json::json!({
                     "command": "impact",

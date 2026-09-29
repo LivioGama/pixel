@@ -97,6 +97,7 @@ or a shell function, whatever starts `claude` on this machine:
 `pixel install` writes that entry with the absolute path of the `pixel` it
 runs from, beside `UserPromptSubmit` (`run-hook prompt-submit --provider
 claude`), `PostToolUse` on `Edit` (`run-hook post-tool-use --provider claude`)
+and on `Bash` (`run-hook metrics --provider claude`, the 🟩 metrics relay)
 and a `SessionStart` entry matched on `compact` (`run-hook post-compaction
 --provider claude`), and leaves any hook of yours in place. Releases before
 the hooks wrapped `claude` in a `claude()` function in `~/.zshrc`,

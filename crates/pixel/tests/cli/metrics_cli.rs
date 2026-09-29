@@ -410,6 +410,119 @@ fn search_json_is_identical_with_reporting_on_off_and_env_off() {
     }
 }
 
+/// A search from a subdirectory that finds nothing prints nothing on stdout;
+/// stderr says where it ran and where the repo starts, and the box no longer
+/// claims a context saving for an empty answer.
+#[test]
+fn an_empty_search_from_a_subdirectory_names_the_root_and_claims_no_saving() {
+    let fixture = Fixture::new();
+    let sub = fixture.0.join("src");
+    let output = fixture
+        .command()
+        .current_dir(&sub)
+        .args(["search-content", "-F", "login_user", "--no-daemon"])
+        .output()
+        .unwrap();
+    // `src/` holds the match, so search a name that is only in the root.
+    assert!(
+        !output.stdout.is_empty(),
+        "control: the match exists in src"
+    );
+    let control_stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !control_stderr.contains("matches under"),
+        "a search that matched prints no empty-answer note: {control_stderr}"
+    );
+    let output = fixture
+        .command()
+        .current_dir(&sub)
+        .args([
+            "search-content",
+            "-F",
+            "no_such_name_anywhere",
+            "--no-daemon",
+        ])
+        .output()
+        .unwrap();
+    assert_success(&output);
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let sub = sub.canonicalize().unwrap();
+    assert!(
+        stderr.contains(&format!(
+            "0 matches under {}; repo root {}",
+            sub.display(),
+            fixture.0.display()
+        )),
+        "{stderr}"
+    );
+    let block = &metric_lines(&output)[0];
+    assert!(
+        block.contains("no estimated context saving (empty output)"),
+        "{block}"
+    );
+    assert!(!block.contains("estimated LLM context saved"), "{block}");
+    // `--json` keeps its envelope on stdout and adds no note; a page past the
+    // first (`--offset 1`) is not "nothing found" and adds none either.
+    for extra in [&["--json"][..], &["--offset", "1"][..]] {
+        let mut args = vec![
+            "search-content",
+            "-F",
+            "no_such_name_anywhere",
+            "--no-daemon",
+        ];
+        args.extend_from_slice(extra);
+        let output = fixture
+            .command()
+            .current_dir(&sub)
+            .args(&args)
+            .output()
+            .unwrap();
+        assert_success(&output);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("matches under"), "{extra:?}: {stderr}");
+    }
+}
+
+/// `find-code --json` on an overview prompt answers with an empty match list
+/// and the README pointer as the note.
+#[test]
+fn overview_find_code_json_carries_an_empty_match_list_and_the_readme_note() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("README.md"), "# demo\n").unwrap();
+    let output = fixture.run(&["find-code", "what does this repo do", "--json"]);
+    assert_success(&output);
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        value,
+        serde_json::json!({"matches": [], "note": "no concept match; read README.md"}),
+        "{output:?}"
+    );
+}
+
+/// "What does this repo do" names no code: `find-code` and `scope-task` point
+/// at the project description instead of matching the word "repo", and
+/// `scope-task` writes no manifest that would scope later edits to noise.
+#[test]
+fn overview_queries_point_at_the_readme_instead_of_matching_the_word_repo() {
+    let fixture = Fixture::new();
+    fs::write(fixture.0.join("README.md"), "# demo\n").unwrap();
+    for args in [
+        ["find-code", "what does this repo do"],
+        ["scope-task", "tell me what this repo does"],
+    ] {
+        let output = fixture.run(&args);
+        assert_success(&output);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            stdout.trim_end(),
+            "no concept match; read README.md",
+            "{args:?}"
+        );
+    }
+    assert!(!fixture.0.join(".pixel/targets.json").exists());
+}
+
 #[test]
 fn capped_search_marks_only_returned_evidence_partial() {
     let fixture = Fixture::new();

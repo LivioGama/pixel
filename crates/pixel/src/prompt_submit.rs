@@ -130,6 +130,11 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         std::thread::spawn(move || {
             let note = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 if kind == 0 {
+                    // An overview question has no code to locate; keyword
+                    // targets for it are noise, so none are computed.
+                    if crate::overview_intent::is_overview_prompt(&prompt) {
+                        return None;
+                    }
                     retrieve_task_targets(&prompt, &cwd).map(PromptNote::Targets)
                 } else {
                     detect_boundary(&prompt, &cwd)
@@ -150,6 +155,16 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     } else {
         render_legacy_context(notes.targets, notes.boundary.as_ref())
     };
+    if task_context
+        && let Some(root) = root.as_deref()
+        && let Some(pointer) = overview_pointer(&payload.prompt, root)
+    {
+        context = if context.is_empty() {
+            pointer
+        } else {
+            format!("{pointer}\n\n{context}")
+        };
+    }
     if matches!(provider, Some(crate::guard::Provider::Devin)) {
         context = render_devin_context(&context);
     }
@@ -157,6 +172,13 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         emit_context(&context, event_name);
     }
     std::process::exit(0);
+}
+
+/// The context that replaces keyword targets when the prompt asks for an
+/// overview of the project; `None` for every other prompt.
+fn overview_pointer(prompt: &str, root: &Path) -> Option<String> {
+    crate::overview_intent::is_overview_prompt(prompt)
+        .then(|| crate::overview_intent::overview_context(root))
 }
 
 /// Either feature can run independently; only disabling both suppresses the hook.
@@ -796,6 +818,17 @@ pub(crate) fn emit_context(note: &str, event_name: &str) -> ! {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_overview_prompt_gets_a_pointer_and_any_other_prompt_none() {
+        let root = std::env::temp_dir().join(format!("pixel-overview-hook-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("README.md"), "x").unwrap();
+        let pointer = overview_pointer("tell me what this repo does", &root).unwrap();
+        assert!(pointer.contains("Start with README.md,"), "{pointer}");
+        assert!(!pointer.to_lowercase().contains("restrict"), "{pointer}");
+        assert_eq!(overview_pointer("fix the repo cache bug", &root), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn prompt_features_should_run_when_either_feature_is_enabled() {
