@@ -151,7 +151,10 @@ function intentLine(stdout: string): string | null {
     const model = verdict?.snapshot?.model;
     const ops = verdict?.next_ops;
     if (typeof label !== "string" || typeof p !== "number" || !(p >= MIN_INTENT_P)) return null;
-    if (typeof model !== "string" || !Array.isArray(ops) || ops.length === 0) return null;
+    // `next_ops` is only usable when every entry names an operation: a null,
+    // an empty or a whitespace-only entry would leave the line without one.
+    if (typeof model !== "string" || !Array.isArray(ops) || ops.length === 0
+        || !ops.every((op) => typeof op === "string" && op.trim().length > 0)) return null;
     return `Intent (classifier verdict, not fact): ${label} p=${p.toFixed(2)} (${model}) → start with: ${ops.join(", ")}`;
   } catch {
     return null;

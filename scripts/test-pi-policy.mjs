@@ -376,13 +376,17 @@ switch (args[0]) {
     assert.deepEqual(call, ["classify", "--task-intent", "--if-warm", "--json", "--metrics", "off", "--", "inspect the implementation"]);
   });
 
-  await check("no intent line when the classifier exits nonzero, is unsure, unparsable or absent", async () => {
+  await check("no intent line when the classifier exits nonzero, is unsure, unparsable or malformed", async () => {
     for (const settings of [
       {},
       { classify: { ...bugfix, exit: 1 } },
       { classify: { ...bugfix, p: 0.49 } },
       { classify: { ...bugfix, raw: "not json" } },
       { classify: { ...bugfix, ops: [] } },
+      { classify: { ...bugfix, ops: [null] } },
+      { classify: { ...bugfix, ops: [""] } },
+      { classify: { ...bugfix, ops: ["   "] } },
+      { classify: { ...bugfix, ops: [bugfix.ops[0], null] } },
       { classify: bugfix, missing: ["classify"] },
     ]) {
       const h = await host();
