@@ -1056,6 +1056,28 @@ fn bounded_sed_approval_stops_at_the_repository_and_credentials() {
     }
 }
 
+/// A read tool call without a path names nothing in the repository, so it is
+/// never denied, whatever its window.
+#[test]
+fn pathless_read_tools_stay_native_under_enforce() {
+    let dir = indexed_dir("pathless-read");
+    let envs = [("PIXEL_POLICY", "enforce")];
+    for tool in ["read", "view_file", "notebook_read"] {
+        for input in [json!({}), json!({"limit":50})] {
+            assert_eq!(
+                guard("codex", &payload(tool, input.clone(), &dir), &envs),
+                Value::Null,
+                "codex {tool} {input}"
+            );
+        }
+        assert_eq!(
+            guard("devin", &payload(tool, json!({}), &dir), &envs),
+            Value::Null,
+            "devin {tool}"
+        );
+    }
+}
+
 #[test]
 fn zcode_rewrites_and_approves_only_standalone_pixel_retrieval() {
     let dir = indexed_dir("zcode-hook-contract");

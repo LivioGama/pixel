@@ -5646,6 +5646,7 @@ mod tests {
         // A file whose name starts with a dash still must not be read as a
         // positional operand: `ls -x` is a flag, not a path into the repo.
         std::fs::write(root.join("-x"), "x\n").unwrap();
+        std::fs::write(root.join("README.md"), "text\n").unwrap();
         let leaf = |words: &[&str]| {
             let ws: Vec<String> = words.iter().map(ToString::to_string).collect();
             enforce_leaf("", &ws, false, &root, &root, true)
@@ -5669,9 +5670,17 @@ mod tests {
             &["cp", "/tmp/a", "/tmp/pixel-leaf-dest"][..],
             &["ls", "-x"][..],
             &["ls", "src", "lib.rs"][..],
+            // Only a leading `rtk` is a wrapper: a reader name as an operand
+            // of another program is not that reader.
+            &["cp", "head", "README.md"][..],
         ] {
             assert!(leaf(words).is_none(), "{words:?}");
         }
+        // `ls` stays a listing (its own reason), never the `cat` read reason.
+        assert_eq!(
+            leaf(&["ls", "cat", "README.md"]),
+            Some("repository discovery: use pixel list-areas or find-code".into())
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -6632,6 +6641,35 @@ mod tests {
         assert_eq!(leaf("sed README.md", true), None);
         // Piped stdin has no file operand.
         assert_eq!(leaf("head -n 20", true), None);
+    }
+
+    /// The flag test of `sed_edits_in_place` and the operand split of
+    /// `rtk_read_operands` on values, independent of any file name.
+    #[test]
+    fn sed_and_rtk_read_argument_shapes() {
+        let args = |words: &[&str]| words.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert!(sed_edits_in_place(&args(&["-i", "s/x/y/", "f"])));
+        assert!(sed_edits_in_place(&args(&["-ni", "s/x/y/p", "f"])));
+        assert!(sed_edits_in_place(&args(&[
+            "--in-place=.bak",
+            "s/x/y/",
+            "f"
+        ])));
+        // An `i` in the script or the file name, or a long flag, is no edit.
+        assert!(!sed_edits_in_place(&args(&["s/x/i/", "README.md"])));
+        assert!(!sed_edits_in_place(&args(&["-n", "1,5p", "lib.rs"])));
+        assert!(!sed_edits_in_place(&args(&["--quiet", "p", "f"])));
+        assert!(!sed_edits_in_place(&args(&[])));
+        assert_eq!(rtk_read_operands(&args(&["-n", "f"])), (vec!["f"], None));
+        assert_eq!(
+            rtk_read_operands(&args(&["f", "-l", "3-9"])),
+            (vec!["f"], Some("3-9"))
+        );
+        assert_eq!(
+            rtk_read_operands(&args(&["--level", "aggressive", "-n", "f"])),
+            (vec!["f"], Some("aggressive"))
+        );
+        assert_eq!(rtk_read_operands(&args(&[])), (vec![], None));
     }
 
     /// `rtk read F -l A-B` gets its own reason; the other levels the generic one.
