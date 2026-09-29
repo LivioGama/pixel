@@ -589,4 +589,33 @@ console.log(JSON.stringify([
             "bootstrap paths must not unlock reads before a pixel call"
         );
     }
+
+    /// The bash fence ports `enforce_leaf` from `crates/pixel/src/guard.rs`.
+    /// The reason strings and decision-function names are part of the host
+    /// contract: the audit log carries them and they tell the user which
+    /// pixel command reaches the same indexed answer.
+    #[test]
+    fn extension_source_should_carry_the_bash_leaf_table() {
+        let source = extension_source(Path::new("/opt/bin/pixel"));
+        for marker in [
+            "function splitShellSegments",
+            "function tokenizeShell",
+            "function argReadsRepo",
+            "function enforceLeaf",
+            "function enforceLeafDecision",
+            "\"repository read: use pixel search-content or pixel pack-context <uid>\"",
+            "\"repository search: use pixel search-content\"",
+            "\"repository discovery: use pixel list-areas or find-code\"",
+            "\"repository discovery: use pixel find-code or list-areas\"",
+            "\"credential path\"",
+            "\"repository inspection: use pixel repo-state\"",
+            "\"repository inspection: use pixel review-changes\"",
+            "\"repository inspection: use pixel commit-history\"",
+        ] {
+            assert!(
+                source.contains(marker),
+                "missing marker: {marker}\n{source}"
+            );
+        }
+    }
 }
