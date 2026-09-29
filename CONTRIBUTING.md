@@ -29,7 +29,8 @@ A change is ready for a pull request when every line below is true.
 - [ ] The commit message follows the Conventional Commits format below.
 - [ ] The branch was created from an up-to-date `main` and the pull request targets `main` (a maintainer's maintenance-release branch instead starts from an up-to-date `origin/release/x.y` and its pull request targets `release/x.y`, so no unreleasable `main` commit rides along; see "Branches").
 - [ ] No file under `.pixel/`, `target/`, `.claude/` (other than the `.claude/rules` and `.claude/skills` symlinks), `.codex/`, `.cursor/` is staged (they are gitignored; do not force-add).
-- [ ] If a command or op was added or renamed: `ARCHITECTURE.md` (its `## Command surface` table), `pixel --help` output, and the agent prompt in `crates/pixel-install/assets/pixel-agent-prompt.md` agree with each other. `cargo test -p pixel-cli --test cli docs_drift::` enforces both directions.
+- [ ] If a command or op was added or renamed: `ARCHITECTURE.md` (its `## Command surface` table, in `pixel --help` order), `pixel --help` output, and the agent prompt in `crates/pixel-install/assets/pixel-agent-prompt.md` agree with each other. `cargo test -p pixel-cli --test cli docs_drift::` enforces both directions.
+- [ ] If the change moves anything `ARCHITECTURE.md` describes (a crate or an internal dependency, a file on disk, the wire contract, what `pixel install` writes, a hook, a CI job), the matching section is updated in the same pull request ([`.agents/rules/architecture-doc.md`](.agents/rules/architecture-doc.md) maps change to section; `docs_drift::` checks the command and crate tables).
 - [ ] If `crates/` changed: the binary was rebuilt and reinstalled, and `pixel doctor .` is green (see "Local install loop").
 - [ ] Every CodeRabbit finding on the pull request has an answer in its own thread — a fix naming its commit, or the reason it does not apply — and the thread is resolved (see "CodeRabbit reviews").
 
