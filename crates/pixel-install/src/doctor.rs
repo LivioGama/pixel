@@ -889,30 +889,33 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
 
         runner.check_status("repo.warp-mcp", || {
             let path = root.join(crate::warp::CONFIG_FILE);
-            match crate::warp::check(root, &exe).map_err(|e| e.to_string())? {
-                None => Ok((
+            if !crate::warp::has_retired_entry(root).map_err(|e| e.to_string())? {
+                return Ok((
                     CheckStatus::Green,
                     DoctorCheckDetail {
-                        summary: "no Pixel Warp MCP server configured".into(),
+                        summary: "no retired Pixel Warp MCP server configured".into(),
                         detail: None,
                     },
-                )),
-                Some(true) => Ok((
-                    CheckStatus::Green,
+                ));
+            }
+            if crate::repo_git::is_tracked(root, crate::warp::CONFIG_FILE) {
+                // Install never edits a tracked config, so its fix cannot help.
+                return Ok((
+                    CheckStatus::Yellow,
                     DoctorCheckDetail {
                         summary: format!(
-                            "Pixel retrieval MCP configured in {} (Warp requires project trust approval)",
+                            "{} (tracked by git) still starts the retired `pixel mcp` server — remove its `pixel` entry",
                             path.display()
                         ),
                         detail: Some(serde_json::json!({ "path": path.display().to_string() })),
                     },
-                )),
-                Some(false) => Err(format!(
-                    "Pixel MCP entry in {} is stale or incomplete — run `pixel install --repo {}`",
-                    path.display(),
-                    crate::routing::quoted_executable(root)
-                )),
+                ));
             }
+            Err(format!(
+                "{} still starts the retired `pixel mcp` server — run `pixel install --repo {}`",
+                path.display(),
+                crate::routing::quoted_executable(root)
+            ))
         });
 
         runner.check_status("repo.pixel-first", || {

@@ -79,9 +79,9 @@ pub struct InstallOptions {
     /// (`pixel install --repo <path>`). When set, ONLY repo-local steps run:
     /// `.codex/config.toml` + `.codex/hooks.json`, `.devin/config.local.json`,
     /// `.claude/settings.local.json` (PreToolUse guard), and
-    /// `.pi/extensions/pixel-guard.ts`, `.warp/.mcp.json`, and a portable
-    /// Pixel-first block in the repository's `AGENTS.md`
-    /// ([`REPO_ARTIFACTS`]) — none of the global prompt/lifecycle-hook deploys.
+    /// `.pi/extensions/pixel-guard.ts`, and a portable Pixel-first block in
+    /// the repository's `AGENTS.md` ([`REPO_ARTIFACTS`]); a Pixel entry an
+    /// older release left in `.warp/.mcp.json` is removed — none of the global prompt/lifecycle-hook deploys.
     pub repo: Option<PathBuf>,
 }
 
@@ -230,8 +230,11 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
 ///     machine's binary, so the shared `settings.json` never carries it);
 ///   - `<repo>/.pi/extensions/pixel-guard.ts` — pi's guard extension
 ///     ([`crate::pi_project`]).
-///   - `<repo>/.warp/.mcp.json` — Warp's project-scoped Pixel retrieval tools
-///     ([`crate::warp`]); Warp requires explicitly trusting project servers.
+///   - the Pixel-first managed block in `<repo>/AGENTS.md`
+///     ([`crate::pixel_first`]).
+///
+/// It also removes the `pixel mcp` entry an older release wrote into
+/// `<repo>/.warp/.mcp.json` ([`crate::warp`]).
 ///
 /// Every one of those files is then listed in the clone's `info/exclude`
 /// ([`crate::repo_git`]). Codex has no personal project file, so a
@@ -259,7 +262,7 @@ fn install_project(repo: &Path, home: &Path, exe: &Path, dry_run: bool) -> Resul
         codex_step,
         crate::routing::install_project_devin_at(repo, exe, dry_run)?,
         crate::pi_project::install(repo, exe, dry_run)?,
-        crate::warp::install(repo, exe, dry_run)?,
+        crate::warp::retire(repo, dry_run)?,
         crate::pixel_first::install_rules(repo, dry_run)?,
         exclude_project_artifacts(repo, dry_run)?,
     ];
@@ -367,10 +370,6 @@ pub const REPO_ARTIFACTS: &[RepoArtifact] = &[
     },
     RepoArtifact {
         path: crate::pi_project::EXTENSION,
-        machine_local: true,
-    },
-    RepoArtifact {
-        path: crate::warp::CONFIG_FILE,
         machine_local: true,
     },
     RepoArtifact {

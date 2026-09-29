@@ -1002,7 +1002,6 @@ enum Command {
         /// over), `.codex/config.toml`, `.codex/hooks.json` (composed guard,
         /// skipped when git tracks it) + `.codex/pixel-composed-guard-backup.json`,
         /// `.devin/config.local.json`, `.pi/extensions/pixel-guard.ts`,
-        /// `.warp/.mcp.json` (Warp asks you to trust the project server once),
         /// and a Pixel-first retrieval block in the root `AGENTS.md`. The block
         /// preserves surrounding instructions and never blocks native tools.
         /// Machine-specific files naming this binary go into `info/exclude`.

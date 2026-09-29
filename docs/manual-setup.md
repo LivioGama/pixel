@@ -182,15 +182,9 @@ after the project is trusted. The extension registers the structured `pixel`
 tool and applies the [Pi policy](pi-harness.md) at `tool_call` time. Copying the
 short prompt alone does not install the extension.
 
-Warp reads project MCP servers from `.warp/.mcp.json`. `pixel install --repo .`
-adds Pixel's read-only retrieval tools there, alongside any other configured
-servers. Warp requires explicitly trusting and starting project-scoped MCP
-servers; Pixel does not bypass that approval. Its server instructions steer
-repository discovery through Pixel, while native tools remain available for
-focused follow-up and when the index is unavailable.
-
-The same command also adds a Pixel-managed block to the repository-root
-`AGENTS.md`. It tells agents to try Pixel first for repository retrieval, but
+`pixel install --repo .` also adds a Pixel-managed block to the
+repository-root `AGENTS.md`, for Codex and every other agent that reads that
+file. It tells agents to try Pixel first for repository retrieval, but
 does not block native tools: if Pixel is unavailable, the repository is not
 indexed, or Pixel cannot answer, the agent can continue with native search or
 file reading. Existing text before and after the managed block is preserved.
