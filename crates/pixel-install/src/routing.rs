@@ -58,15 +58,20 @@ impl Provider {
         if self == Self::Devin { "exec" } else { "Bash" }
     }
 
-    /// Codex emits several names for shell-shaped tools. Keep the matcher
-    /// provider-specific instead of relying on a Claude-only `Bash` matcher.
+    /// Claude Code's `Read` and `Grep` tools cannot be transparently rewired
+    /// into a Bash call: the hook contract cannot change a tool type, so the
+    /// Claude arm emits an advisory through `non_shell_advisory` instead.
+    /// `Glob` is deliberately omitted — its docs in `guard.rs` explain that
+    /// path enumeration alone is not a problem worth blocking; the actual
+    /// `Read`/`Edit` of any result is itself guarded. Codex and Devin
+    /// already widen the matcher for their own tool-name conventions.
     fn shell_matcher(self) -> &'static str {
         match self {
             Self::Codex => "Bash|shell|unified_exec|local_shell",
             // Devin's native read/search tools bypass exec rewrites and must
             // reach the guard so it can return its documented block response.
             Self::Devin => "exec|read|grep|glob|find_file_by_name",
-            Self::Claude => self.shell(),
+            Self::Claude => "Bash|Read|Grep",
         }
     }
 
@@ -1973,7 +1978,7 @@ mod tests {
         assert!(enabled);
         assert_eq!(adopted.len(), 1);
         assert_eq!(value["hooks"]["PreToolUse"][0], vibe);
-        assert_eq!(value["hooks"]["PreToolUse"][1]["matcher"], "Bash");
+        assert_eq!(value["hooks"]["PreToolUse"][1]["matcher"], "Bash|Read|Grep");
         assert!(
             value["hooks"]["PreToolUse"][1]["hooks"][0]["command"]
                 .as_str()
@@ -1994,7 +1999,7 @@ mod tests {
         assert!(enabled);
         assert!(adopted.is_empty());
         assert_eq!(value["hooks"]["PreToolUse"][0], gitnexus);
-        assert_eq!(value["hooks"]["PreToolUse"][1]["matcher"], "Bash");
+        assert_eq!(value["hooks"]["PreToolUse"][1]["matcher"], "Bash|Read|Grep");
     }
 
     #[test]
