@@ -3547,7 +3547,7 @@ fn non_shell_advisory(
     {
         let p = resolve(raw_path, cwd).expect("checked by helper");
         let lines = file_line_count(&p);
-        if lines > read_advisory_min_lines() {
+        if read_scoping_advisory_size(lines) {
             read_scoping_advisory(&p, lines, idx);
         }
     }
@@ -3607,6 +3607,14 @@ fn should_read_scoping_advisory(
         && resolve(raw_path, cwd)
             .is_some_and(|p| p.is_file() && is_source_file(&p) && !is_exempt(&p, idx))
         && !env_flag_off("PIXEL_GUARD_READ")
+}
+
+/// Size gate for the read-scoping advisory: a source file must have MORE
+/// than the configured line threshold for the advisory to fire. At exactly
+/// the threshold the read is allowed through silently — the agent is doing
+/// the cheap thing already, so advising would be noise.
+fn read_scoping_advisory_size(lines: usize) -> bool {
+    lines > read_advisory_min_lines()
 }
 
 /// Advisory for edits to existing files in an indexed repo with no active
@@ -8552,23 +8560,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
-    /// `lines > read_advisory_min_lines()` (guard.rs:3548). At exactly the
-    /// threshold, the helper used to short-circuit and skip the advisory;
-    /// `>=` would change that. This test pins the boundary on the `lines`
-    /// side: the helper itself is already pinned by
-    /// `should_read_scoping_advisory_*` above, but the `>` vs `>=` mutant
-    /// lives in the call site, so this is the place to assert it.
+    /// `lines > read_advisory_min_lines()` (guard.rs:3546). At exactly the
+    /// threshold, the helper must return false; `>=` would change that.
+    /// Below the threshold, also false; one line above, true. This pins the
+    /// boundary against the `>`, `>=`, `==` and `<` mutants.
     #[test]
-    fn read_scoping_threshold_is_strictly_greater_than_min_lines() {
+    fn read_scoping_advisory_size_is_strictly_greater_than_threshold() {
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let min = read_advisory_min_lines();
+        // Reset PIXEL_GUARD_READ_LINES for this test so the override path
+        // is exercised deterministically. The helper tolerates a stale
+        // value (it only acts on parseable positive integers), so an
+        // interleaved set/unset either lowers the threshold (would only
+        // widen our boundary tests) or leaves it at 350 (correct here).
+        let prev_lines = std::env::var("PIXEL_GUARD_READ_LINES").ok();
+        // SAFETY: env::remove_var races with other threads reading the
+        // variable. The mutex above serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so this remove is the only writer.
+        // The restore in the trailing block mirrors this safety story.
+        unsafe {
+            std::env::remove_var("PIXEL_GUARD_READ_LINES");
+        }
+        let baseline_min = read_advisory_min_lines();
+        assert_eq!(min, baseline_min, "min line threshold is stable in a test");
+
+        // At exactly the threshold, the advisory is suppressed.
         assert!(
-            min >= 350,
-            "default threshold is 350 — overrides aside, the helper must not lower it"
+            !read_scoping_advisory_size(baseline_min),
+            "exactly at threshold ({baseline_min}) → no advisory"
         );
-        // The boundary lives at the call site; we can't drive `non_shell_advisory`
-        // without `advise` exiting the process. The test below documents the
-        // contract: at exactly `min` lines the advisory is suppressed.
-        assert!(min > 0, "non-zero threshold: {min}");
+        // One above: fires.
+        assert!(
+            read_scoping_advisory_size(baseline_min + 1),
+            "above threshold ({baseline_min}) → fires"
+        );
+        // Below threshold: suppressed.
+        assert!(
+            !read_scoping_advisory_size(baseline_min.saturating_sub(1)),
+            "below threshold ({baseline_min}) → no advisory"
+        );
+
+        // SAFETY: restore prior value of PIXEL_GUARD_READ_LINES.
+        unsafe {
+            match prev_lines {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_READ_LINES", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_READ_LINES");
+                }
+            }
+        }
     }
 
     /// The manifest-scoping arm's `delete match arm Active(m)/Expired` mutants
