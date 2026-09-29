@@ -181,7 +181,13 @@ the tag's build restores, and on pull requests
 that touch a Rust-affecting path (`crates/`, `Cargo.*`, `.cargo/`,
 `deny.toml`, the workflow itself); a docs, prompt or script PR skips it, and
 so does a `release-x.y.z` prepare PR into `main`, whose merge commit's push
-run is the one the tag waits for.
+run is the one the tag waits for. A pull request into `main` builds the
+`dev-release` profile (no thin LTO, 16 codegen units): it proves the same
+link, features and `--locked` resolution in a fraction of the time, while
+the push to `main` builds both profiles, `release` with release.yml's exact
+commands, each in its own job and cache entry (`release-<target>`, which
+the tag's build restores, and `dev-release-<target>`, which pull requests
+restore).
 To reproduce it locally:
 
 ```bash

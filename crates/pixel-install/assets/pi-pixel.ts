@@ -1,7 +1,7 @@
 // Pixel extension for Pi — managed by `pixel install --repo`.
 // __MANAGED_BEGIN__
 // __MANAGED_END__
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
@@ -13,6 +13,11 @@ const READ_LIMIT = 200;
 const BOOTSTRAP_BUDGET = 2400;
 const MIN_PROMPT_LEN = 12;
 const CREDENTIAL_PATH = /(?:^|\/)(?:\.env(?:\.[^/]*)?|\.ssh|\.aws|\.npmrc|\.netrc|id_(?:rsa|ed25519|ecdsa|dsa)[^/]*|[^/]*\.(?:pem|key|p12|pfx)|[^/]*(?:credentials|secrets?)[^/]*)(?:\/|$)/i;
+// The task-intent verdict is a best-effort extra of the bootstrap: a warm
+// local classifier answers in about 0.1 s, a cold one takes seconds and is
+// dropped. Under one half, the label is not more likely than the others.
+const INTENT_TIMEOUT_MS = 500;
+const MIN_INTENT_P = 0.5;
 const EDIT_TOOLS = new Set(["edit", "write", "apply_patch", "edit_file", "replace_file_content", "write_to_file"]);
 const ACTIONS = ["scope_task", "list_areas", "search_content", "find_code", "impact", "pack_context", "what_changed", "review_changes", "fetch", "commit", "commit_and_push"] as const;
 type Action = (typeof ACTIONS)[number];
@@ -91,6 +96,69 @@ function runBox(root: string, args: string[], quiet = false) {
     throw new Error(result.error?.message ?? result.stderr?.trim() ?? `Pixel exited ${result.status}`);
   }
   return { stdout: result.stdout as string, box: quiet ? "" : metricsBox(result.stderr) };
+}
+
+// The asynchronous twin of `run`, so the bootstrap's calls share the wait.
+function runAsync(root: string, args: string[]): Promise<string> {
+  const operation = resolveOperation(args[0]);
+  return collect(root, [operation, ...args.slice(1), "--metrics", "off"], 15000)
+    .then(({ code, stdout, stderr }) => {
+      if (code !== 0) throw new Error(stderr.trim() || `Pixel exited ${code}`);
+      return stdout;
+    });
+}
+
+// Spawn Pixel and gather its output; past `timeout` the child is killed and
+// the call settles with code null.
+function collect(root: string, args: string[], timeout: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((done) => {
+    let stdout = "", stderr = "", settled = false;
+    const finish = (code: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      done({ code, stdout, stderr });
+    };
+    const child = spawn(PIXEL_BIN, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+    const timer = setTimeout(() => { child.kill("SIGKILL"); stderr ||= `Pixel timed out after ${timeout} ms`; finish(null); }, timeout);
+    child.stdout?.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr?.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+    child.on("error", (error) => { stderr ||= error.message; finish(null); });
+    child.on("close", (code) => finish(code));
+  });
+}
+
+// The bootstrap's task-intent line, worded as the Claude prompt hook words it
+// (`prompt_intent::render_line`): a classifier claim, never a repository fact.
+// A Pixel without `classify`, a cold or remote engine (`--if-warm` exits 1), a
+// slow answer, unparsable output or p < 0.5 all leave the prompt without it.
+async function classifyIntent(root: string, prompt: string): Promise<string | null> {
+  try {
+    const operation = resolveOperation("classify");
+    const { code, stdout } = await collect(root,
+      [operation, "--task-intent", "--if-warm", "--json", "--metrics", "off", "--", prompt], INTENT_TIMEOUT_MS);
+    return code === 0 ? intentLine(stdout) : null;
+  } catch {
+    return null;
+  }
+}
+
+function intentLine(stdout: string): string | null {
+  try {
+    const verdict = JSON.parse(stdout);
+    const label = verdict?.predicted;
+    const p = verdict?.probs?.[label];
+    const model = verdict?.snapshot?.model;
+    const ops = verdict?.next_ops;
+    if (typeof label !== "string" || typeof p !== "number" || !(p >= MIN_INTENT_P)) return null;
+    // `next_ops` is only usable when every entry names an operation: a null,
+    // an empty or a whitespace-only entry would leave the line without one.
+    if (typeof model !== "string" || !Array.isArray(ops) || ops.length === 0
+        || !ops.every((op) => typeof op === "string" && op.trim().length > 0)) return null;
+    return `Intent (classifier verdict, not fact): ${label} p=${p.toFixed(2)} (${model}) → start with: ${ops.join(", ")}`;
+  } catch {
+    return null;
+  }
 }
 
 function resolveOperation(name: string) {
@@ -225,6 +293,29 @@ function simpleTranslation(command: string, root: string) {
   return null;
 }
 
+/// `find-code` matches carry the pieces of a uid; pack-context and impact
+/// accept only that form, so a bare symbol name resolves through find-code
+/// first instead of erroring inside the operation.
+function matchUid(match: any): string | undefined {
+  if (!match?.path || !match?.symbol_kind) return undefined;
+  const name = match.raw ?? match.name;
+  if (!name) return undefined;
+  return `${match.path}#${match.owner ? `${match.owner}::` : ""}${name}#${match.symbol_kind}`;
+}
+
+function resolveSymbolUid(root: string, wanted: string, path?: string): { uid?: string; candidates: string[] } {
+  try {
+    const output = run(root, ["find-code", wanted, ...(path ? [path] : []), "--json", "--limit", "5"]);
+    const found = parseEvidence(output) as any;
+    const candidates = (Array.isArray(found?.matches) ? found.matches : [])
+      .map(matchUid)
+      .filter((uid): uid is string => Boolean(uid));
+    return { uid: found?.confidence === "resolved" ? candidates[0] : undefined, candidates };
+  } catch {
+    return { candidates: [] };
+  }
+}
+
 function classify(tool: string, input: any, root: string, resolvedPaths: Set<string>, state: { pixelHealthy?: boolean; pixelCalled: boolean }): { kind: string; reason: string; operation?: string } {
   if (tool === "pixel") return { kind: "tool", reason: "structured Pixel" };
   if (EDIT_TOOLS.has(tool)) {
@@ -247,8 +338,9 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
     const target = path ? relativeTarget(root, path) : "";
     // Bootstrap-injected paths are not evidence of a Pixel call: a bounded
     // in-repo read unlocks only after the model itself called pixel or
-    // pixel_project (the global tool never fills resolvedPaths, so the call,
-    // not the path, is the signal). Credential files stay blocked.
+    // pixel_project. Both tools' results reach tool_result, so the call, not
+    // a harvested path, is the signal; their paths are still recorded.
+    // Credential files stay blocked.
     const limit = Number(input.limit);
     const problem = !(limit > 0) ? "no limit given"
       : limit > READ_LIMIT ? `limit ${limit} exceeds ${READ_LIMIT}`
@@ -338,6 +430,15 @@ export default function activate(pi: ExtensionAPI) {
           return { content: [{ type: "text", text: JSON.stringify(result) }], details: result, isError: true };
         }
         const index = health(root, action);
+        let ambiguousCandidates: string[] = [];
+        if ((action === "impact" || action === "pack_context")) {
+          const wanted = String(p.symbol ?? p.query ?? p.goal ?? "").trim();
+          if (wanted && !wanted.includes("#")) {
+            const resolved = resolveSymbolUid(root, wanted, p.path ? String(p.path) : undefined);
+            if (resolved.uid) p = { ...p, symbol: resolved.uid };
+            else if (action === "pack_context") ambiguousCandidates = resolved.candidates;
+          }
+        }
         const steps = commandFor(action, p);
         const boxes: string[] = [];
         const evidence = steps.map((args) => {
@@ -351,7 +452,7 @@ export default function activate(pi: ExtensionAPI) {
           const matches = found?.matches;
           if (found?.confidence === "resolved" && Array.isArray(matches) && matches.length === 1 && matches[0].symbol_kind) {
             const match = matches[0];
-            const uid = `${match.path}#${match.owner ? `${match.owner}::` : ""}${match.raw}#${match.symbol_kind}`;
+            const uid = matchUid(match)!;
             for (const args of [["impact", uid, "--json"], ["pack-context", uid, "--json", "--budget", "1200"]]) {
               const { stdout: output, box } = runBox(root, args);
               if (box) boxes.push(box);
@@ -363,6 +464,7 @@ export default function activate(pi: ExtensionAPI) {
         const truncated = evidence.some((item) => item.truncated);
         const first = evidence[0].output as any;
         const next_action = truncated ? "Narrow the scope or query"
+          : ambiguousCandidates.length ? `Ambiguous symbol; call find_code to pick the target, then retry pack_context with a path#name#kind uid: ${ambiguousCandidates.join(", ")}`
           : action === "find_code" && first?.confidence !== "resolved" ? "Try search_content with a concrete token"
           : action === "search_content" && Array.isArray(first) && first.length === 0 ? "Broaden the query or check index coverage"
           : undefined;
@@ -402,8 +504,15 @@ export default function activate(pi: ExtensionAPI) {
     if (prompt.trim().length < MIN_PROMPT_LEN) return;
     try {
       const index = health(root, "scope_task");
-      const scope = run(root, ["scope-task", prompt, "--json", "--no-manifest", "--max-tier", "P1", "--limit", "15"], true).trim();
-      const repo = run(root, ["repo-state", "--json"], true).trim();
+      // Started first and awaited last: the classifier runs beside the two
+      // context calls and never fails the bootstrap. Both are quiet probes
+      // (`runAsync` passes `--metrics off`), like main's other bootstrap reads.
+      const intent = classifyIntent(root, prompt);
+      const [scope, repo] = (await Promise.all([
+        runAsync(root, ["scope-task", prompt, "--json", "--no-manifest", "--max-tier", "P1", "--limit", "15"]),
+        runAsync(root, ["repo-state", "--json"]),
+      ])).map((text) => text.trim());
+      const intentText = await intent;
       for (const text of [scope, repo]) rememberPaths(parseEvidence(text), resolvedPaths, root);
       state.pixelHealthy = true;
       audit(root, "bootstrap", "scope-task and repo-state injected", { graph_present: index.graph?.present });
@@ -413,7 +522,7 @@ export default function activate(pi: ExtensionAPI) {
       return {
         message: {
           customType: "pixel-bootstrap", display: false,
-          content: `PIXEL TASK CONTEXT (deterministic, from pixel scope-task + repo-state):\n\n${scope.slice(0, BOOTSTRAP_BUDGET)}${scope.length > BOOTSTRAP_BUDGET ? "\n…(truncated)" : ""}\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}\n\n${guidance}`,
+          content: `PIXEL TASK CONTEXT (deterministic, from pixel scope-task + repo-state):\n\n${scope.slice(0, BOOTSTRAP_BUDGET)}${scope.length > BOOTSTRAP_BUDGET ? "\n…(truncated)" : ""}\n\n${repo.slice(0, 800)}${repo.length > 800 ? "\n…(truncated)" : ""}\n\n${guidance}${intentText ? `\n\n${intentText}` : ""}`,
         },
       };
     } catch (error) {
@@ -451,6 +560,7 @@ export default function activate(pi: ExtensionAPI) {
   // A tool_result replacement must carry forward the original result. Only
   // successful edits have a post-edit snapshot; failures retain diagnostics.
   pi.on("tool_result", async (event, ctx) => {
+    const root = ctx?.cwd ?? process.cwd();
     // The global `pixel` tool never runs pixel_project.execute; its result is
     // the only signal that the model consulted Pixel. Pi reports a tool's
     // returned `isError` as false unless it throws, so an error-shaped
@@ -459,9 +569,14 @@ export default function activate(pi: ExtensionAPI) {
       const details = event.details as { error?: unknown } | undefined;
       if (event.isError || Boolean(details?.error)) return { isError: true };
       state.pixelCalled = true;
+      // Paths the global `pixel` tool (or this one) surfaced count as
+      // resolved: the guard should see every Pixel answer, not only this
+      // extension's own calls.
+      for (const part of event.content ?? []) {
+        if (part?.type === "text") rememberPaths(parseEvidence(String(part.text)), resolvedPaths, root);
+      }
     }
     if (!EDIT_TOOLS.has(event.toolName) || event.isError) return;
-    const root = ctx?.cwd ?? process.cwd();
     const raw = pixelText(root, ["what-changed", "--json", "--tests"]);
     if (!raw) {
       state.pixelHealthy = false;

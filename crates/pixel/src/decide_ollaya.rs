@@ -52,11 +52,15 @@ pub const DEFAULT_BASE: &str = "http://127.0.0.1:11435";
 /// 0.738). On Apple silicon it runs on Metal via llama.cpp.
 pub const DEFAULT_MODEL: &str = "winnow:e4b";
 
-/// Where the local Ollaya daemon lives, and the model name to disclose.
+/// Where the local Ollaya daemon lives, the model name to disclose, and how
+/// long one request may take.
 #[derive(Debug, Clone)]
 pub struct OllayaConfig {
     pub base: String,
     pub model_name: String,
+    /// Whole-request cap: [`TIMEOUT`] by default; the prompt hook sets a
+    /// sub-second one so a server still loading its model fails open.
+    pub timeout: Duration,
 }
 
 impl Default for OllayaConfig {
@@ -64,6 +68,7 @@ impl Default for OllayaConfig {
         OllayaConfig {
             base: DEFAULT_BASE.to_string(),
             model_name: DEFAULT_MODEL.to_string(),
+            timeout: TIMEOUT,
         }
     }
 }
@@ -297,7 +302,7 @@ fn parse_answer(
 fn http_post(config: &OllayaConfig, body: &Value) -> Result<Value, String> {
     let url = format!("{}/v1/systemone", config.base.trim_end_matches('/'));
     let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(TIMEOUT))
+        .timeout_global(Some(config.timeout))
         .user_agent("pixel-cli classify-ollaya")
         .build();
     let agent = ureq::Agent::new_with_config(agent);
@@ -419,6 +424,7 @@ mod tests {
             OllayaConfig {
                 base: "http://127.0.0.1:11435".to_string(),
                 model_name: "laya:en".to_string(),
+                ..Default::default()
             },
             |_config, _body| unreachable!("model_id does not call the transport"),
         );
@@ -551,6 +557,28 @@ mod tests {
 
     /// A single loopback response server that records the first request
     /// line. It has a deadline so an accidental missing connection fails.
+    #[test]
+    fn http_post_should_fail_at_the_configured_timeout_when_the_daemon_stalls() {
+        // Never accepted: the kernel completes the handshake from the backlog,
+        // so the request is sent and the reply never comes.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let config = OllayaConfig {
+            base: format!("http://{}", listener.local_addr().unwrap()),
+            timeout: Duration::from_millis(200),
+            ..Default::default()
+        };
+        let started = std::time::Instant::now();
+        let error = http_post(&config, &json!({"model": "winnow:e4b"})).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the cap bounds the call: {:?}",
+            started.elapsed()
+        );
+        assert!(error.starts_with("ollaya http://"), "{error}");
+        assert_eq!(OllayaConfig::default().timeout, TIMEOUT);
+        drop(listener);
+    }
+
     fn http_once(status: &str, reply: String) -> (String, std::thread::JoinHandle<String>) {
         use std::io::{Read, Write};
 
@@ -590,6 +618,7 @@ mod tests {
         let config = OllayaConfig {
             base: base.clone(),
             model_name: "winnow:e4b".to_string(),
+            ..Default::default()
         };
         let response = http_post(&config, &json!({"model": "winnow:e4b"})).unwrap();
         assert_eq!(response, serde_json::from_str::<Value>(&reply).unwrap());
@@ -605,6 +634,7 @@ mod tests {
         let config = OllayaConfig {
             base: base.clone(),
             model_name: "winnow:e4b".to_string(),
+            ..Default::default()
         };
         let error = http_post(&config, &json!({})).unwrap_err();
         assert!(error.contains("HTTP 404"), "{error}");

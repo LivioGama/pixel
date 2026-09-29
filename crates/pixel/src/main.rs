@@ -46,6 +46,7 @@ mod overview_intent;
 mod plan_cmd;
 mod plan_state;
 mod post_compaction;
+mod prompt_intent;
 mod prompt_submit;
 mod recall_cmd;
 mod rescue_cmd;

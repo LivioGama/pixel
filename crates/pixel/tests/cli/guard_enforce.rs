@@ -1380,6 +1380,36 @@ fn devin_prompt_submit_injects_pixel_first_guidance_without_blocking() {
 }
 
 #[test]
+fn prompt_submit_should_treat_a_harness_task_notification_as_no_prompt() {
+    let dir = indexed_dir("devin-prompt-notification");
+    let submit = |prompt: &str| {
+        hook(
+            &["run-hook", "prompt-submit", "--provider", "devin"],
+            &json!({"hook_event_name":"UserPromptSubmit", "prompt":prompt, "cwd":dir.as_ref()}),
+            &[],
+        )
+    };
+    // A background-task completion Claude Code submits as the "user": no
+    // context, no guidance, nothing a packet or boundary could be built from.
+    assert_eq!(
+        submit(
+            "<task-notification>\n<task-id>b1f0c2</task-id>\n<status>completed</status>\n</task-notification>"
+        ),
+        Value::Null
+    );
+    assert_eq!(
+        submit("<system-reminder>ctx</system-reminder>"),
+        Value::Null
+    );
+    // The same words inside a human prompt still reach the hook.
+    let quoted = submit("fix the hook so a <task-notification> prompt keeps the task");
+    let context = quoted["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("a human prompt quoting an envelope is still a prompt");
+    assert!(context.contains("Pixel-first retrieval"), "{context}");
+}
+
+#[test]
 fn codex_exec_command_should_preserve_cmd_key_and_metadata_on_exact_rewrite() {
     let dir = indexed_dir("cmd");
     let event = payload(
