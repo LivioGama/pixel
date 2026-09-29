@@ -374,7 +374,7 @@ fn credential_shaped_paths_keep_native_permission_boundaries() {
 
 /// A TRACKED `.env` whose body matches a token must not echo the token, the
 /// path, or the matching line through `pixel search-content`. The daemon is
-/// the single sink both the CLI and the MCP server go through, so a fixture
+/// the single sink every output mode goes through, so a fixture
 /// that asserts this in `--json`, human, and `-l` modes is the contract:
 /// drop the credential bytes everywhere, name the hidden count in the
 /// envelope so the partial answer is not silent (CONTRIBUTING.md: every cap

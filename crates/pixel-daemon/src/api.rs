@@ -1186,9 +1186,9 @@ impl Service {
         };
 
         // Drop matches whose path is credential-shaped before any byte or row
-        // accounting runs. The daemon is the single sink both the CLI
-        // (`search-content`) and the MCP server go through, so filtering
-        // here covers both without the CLI having to duplicate the predicate.
+        // accounting runs. Every `search-content` request reaches `op_search`,
+        // so filtering here covers each output mode without the CLI having
+        // to duplicate the predicate.
         // The hidden count is surfaced below in the `caps` array — the same
         // channel `derive_epistemics` turns into `epistemics.basis` content
         // AND a `RESULT_CAPPED` envelope warning, so a partial answer is

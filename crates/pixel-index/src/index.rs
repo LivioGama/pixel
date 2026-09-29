@@ -60,7 +60,7 @@ pub fn is_ignored_dir_name(name: &str) -> bool {
 }
 
 /// Path-safety predicate shared by every consumer that surfaces an indexed
-/// file's contents (search daemon, MCP server, guard's native-command rewrite):
+/// file's contents (search daemon, guard's native-command rewrite):
 /// a tracked, non-ignored `.env` / `id_rsa` / `*.pem` is a
 /// place the user almost certainly does not want echoed back. Eligibility
 /// is metadata-only — content stays for the execution side — and a positive
