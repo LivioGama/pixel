@@ -365,5 +365,5 @@ knowledge_base:
       - files: ".agents/rules/install-layouts.md"
         applyTo: "crates/pixel-install/**"
       # These rules are always-on in AGENTS.md's table.
-      - files: ".agents/rules/test-campaigns.md,.agents/rules/release.md,.agents/rules/measuring.md,.agents/rules/change-propagation.md"
+      - files: ".agents/rules/test-campaigns.md,.agents/rules/release.md,.agents/rules/measuring.md,.agents/rules/change-propagation.md,.agents/rules/architecture-doc.md"
         applyTo: "**"

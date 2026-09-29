@@ -1,8 +1,12 @@
 //! pixel-install — M5/M6 rollout: idempotent `pixel install`, `pixel doctor`,
 //! and the clean-cut deprecation of the usable-git/gitpixel/sniper MCP
-//! entries. pixel is a CLI + lifecycle integration tool, NOT an MCP server —
-//! install scrubs deprecated entries, detects installed agent CLIs, wires
-//! passive hooks, and rewrites agent-config with managed markers.
+//! entries. pixel is a CLI + lifecycle integration tool, not an MCP server
+//! (`pixel mcp` exists only for Warp, which has no hooks) — install scrubs
+//! deprecated entries, unconditionally configures Claude, Codex and Pi, and
+//! wires lifecycle hooks. OpenCode, Antigravity and zcode are integrated only
+//! when their configuration directory or file already exists, not by
+//! detecting agent CLIs. Agent-config files are rewritten with managed
+//! markers only where applicable.
 
 use std::io;
 use std::path::PathBuf;

@@ -10,7 +10,10 @@
 //!   objections, alternatives and answers data, names a real subcommand (a
 //!   removed or renamed command cannot linger in prose);
 //! - every subcommand appears in ARCHITECTURE.md's `## Command surface`
-//!   table (a new command cannot ship undocumented);
+//!   table, in `pixel --help` order (a new command cannot ship
+//!   undocumented);
+//! - ARCHITECTURE.md's `## Crates` table has one row per workspace member,
+//!   and its `Depends on` cell matches that member's `Cargo.toml`;
 //! - the docs page's per-project list and `pixel install --help` name exactly
 //!   the files `pixel install --repo` writes (`REPO_ARTIFACTS`).
 //!
@@ -31,6 +34,12 @@ fn repo_root() -> PathBuf {
 
 /// Subcommand names from the `Commands:` block of `pixel --help`.
 fn subcommands() -> BTreeSet<String> {
+    subcommands_in_help_order().into_iter().collect()
+}
+
+/// Subcommand names from the `Commands:` block of `pixel --help`, in the
+/// order clap prints them.
+fn subcommands_in_help_order() -> Vec<String> {
     let out = Command::new(env!("CARGO_BIN_EXE_pixel"))
         .arg("--help")
         .env("PIXEL_DAEMON_AUTO_START", "0")
@@ -43,7 +52,7 @@ fn subcommands() -> BTreeSet<String> {
         .nth(1)
         .and_then(|rest| rest.split("Options:").next())
         .expect("clap help has Commands: then Options:");
-    let names: BTreeSet<String> = block
+    let names: Vec<String> = block
         .lines()
         .filter_map(|l| l.strip_prefix("  "))
         .filter(|l| !l.starts_with(' '))
@@ -89,6 +98,7 @@ const DOCS: &[&str] = &[
     ".agents/rules/test-campaigns.md",
     ".agents/rules/measuring.md",
     ".agents/rules/change-propagation.md",
+    ".agents/rules/architecture-doc.md",
     ".agents/rules/graph-resolver.md",
     "scripts/README.md",
     "website/data/agents.toml",
@@ -329,22 +339,218 @@ fn runtime_command_mentions_skip_comments_and_tests() {
     assert_eq!(got, ["build-index", "rescue"]);
 }
 
-#[test]
-fn every_subcommand_is_in_the_architecture_command_table() {
-    let known = subcommands();
-    let root = repo_root();
-    let arch = std::fs::read_to_string(root.join("ARCHITECTURE.md")).unwrap();
-    let table = arch
-        .split("## Command surface")
+/// The body of ARCHITECTURE.md's `## <heading>` section, up to the next
+/// `## ` heading.
+fn architecture_section(heading: &str) -> String {
+    let arch = std::fs::read_to_string(repo_root().join("ARCHITECTURE.md")).unwrap();
+    arch.split(&format!("\n## {heading}\n"))
         .nth(1)
         .and_then(|rest| rest.split("\n## ").next())
-        .expect("ARCHITECTURE.md has a `## Command surface` section");
-    let documented = referenced_commands(table);
+        .unwrap_or_else(|| panic!("ARCHITECTURE.md has a `## {heading}` section"))
+        .to_string()
+}
+
+/// The table cells of every `| … |` row of `text` below a `| --- |`
+/// separator, trimmed, in document order.
+fn table_rows(text: &str) -> Vec<Vec<String>> {
+    text.lines()
+        .filter_map(|line| line.trim().strip_prefix('|')?.strip_suffix('|'))
+        .map(|row| {
+            row.split(" | ")
+                .map(|c| c.trim().to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|cells| !cells.iter().all(|c| c.chars().all(|ch| ch == '-')))
+        .collect()
+}
+
+/// The command each row of the `## Command surface` table documents, in
+/// table order.
+fn command_table_order(section: &str) -> Vec<String> {
+    table_rows(section)
+        .iter()
+        .filter_map(|cells| cells.first()?.strip_prefix("`pixel ")?.strip_suffix('`'))
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn the_architecture_command_table_lists_every_subcommand_in_help_order() {
+    // The table promises `pixel --help` order: a reader scanning both side
+    // by side, or a diff of the two, only works while they agree row for row.
+    let documented = command_table_order(&architecture_section("Command surface"));
+    let known = subcommands();
     let missing: Vec<&String> = known.iter().filter(|c| !documented.contains(*c)).collect();
     assert!(
         missing.is_empty(),
         "subcommands missing from ARCHITECTURE.md `## Command surface`: {missing:?}"
     );
+    assert_eq!(
+        documented,
+        subcommands_in_help_order(),
+        "ARCHITECTURE.md `## Command surface` must list one row per subcommand, in `pixel --help` order"
+    );
+}
+
+#[test]
+fn command_table_order_reads_the_first_cell_of_each_row() {
+    let section = [
+        "| Command | Does |",
+        "| --- | --- |",
+        "| `pixel status` | Index `pixel build-index` status |",
+        "| `pixel build-index` | Build |",
+        "prose naming `pixel doctor`",
+    ]
+    .join("\n");
+    assert_eq!(command_table_order(&section), ["status", "build-index"]);
+}
+
+/// A workspace member's internal dependencies, as its `Cargo.toml` declares
+/// them: `(package name, normal pixel-* deps, dev pixel-* deps)`.
+fn member_deps(root: &Path, member: &str) -> (String, BTreeSet<String>, BTreeSet<String>) {
+    let text = std::fs::read_to_string(root.join(member).join("Cargo.toml")).unwrap();
+    let doc: toml_edit::DocumentMut = text.parse().unwrap();
+    let name = doc["package"]["name"].as_str().unwrap().to_string();
+    let internal = |table: &str| -> BTreeSet<String> {
+        doc.get(table)
+            .and_then(toml_edit::Item::as_table_like)
+            .map(|deps| {
+                deps.iter()
+                    .map(|(dep, _)| dep.to_string())
+                    .filter(|dep| dep.starts_with("pixel-") && *dep != name)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    (
+        name.clone(),
+        internal("dependencies"),
+        internal("dev-dependencies"),
+    )
+}
+
+/// The `Depends on (pixel crates)` cell of the `## Crates` table, read as
+/// `(normal deps, dev deps when the cell lists them)`. `libraries` is every
+/// library crate, which the `every library crate except …` form starts from.
+fn documented_deps(
+    cell: &str,
+    libraries: &BTreeSet<String>,
+) -> (BTreeSet<String>, Option<BTreeSet<String>>) {
+    let backticked = |text: &str| -> BTreeSet<String> {
+        text.split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    };
+    let short_names = |text: &str| -> BTreeSet<String> {
+        text.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty() && *name != "none")
+            .map(|name| format!("pixel-{name}"))
+            .collect()
+    };
+    if let Some(except) = cell.strip_prefix("every library crate except") {
+        let excluded = backticked(except);
+        return (libraries.difference(&excluded).cloned().collect(), None);
+    }
+    match cell.split_once("(dev:") {
+        Some((normal, dev)) => (
+            short_names(normal),
+            Some(short_names(dev.trim_end_matches(')'))),
+        ),
+        None => (short_names(cell), None),
+    }
+}
+
+#[test]
+fn documented_deps_reads_every_form_of_the_depends_cell() {
+    let libraries: BTreeSet<String> = ["pixel-git", "pixel-index", "pixel-bench"]
+        .map(str::to_string)
+        .into();
+    let set =
+        |names: &[&str]| -> BTreeSet<String> { names.iter().map(|n| (*n).to_string()).collect() };
+    assert_eq!(documented_deps("none", &libraries), (set(&[]), None));
+    assert_eq!(
+        documented_deps("graph, git", &libraries),
+        (set(&["pixel-graph", "pixel-git"]), None)
+    );
+    assert_eq!(
+        documented_deps("index (dev: daemon, proto)", &libraries),
+        (
+            set(&["pixel-index"]),
+            Some(set(&["pixel-daemon", "pixel-proto"]))
+        )
+    );
+    assert_eq!(
+        documented_deps(
+            "every library crate except `pixel-git` (reached elsewhere) and `pixel-bench`",
+            &libraries
+        ),
+        (set(&["pixel-index"]), None)
+    );
+}
+
+#[test]
+fn the_architecture_crate_table_matches_the_workspace_manifests() {
+    // The crate map is what a contributor reads before touching two crates:
+    // a missing crate or a wrong edge sends them to the wrong layer (the
+    // table once credited `pixel-facts` with an index dependency it never
+    // had, and left out the graph one `pixel-recall` uses).
+    let root = repo_root();
+    let workspace: toml_edit::DocumentMut = std::fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let members: Vec<(String, BTreeSet<String>, BTreeSet<String>)> =
+        workspace["workspace"]["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| member_deps(&root, m.as_str().unwrap()))
+            .collect();
+    let libraries: BTreeSet<String> = members
+        .iter()
+        .map(|(name, _, _)| name.clone())
+        .filter(|name| name != "pixel-cli")
+        .collect();
+
+    let section = architecture_section("Crates");
+    let rows: Vec<(String, String)> = table_rows(&section)
+        .into_iter()
+        .filter(|cells| cells.len() == 3 && cells[0].starts_with('`'))
+        .map(|cells| {
+            let name = cells[0].split('`').nth(1).unwrap().to_string();
+            (name, cells[2].clone())
+        })
+        .collect();
+
+    let documented: BTreeSet<&String> = rows.iter().map(|(name, _)| name).collect();
+    let actual: BTreeSet<&String> = members.iter().map(|(name, _, _)| name).collect();
+    assert_eq!(
+        rows.len(),
+        actual.len(),
+        "ARCHITECTURE.md `## Crates` must have exactly one row per workspace member"
+    );
+    assert_eq!(
+        documented, actual,
+        "ARCHITECTURE.md `## Crates` must have exactly one row per workspace member (set)"
+    );
+
+    for (name, cell) in &rows {
+        let (_, normal, dev) = members.iter().find(|(n, _, _)| n == name).unwrap();
+        let (doc_normal, doc_dev) = documented_deps(cell, &libraries);
+        assert_eq!(
+            &doc_normal, normal,
+            "ARCHITECTURE.md `## Crates`: `{name}` depends on {normal:?} in its Cargo.toml, the table says `{cell}`"
+        );
+        if let Some(doc_dev) = doc_dev {
+            assert_eq!(
+                &doc_dev, dev,
+                "ARCHITECTURE.md `## Crates`: `{name}` dev-depends on {dev:?} in its Cargo.toml, the table says `{cell}`"
+            );
+        }
+    }
 }
 
 /// The `(old, new)` rows of the first `| Old name | New name |` table in
