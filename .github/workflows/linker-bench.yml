@@ -1,0 +1,84 @@
+name: Linker bench (experiment, do not merge)
+
+# A/B of the linker on the relinks a Mutants shard pays per mutant: the
+# same warm cache, the same commit, the same touched files, first with the
+# default rust-lld (Rust >= 1.90 on x86_64-unknown-linux-gnu), then with
+# mold. Only the linker differs between the two timed series; the mold
+# series starts after a full rebuild because RUSTFLAGS enters every crate's
+# fingerprint, and that rebuild is reported, not compared.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/linker-bench.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    runs-on: ubuntu-26.04
+    # Same job-level value as the Test job, so rust-cache computes the same
+    # linux-debug key and the lld series starts warm.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: linux-debug
+          save-if: false
+
+      - name: Install mold (not made the default ld)
+        uses: rui314/setup-mold@10ca16bf91dc22e05ebdc935cad9c75ea248f621 # main, mold 2.42.1
+        with:
+          make-default: false
+
+      - name: Bench script
+        run: |
+          cat > "$RUNNER_TEMP/bench.sh" <<'EOF'
+          #!/usr/bin/env bash
+          # bench.sh <label>: one warm-up, then three timed relinks per touch.
+          set -euo pipefail
+          label=$1
+          build() { cargo test -p pixel-graph -p pixel-cli --no-run --locked -q 2>&1 | tail -3; }
+          t0=$(date +%s.%N); build; t1=$(date +%s.%N)
+          echo "BENCH $label warmup $(echo "$t1 - $t0" | bc)s"
+          for touch in crates/pixel/src/main.rs crates/pixel-graph/src/lib.rs; do
+            for i in 1 2 3; do
+              touch "$touch"
+              t0=$(date +%s.%N); build; t1=$(date +%s.%N)
+              echo "BENCH $label touch=$touch round=$i $(echo "$t1 - $t0" | bc)s"
+            done
+          done
+          echo "LINKER $label: $(readelf -p .comment target/debug/pixel | grep -Eio 'mold[^ ]*|LLD[^)]*' | sort -u | tr '\n' ' ')"
+          EOF
+          chmod +x "$RUNNER_TEMP/bench.sh"
+
+      # Incremental, as in the Mutants shards (mutants.yml sets it per step).
+      - name: Series A — rust-lld (default)
+        env:
+          CARGO_INCREMENTAL: 1
+        run: "$RUNNER_TEMP/bench.sh lld"
+
+      - name: Series B — mold
+        env:
+          CARGO_INCREMENTAL: 1
+          RUSTFLAGS: -Clinker-features=-lld -Clink-arg=-fuse-ld=mold
+        run: |
+          t0=$(date +%s.%N)
+          cargo test -p pixel-graph -p pixel-cli --no-run --locked -q 2>&1 | tail -3
+          t1=$(date +%s.%N)
+          echo "BENCH mold full-rebuild (RUSTFLAGS changed every fingerprint; not compared) $(echo "$t1 - $t0" | bc)s"
+          "$RUNNER_TEMP/bench.sh" mold
