@@ -8501,6 +8501,104 @@ mod tests {
         let _ = std::fs::remove_dir_all(&repo);
     }
 
+    /// `should_read_scoping_advisory` returns false for non-source files —
+    /// the closure at guard.rs:3608 has three conjuncts (file exists, is a
+    /// source file, is not exempt) joined by `&&`. A `&&` → `||` mutant on
+    /// either inner conjunct would let a non-source path trigger the
+    /// advisory; a non-source file in the scratch repo kills both
+    /// mutations in one assertion.
+    #[test]
+    fn should_read_scoping_advisory_rejects_non_source_files() {
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let repo = scratch_repo("read-scoping-non-source");
+        let f = repo.join("notes.txt");
+        std::fs::write(&f, "plain text\n").unwrap();
+
+        // SAFETY: same race semantics as the other tests; the mutex above
+        // serializes every test that touches PIXEL_GUARD_* in this binary.
+        let prev_read = std::env::var("PIXEL_GUARD_READ").ok();
+        unsafe {
+            std::env::remove_var("PIXEL_GUARD_READ");
+        }
+
+        let untargeted = empty_tool_input();
+        assert!(
+            !should_read_scoping_advisory(
+                None,
+                false,
+                "Read",
+                &untargeted,
+                "notes.txt",
+                &repo,
+                &repo
+            ),
+            "non-source file must not trigger read-scoping"
+        );
+
+        // SAFETY: restore prior value so other tests see what they expect.
+        unsafe {
+            match prev_read {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_READ", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_READ");
+                }
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// `should_read_scoping_advisory` returns false for files that do not
+    /// resolve (the closure at guard.rs:3608 short-circuits on
+    /// `resolve(...).is_some_and(...)`). A `&&` → `||` mutant that drops
+    /// the file-exists conjunct would let an unresolved path trigger the
+    /// advisory; a path outside the scratch repo kills that mutation.
+    #[test]
+    fn should_read_scoping_advisory_rejects_unresolved_paths() {
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let repo = scratch_repo("read-scoping-unresolved");
+        // SAFETY: same race semantics as the other tests; the mutex above
+        // serializes every test that touches PIXEL_GUARD_* in this binary.
+        let prev_read = std::env::var("PIXEL_GUARD_READ").ok();
+        unsafe {
+            std::env::remove_var("PIXEL_GUARD_READ");
+        }
+
+        let untargeted = empty_tool_input();
+        assert!(
+            !should_read_scoping_advisory(
+                None,
+                false,
+                "Read",
+                &untargeted,
+                "does-not-exist.rs",
+                &repo,
+                &repo
+            ),
+            "unresolved path must not trigger read-scoping"
+        );
+
+        // SAFETY: restore prior value so other tests see what they expect.
+        unsafe {
+            match prev_read {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_READ", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_READ");
+                }
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
     fn some_manifest_empty() -> Option<Manifest> {
         Some(Manifest {
             root: PathBuf::from("/tmp"),
