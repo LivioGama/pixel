@@ -420,40 +420,10 @@ fn checked_dir(raw: &str, cwd: &Path) -> Option<(PathBuf, PathBuf, String)> {
 
 /// Credential-shaped paths never qualify for automatic permission grants.
 /// This is metadata-only eligibility, not a claim to detect every secret.
+/// The single canonical predicate lives in `pixel_index::index::credential_path`
+/// (shared with the daemon's search filter and the task sandbox).
 fn credential_path(path: &Path) -> bool {
-    if path.components().any(|part| {
-        part.as_os_str()
-            .to_str()
-            .is_some_and(|s| s.eq_ignore_ascii_case("secrets"))
-    }) {
-        return true;
-    }
-    let name = path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_ascii_lowercase();
-    name.starts_with(".env")
-        || name.ends_with(".env")
-        || name.starts_with("credentials.")
-        || (name.contains("secret") && name.contains('.'))
-        || name == "serviceaccountkey.json"
-        || name.ends_with("-credentials.json")
-        || [
-            ".pem",
-            ".key",
-            ".p12",
-            ".pfx",
-            ".jks",
-            ".keystore",
-            ".truststore",
-            "_rsa",
-            "_dsa",
-            "_ecdsa",
-            "_ed25519",
-        ]
-        .iter()
-        .any(|suffix| name.ends_with(suffix))
+    pixel_index::index::credential_path(path)
 }
 
 /// The user configured the tool being replaced: its native output may no
