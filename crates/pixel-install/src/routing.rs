@@ -387,7 +387,7 @@ fn passive_gitnexus_claude_hook(group: &Value, provider: Provider) -> bool {
             .is_some_and(|command| command.ends_with("/.claude/hooks/gitnexus/gitnexus-hook.cjs\""))
 }
 
-/// The PostToolUse group that relays the finalized 🟩 metrics line as hook
+/// The PostToolUse group that relays the finalized 🟩 pixel metrics line as a fallback in Codex (when the panel is missing from the tool-call result, rarely needed). Never re-emit or echo the panel if already present.
 /// output (`systemMessage` for the user, `additionalContext` for the model)
 /// after a shell call. When the tool result already carries the box, Codex
 /// and Devin stay silent while Claude still gets the line as `systemMessage`
