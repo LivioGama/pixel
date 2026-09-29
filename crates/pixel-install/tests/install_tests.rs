@@ -3486,6 +3486,31 @@ fn repo_install_recovers_a_deleted_codex_hooks_file() {
     );
 }
 
+/// A reinstall that agrees with the published contract does not touch the
+/// sidecar at all: it is the runtime's private input, so even an identical
+/// rewrite (new inode, new mtime) is a change we do not make.
+#[test]
+#[cfg(unix)]
+fn repo_install_leaves_an_agreeing_sidecar_file_untouched() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+
+    install(&repo_install_options(&repo, &home)).unwrap();
+    let sidecar = repo.join(".codex/pixel-composed-guard-backup.json");
+    let inode = fs::metadata(&sidecar).unwrap().ino();
+
+    install(&repo_install_options(&repo, &home)).unwrap();
+    assert_eq!(
+        fs::metadata(&sidecar).unwrap().ino(),
+        inode,
+        "a reinstall that agrees must not rewrite the sidecar"
+    );
+}
+
 #[test]
 #[cfg(unix)]
 fn repo_install_is_idempotent() {
