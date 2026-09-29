@@ -107,7 +107,11 @@ impl Spec {
 /// The decision engine seam behind one invocation: production is the remote
 /// chat adapter or the local Ollaya server; tests inject a fake with the
 /// same surface — a probability distribution over the caller's labels.
-trait DecisionEngine {
+///
+/// `pub(crate)` so a caller that asks many decisions itself (`pixel
+/// ultraflow`, one question per cycle) can hold one engine open instead of
+/// one process per decision.
+pub(crate) trait DecisionEngine {
     fn model_id(&self) -> String;
     /// Provider preset surfaced in the snapshot (`None` for test engines).
     fn provider(&self) -> Option<&'static str>;
@@ -761,16 +765,69 @@ pub fn run(opts: ClassifyOptions) -> Result<(), String> {
     run_with(
         opts,
         resolve_engine_for,
-        move |resolved| match resolved {
-            crate::classify_setup::ResolvedEngine::Remote => {
-                open_engine(remote_preset, remote_model).map(|e| Box::new(e) as _)
-            }
-            crate::classify_setup::ResolvedEngine::Local { base } => Ok(Box::new(
-                crate::decide_ollaya::Ollaya::open(ollaya_config(base, if_warm)),
-            ) as _),
-        },
+        move |resolved| open_resolved(resolved, remote_preset, remote_model, if_warm),
         stdin.lock(),
         &mut output,
+    )
+}
+
+/// The engine a resolved choice maps to. The one place the remote/local
+/// split becomes an adapter, so `pixel classify` and a caller holding an
+/// engine open (`pixel ultraflow`) cannot drift apart on which one answers.
+pub(crate) fn open_resolved(
+    resolved: crate::classify_setup::ResolvedEngine,
+    preset: crate::decide_remote::Preset,
+    model: Option<String>,
+    if_warm: bool,
+) -> Result<Box<dyn DecisionEngine>, String> {
+    match resolved {
+        crate::classify_setup::ResolvedEngine::Remote => {
+            open_engine(preset, model).map(|engine| Box::new(engine) as _)
+        }
+        crate::classify_setup::ResolvedEngine::Local { base } => Ok(Box::new(
+            crate::decide_ollaya::Ollaya::open(ollaya_config(base, if_warm)),
+        ) as _),
+    }
+}
+
+/// A decision engine held open across many questions: the same resolution
+/// `pixel classify` does for one invocation, with the same `--engine`,
+/// `--remote-preset` and `--remote-model` inputs, for a caller that asks one
+/// decision per cycle and pays the resolution and the connection once.
+pub(crate) fn open_session(
+    engine: Option<EngineChoice>,
+    ollaya_url: String,
+    preset: Option<crate::decide_remote::Preset>,
+    model: Option<String>,
+) -> Result<Box<dyn DecisionEngine>, String> {
+    if !crate::config_cmd::classify_enabled()? {
+        return Err("classify is disabled; enable it with `pixel config classify on` or `pixel config setup`".into());
+    }
+    let opts = ClassifyOptions {
+        text: None,
+        context: None,
+        labels: Vec::new(),
+        criteria: Vec::new(),
+        remote_preset: preset,
+        remote_model: model.clone(),
+        engine,
+        ollaya_url,
+        jsonl: false,
+        json: false,
+        // A held-open session is an interactive caller, not a prompt hook:
+        // it takes the interaction cap, not the hook's sub-second one.
+        if_warm: false,
+        // Every question it asks carries its own labels, so the built-in
+        // prompt-intent battery (which `task_intent` selects) is never what
+        // it wants.
+        task_intent: false,
+    };
+    let resolved = resolve_engine_for(&opts)?;
+    open_resolved(
+        resolved,
+        resolve_remote_preset(preset, crate::config_cmd::classify_remote_preset()),
+        model,
+        false,
     )
 }
 

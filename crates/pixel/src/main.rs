@@ -30,6 +30,9 @@ mod audit_cmd;
 mod call_guard;
 mod classify;
 mod classify_setup;
+mod task_sandbox;
+mod task_scheduler;
+mod ultraflow_cmd;
 mod config_cmd;
 mod config_file;
 mod coverage_cmd;
@@ -53,6 +56,7 @@ mod search_filter;
 mod serve_trace;
 mod sniper_cmd;
 mod task_runtime;
+
 mod update_notice;
 mod web_search;
 mod workspace_cmd;
@@ -1283,6 +1287,16 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Drive a browser toward a goal with `pixel classify` one operation at
+    /// a time, save what worked as a `pixel flow`, and replay that saved
+    /// document later — its branch conditions decided by `pixel classify`
+    /// instead of matched text.
+    ///
+    /// `discover` is the jev-style loop: one question per cycle whose
+    /// options are the operation-target pairs the page currently offers.
+    /// `replay` follows the composed document, and re-decides a step whose
+    /// page moved on, recording the new branch with `--update`.
+    Ultraflow(ultraflow_cmd::UltraflowOptions),
     /// Save, retrieve, list, revise, and replay proven agent-browser paths
     /// (auth flows, config flows) so the agent follows a deterministic
     /// shortcut instead of re-discovering the UI from scratch every time.
@@ -7513,6 +7527,7 @@ fn run_command(
                 json,
             })
         }
+        Command::Ultraflow(options) => ultraflow_cmd::run(options),
         Command::ReplayFlow { cmd } => {
             use pixel_flow::FlowAction;
             let json = match &cmd {

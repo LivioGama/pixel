@@ -29,6 +29,7 @@ mod scope_task_precision;
 mod search_compat_cli;
 mod support;
 mod targets_cli;
+mod ultraflow_cli;
 mod uninstall_cli;
 #[cfg(unix)]
 mod update_notice_cli;
