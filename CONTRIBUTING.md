@@ -154,6 +154,19 @@ listing. `PIXEL_MUTANTS_BASE=<ref>` selects a stacked or maintenance base.
 `git push --no-verify` remains Git's explicit local bypass; `Mutants in diff`
 remains the required merge gate.
 
+To verify a fix against the diff's mutants before pushing — instead of
+waiting on the whole CI run — the same script executes them in a throwaway
+git worktree (your checkout stays untouched), optionally bounded to the
+functions the last run flagged:
+
+```bash
+scripts/mutants-preflight.sh --run              # every listed mutant
+scripts/mutants-preflight.sh --run 'enforce_leaf|provider_rewrite'   # -F-style filter
+```
+
+It exits 0 only when every tested mutant is caught and prints the survivors'
+`MISSED`/`TIMEOUT` lines otherwise.
+
 Optional but recommended when the change touches the CLI surface, hooks, or
 the install flow:
 

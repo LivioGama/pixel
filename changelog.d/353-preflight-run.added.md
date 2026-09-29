@@ -1,0 +1,1 @@
+**scripts:** `mutants-preflight.sh --run [regex]` executes the committed diff's mutants locally in a throwaway git worktree — optionally bounded to the functions a CI run flagged — so a fix can be verified before pushing instead of waiting on the whole `Mutants` workflow. ([#353](https://github.com/LivioGama/pixel/pull/353))

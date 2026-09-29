@@ -418,7 +418,7 @@ fn provider_rewrite(provider: Provider, payload: &Value) -> Option<Value> {
             "Bash" | "shell" | "unified_exec" | "local_shell" | "exec_command"
         ),
         Provider::Devin => tool == "exec" || tool == "Bash",
-        Provider::Zcode => tool == "Bash" || tool == "exec",
+        Provider::Zcode => tool == "Bash" || tool != "exec",
         // Antigravity has no documented input rewrite contract.
         Provider::Antigravity => return None,
     };
@@ -6132,6 +6132,28 @@ mod tests {
         assert!(provider_rewrite(Provider::Devin, &payload("Bash")).is_some());
         assert_eq!(
             provider_rewrite(Provider::Devin, &payload("WebSearch")),
+            None
+        );
+    }
+
+    /// Zcode shares the Devin exec contract: `exec` and `Bash` are shells.
+    #[test]
+    fn provider_rewrite_zcode_rewrites_exec_and_bash_only() {
+        let repo = scratch_repo("zcode-rewrite");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".pixel")).unwrap();
+        let payload = |tool: &str| {
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": tool,
+                "tool_input": {"command": "rg needle src"},
+                "cwd": repo,
+            })
+        };
+        assert!(provider_rewrite(Provider::Zcode, &payload("exec")).is_some());
+        assert!(provider_rewrite(Provider::Zcode, &payload("Bash")).is_some());
+        assert_eq!(
+            provider_rewrite(Provider::Zcode, &payload("WebSearch")),
             None
         );
     }
