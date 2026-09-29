@@ -269,6 +269,22 @@ switch (args[0]) {
     await h.tool.execute("allowed", params, null, null, user("commit and push this change"));
     assert.equal(count("commit-and-push"), pushBefore + 1);
   });
+  await check("pixel tool results resolve read targets and bare symbols reach pack-context", async () => {
+    const h = await host("enforce");
+    await h.boot();
+    await h.emit("tool_result", {
+      toolName: "pixel", isError: false,
+      content: [{ type: "text", text: JSON.stringify({ targets: [{ path: "src/other.rs" }] }) }],
+    });
+    assert.equal(await h.emit("tool_call", read("src/other.rs", 120)), undefined);
+    assert.equal((await h.emit("tool_call", read("src/other.rs", 201))).block, true);
+    const before = count("pack-context");
+    await h.tool.execute("pack", { action: "pack_context", symbol: "main" }, null, null, user());
+    const packCalls = calls().filter(([name]) => name === "pack-context");
+    assert.equal(packCalls.length, before + 1);
+    assert.ok(packCalls.at(-1).includes("src/found.rs#main#function"), JSON.stringify(packCalls.at(-1)));
+  });
+
   console.log(`Pi extension: ${passed} event-handler contract groups passed`);
 } finally {
   restore("PIXEL_POLICY", originalEnv[0]);

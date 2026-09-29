@@ -202,6 +202,27 @@ function simpleTranslation(command: string, root: string) {
   return null;
 }
 
+/// `find-code` matches carry the pieces of a uid; pack-context and impact
+/// accept only that form, so a bare symbol name resolves through find-code
+/// first instead of erroring inside the operation.
+function matchUid(match: any): string | undefined {
+  if (!match?.path || !match?.symbol_kind) return undefined;
+  const name = match.raw ?? match.name;
+  if (!name) return undefined;
+  return `${match.path}#${match.owner ? `${match.owner}::` : ""}${name}#${match.symbol_kind}`;
+}
+
+function resolveSymbolUid(root: string, wanted: string, path?: string): string | undefined {
+  try {
+    const output = run(root, ["find-code", wanted, ...(path ? [path] : []), "--json", "--limit", "5"]);
+    const found = parseEvidence(output) as any;
+    if (found?.confidence !== "resolved") return undefined;
+    return matchUid(found?.matches?.[0]);
+  } catch {
+    return undefined;
+  }
+}
+
 function classify(tool: string, input: any, root: string, resolvedPaths: Set<string>, state: { pixelHealthy?: boolean; pixelCalled: boolean }): { kind: string; reason: string; operation?: string } {
   if (tool === "pixel") return { kind: "tool", reason: "structured Pixel" };
   if (EDIT_TOOLS.has(tool)) {
@@ -222,7 +243,7 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
     if (path && resolvedPaths.has(target) && Number(input.limit) > 0 && Number(input.limit) <= READ_LIMIT) {
       return { kind: "exception", reason: "bounded Pixel-resolved target read" };
     }
-    return { kind: "blocked", reason: "Use pixel with a task goal, or specify a target and a read limit of at most 200 lines" };
+    return { kind: "blocked", reason: "Resolve the path with the pixel tool first (scope_task, search_content or find_code), then read it with a limit of at most 200 lines" };
   }
   if (tool === "bash" || tool === "run_command") {
     const command = String(input.command ?? input.cmd ?? "").trim();
@@ -304,6 +325,13 @@ export default function activate(pi: ExtensionAPI) {
           return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
         }
         const index = health(root, action);
+        if ((action === "impact" || action === "pack_context")) {
+          const wanted = String(p.symbol ?? p.query ?? p.goal ?? "").trim();
+          if (wanted && !wanted.includes("#")) {
+            const uid = resolveSymbolUid(root, wanted, p.path ? String(p.path) : undefined);
+            if (uid) p = { ...p, symbol: uid };
+          }
+        }
         const steps = commandFor(action, p);
         const evidence = steps.map((args) => {
           const output = run(root, args);
@@ -315,7 +343,7 @@ export default function activate(pi: ExtensionAPI) {
           const matches = found?.matches;
           if (found?.confidence === "resolved" && Array.isArray(matches) && matches.length === 1 && matches[0].symbol_kind) {
             const match = matches[0];
-            const uid = `${match.path}#${match.owner ? `${match.owner}::` : ""}${match.raw}#${match.symbol_kind}`;
+            const uid = matchUid(match)!;
             for (const args of [["impact", uid, "--json"], ["pack-context", uid, "--json", "--budget", "1200"]]) {
               const output = run(root, args);
               rememberPaths(parseEvidence(output), resolvedPaths, root);
@@ -413,8 +441,16 @@ export default function activate(pi: ExtensionAPI) {
   // A tool_result replacement must carry forward the original result. Only
   // successful edits have a post-edit snapshot; failures retain diagnostics.
   pi.on("tool_result", async (event, ctx) => {
-    if (!EDIT_TOOLS.has(event.toolName) || event.isError) return;
     const root = ctx?.cwd ?? process.cwd();
+    // Paths the global `pixel` tool (or this one) surfaced count as resolved:
+    // the guard's bounded-read exception should see every Pixel answer, not
+    // only this extension's own calls.
+    if (!event.isError && (event.toolName === "pixel" || event.toolName === "pixel_project")) {
+      for (const part of event.content ?? []) {
+        if (part?.type === "text") rememberPaths(parseEvidence(String(part.text)), resolvedPaths, root);
+      }
+    }
+    if (!EDIT_TOOLS.has(event.toolName) || event.isError) return;
     const raw = pixelText(root, ["what-changed", "--json", "--tests"]);
     if (!raw) {
       state.pixelHealthy = false;
