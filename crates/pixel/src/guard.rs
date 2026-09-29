@@ -1719,6 +1719,58 @@ fn run_provider_guard(provider: Provider, delegate_rtk: bool, raw: &str) -> ! {
     if delegate_rtk && provider == Provider::Claude {
         delegate_rtk_hook(raw);
     }
+    // Claude's native Read/Grep tools reach the hook through the widened
+    // PreToolUse matcher installed by `routing::shell_matcher`; Claude keeps
+    // its own permission flow (no deny, no input rewrite — `policy_response`
+    // is silent for these tools), but the advisory tier the provider-less
+    // legacy path already emits is reproduced here. Glob is intentionally
+    // absent from the matcher; `non_shell_advisory` mirrors that decision.
+    if provider == Provider::Claude {
+        let event = payload
+            .get("hook_event_name")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if is_guard_event(&payload, event) {
+            let tool = payload
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let tool_input_value = payload.get("tool_input").cloned().unwrap_or(Value::Null);
+            if let Some(tool_input) = tool_input_value.as_object() {
+                let cwd = payload.get("cwd").and_then(Value::as_str).map_or_else(
+                    || std::env::current_dir().unwrap_or_default(),
+                    PathBuf::from,
+                );
+                let raw_path = tool_input
+                    .get("file_path")
+                    .or_else(|| tool_input.get("path"))
+                    .or_else(|| tool_input.get("AbsolutePath"))
+                    .or_else(|| tool_input.get("TargetFile"))
+                    .or_else(|| tool_input.get("target_file"))
+                    .or_else(|| tool_input.get("filePath"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let anchor = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
+                let idx_root = find_up(&anchor, ".pixel");
+                let manifest_root = find_up(&anchor, Path::new(".pixel").join("targets.json"));
+                let (manifest, manifest_expired) =
+                    match manifest_root.as_deref().map(load_manifest_state) {
+                        Some(ManifestState::Active(m)) => (Some(m), false),
+                        Some(ManifestState::Expired) => (None, true),
+                        _ => (None, false),
+                    };
+                non_shell_advisory(
+                    tool,
+                    tool_input,
+                    &cwd,
+                    raw_path,
+                    idx_root.as_deref(),
+                    manifest.as_ref(),
+                    manifest_expired,
+                );
+            }
+        }
+    }
     // Ordinary commands receive no new context or permission override.
     std::process::exit(0);
 }
@@ -2457,63 +2509,22 @@ pub fn run(provider: Option<Provider>, delegate_rtk: bool) -> ! {
     }
 
     match tool {
-        "Read" | "Grep" | "Glob"
-        | "read" | "grep" | "find_file_by_name" | "glob" | "notebook_read"
+        "Read" | "Grep"
+        | "read" | "grep" | "find_file_by_name" | "notebook_read"
         | "read_file" | "search" | "find" | "ls"
         // Antigravity: view_file (read), grep_search (grep), find_by_name (find), list_dir (ls)
         | "view_file" | "grep_search" | "find_by_name" | "list_dir"
         // Cursor composer: file_search
         | "file_search" => {
-            // In indexed repos, recommend pixel search-content for Grep tool calls.
-            // The hook cannot change the tool type (Grep→Bash), so this is an
-            // advisory and the original Grep call proceeds.
-            if idx_root.is_some() && is_grep_tool(tool, tool_input) {
-                let pattern = tool_input
-                    .get("pattern")
-                    .and_then(Value::as_str)
-                    .or_else(|| tool_input.get("query").and_then(Value::as_str))
-                    // Antigravity grep_search / Cursor file_search use "Query"
-                    .or_else(|| tool_input.get("Query").and_then(Value::as_str))
-                    .unwrap_or("");
-                if !pattern.is_empty() {
-                    advise(&grep_redirect_advisory_lines(pattern, &cwd, tool_input));
-                }
-            }
-            // RETRIEVAL ADVISORY — in an indexed repo with NO active manifest,
-            // suggest `pixel scope-task` first while allowing retrieval to proceed.
-            // Read is allowed through (reading a known file is not retrieval),
-            // but gets an advisory in indexed repos with no manifest if the
-            // file is a source file — suggesting `pixel scope-task` first.
-            // `PIXEL_GUARD_RETRIEVAL=0` disables this tier.
-            if idx_root.is_some() && manifest.is_none() && !manifest_expired && is_retrieval_tool(tool)
-                && !env_flag_off("PIXEL_GUARD_RETRIEVAL") {
-                    retrieval_guard_advisory(&cwd, idx_root.as_deref().unwrap());
-                }
-            // Retrieval-first advisory for Read of source files: in an indexed
-            // repo with no active manifest, suggest `pixel scope-task` before
-            // reading source files. Advisory only — the read proceeds. This
-            // catches the "massive token waste via redundant reads" failure
-            // mode where agents read entire files instead of using pixel search-content.
-            // Size-gated (shunt-style): files at or under PIXEL_GUARD_READ_LINES
-            // (default 350) and targeted reads (offset/limit set) pass silently —
-            // the agent is already doing the cheap thing, so advising would be
-            // noise. Only a whole-file read of a large source file gets the nudge.
-            if idx_root.is_some() && manifest.is_none() && !manifest_expired && is_read_tool(tool)
-                && !read_is_targeted(tool_input)
-                && let Some(p) = resolve(raw_path, &cwd)
-                    && p.is_file() && is_source_file(&p) && !is_exempt(&p, idx_root.as_deref().unwrap())
-                        && !env_flag_off("PIXEL_GUARD_READ") {
-                            let lines = file_line_count(&p);
-                            if lines > read_advisory_min_lines() {
-                                read_scoping_advisory(&p, lines, idx_root.as_deref().unwrap());
-                            }
-                        }
-            if let Some(m) = &manifest {
-                let p = resolve(raw_path, &cwd).unwrap_or_else(|| canonical(&cwd));
-                if !allowed(&p, m) {
-                    scoping_advisory(&p, m);
-                }
-            }
+            non_shell_advisory(
+                tool,
+                tool_input,
+                &cwd,
+                raw_path,
+                idx_root.as_deref(),
+                manifest.as_ref(),
+                manifest_expired,
+            );
         }
         "Edit" | "MultiEdit" | "NotebookEdit" | "Write"
         | "edit" | "write" | "notebook_edit"
@@ -3450,6 +3461,102 @@ fn retrieval_guard_advisory(_cwd: &Path, idx_root: &Path) -> ! {
             .into(),
         "Proceeding with the original retrieval call.".into(),
     ]);
+}
+
+/// Read / Grep advisory tier used by both the provider-less legacy path
+/// (`run`, when no `--provider` is given) and Claude's `--provider claude`
+/// path (`run_provider_guard`). The hook cannot change a tool type, so every
+/// block here is `advise()`-then-exit (the original call proceeds).
+///
+/// Glob is intentionally absent — both from the matcher installed by
+/// `routing::shell_matcher` and from the helper's own tool-name set. Glob
+/// only enumerates paths, and the Read/Edit of any result is itself
+/// guarded: blocking enumeration alone would be noise. Devin's glob and
+/// `find_file_by_name` still appear below because Devin's documented block
+/// contract treats them as retrieval calls.
+fn non_shell_advisory(
+    tool: &str,
+    tool_input: &serde_json::Map<String, Value>,
+    cwd: &Path,
+    raw_path: &str,
+    idx_root: Option<&Path>,
+    manifest: Option<&Manifest>,
+    manifest_expired: bool,
+) {
+    if !matches!(
+        tool,
+        "Read" | "Grep"
+            | "read" | "grep" | "find_file_by_name" | "notebook_read"
+            | "read_file" | "search" | "find" | "ls"
+            // Antigravity: view_file (read), grep_search (grep), find_by_name (find), list_dir (ls)
+            | "view_file" | "grep_search" | "find_by_name" | "list_dir"
+            // Cursor composer: file_search
+            | "file_search"
+    ) {
+        return;
+    }
+    // In indexed repos, recommend pixel search-content for Grep tool calls.
+    // The hook cannot change the tool type (Grep→Bash), so this is an
+    // advisory and the original Grep call proceeds.
+    if idx_root.is_some() && is_grep_tool(tool, tool_input) {
+        let pattern = tool_input
+            .get("pattern")
+            .and_then(Value::as_str)
+            .or_else(|| tool_input.get("query").and_then(Value::as_str))
+            // Antigravity grep_search / Cursor file_search use "Query"
+            .or_else(|| tool_input.get("Query").and_then(Value::as_str))
+            .unwrap_or("");
+        if !pattern.is_empty() {
+            advise(&grep_redirect_advisory_lines(pattern, cwd, tool_input));
+        }
+    }
+    // RETRIEVAL ADVISORY — in an indexed repo with NO active manifest,
+    // suggest `pixel scope-task` first while allowing retrieval to proceed.
+    // Read is allowed through (reading a known file is not retrieval),
+    // but gets an advisory in indexed repos with no manifest if the
+    // file is a source file — suggesting `pixel scope-task` first.
+    // `PIXEL_GUARD_RETRIEVAL=0` disables this tier.
+    if let Some(idx) = idx_root
+        && manifest.is_none()
+        && !manifest_expired
+        && is_retrieval_tool(tool)
+        && !env_flag_off("PIXEL_GUARD_RETRIEVAL")
+    {
+        retrieval_guard_advisory(cwd, idx);
+    }
+    // Retrieval-first advisory for Read of source files: in an indexed
+    // repo with no active manifest, suggest `pixel scope-task` before
+    // reading source files. Advisory only — the read proceeds. This
+    // catches the "massive token waste via redundant reads" failure
+    // mode where agents read entire files instead of using pixel search-content.
+    // Size-gated (shunt-style): files at or under PIXEL_GUARD_READ_LINES
+    // (default 350) and targeted reads (offset/limit set) pass silently —
+    // the agent is already doing the cheap thing, so advising would be
+    // noise. Only a whole-file read of a large source file gets the nudge.
+    if let Some(idx) = idx_root
+        && manifest.is_none()
+        && !manifest_expired
+        && is_read_tool(tool)
+        && !read_is_targeted(tool_input)
+        && let Some(p) = resolve(raw_path, cwd)
+        && p.is_file()
+        && is_source_file(&p)
+        && !is_exempt(&p, idx)
+        && !env_flag_off("PIXEL_GUARD_READ")
+    {
+        let lines = file_line_count(&p);
+        if lines > read_advisory_min_lines() {
+            read_scoping_advisory(&p, lines, idx);
+        }
+    }
+    // Manifest scoping advisory: when a manifest is active, files outside its
+    // target list get an advisory that names the manifest's tasks.
+    if let Some(m) = manifest {
+        let p = resolve(raw_path, cwd).unwrap_or_else(|| canonical(cwd));
+        if !allowed(&p, m) {
+            scoping_advisory(&p, m);
+        }
+    }
 }
 
 /// Advisory for edits to existing files in an indexed repo with no active

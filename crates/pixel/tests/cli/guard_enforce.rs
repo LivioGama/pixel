@@ -470,7 +470,9 @@ fn claude_should_preserve_native_permissions_in_every_mode() {
     for mode in ["advisory", "enforce", "off"] {
         for event in [
             shell("git status", &dir),
-            payload("grep_search", json!({"query":"needle"}), &dir),
+            // Devin's `read` is small enough (1 line) that the read-scoping
+            // advisory stays silent; the redirect advisory for `grep_search`
+            // now fires too, so it lives in its own Claude-named test below.
             payload("read", json!({"path":"src/lib.rs"}), &dir),
         ] {
             assert_eq!(
@@ -480,6 +482,59 @@ fn claude_should_preserve_native_permissions_in_every_mode() {
             );
         }
     }
+}
+
+/// Claude's widened PreToolUse matcher now reaches Read and Grep. The hook
+/// cannot change the tool type, so the only available intervention is the
+/// advisory the provider-less legacy path already emits. Glob stays silent
+/// per `guard.rs`'s documented decision: path enumeration alone is not a
+/// problem worth blocking.
+#[test]
+fn claude_read_and_grep_advisory_names_pixel_search_content() {
+    let dir = indexed_dir("claude-native-read-grep");
+    // Grep: the redirect advisory names `pixel search-content`.
+    let grep_event = payload("Grep", json!({"pattern": "needle"}), &dir);
+    let grep_response = guard("claude", &grep_event, &[]);
+    let grep_note = grep_response
+        .get("hookSpecificOutput")
+        .and_then(|h| h.get("additionalContext"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("expected advisory for Grep: {grep_response}"));
+    assert!(
+        grep_note.contains("pixel search-content"),
+        "Grep advisory must name `pixel search-content`: {grep_note}"
+    );
+    // Read: drop the size gate so the read_scoping_advisory fires on the
+    // small `src/lib.rs` fixture. The advisory mentions `pixel search-content`
+    // as one of the cheaper alternatives to a whole-file read.
+    let read_event = payload("Read", json!({"file_path": "src/lib.rs"}), &dir);
+    let read_response = guard("claude", &read_event, &[("PIXEL_GUARD_READ_LINES", "0")]);
+    let read_note = read_response
+        .get("hookSpecificOutput")
+        .and_then(|h| h.get("additionalContext"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("expected advisory for Read: {read_response}"));
+    assert!(
+        read_note.contains("pixel search-content"),
+        "Read advisory must name `pixel search-content`: {read_note}"
+    );
+    // Glob: not in the matcher, and not handled by `non_shell_advisory`,
+    // so the hook emits nothing.
+    let glob_event = payload("Glob", json!({"pattern": "*.rs"}), &dir);
+    assert_eq!(
+        guard("claude", &glob_event, &[("PIXEL_POLICY", "advisory")]),
+        Value::Null,
+        "Glob must stay silent per decision 2"
+    );
+    // Bash: still silent — Claude keeps its native permission flow for shell.
+    assert_eq!(
+        guard(
+            "claude",
+            &shell("git status", &dir),
+            &[("PIXEL_POLICY", "advisory")]
+        ),
+        Value::Null
+    );
 }
 
 /// Devin rewrites supported exec retrieval without blocking native tools by

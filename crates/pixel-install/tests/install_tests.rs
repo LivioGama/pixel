@@ -3314,7 +3314,7 @@ fn repo_install_writes_all_five_artifacts() {
     let pre = claude_hooks["PreToolUse"].as_array().unwrap();
     assert!(
         pre.iter().any(|g| {
-            g["matcher"].as_str() == Some("Bash")
+            g["matcher"].as_str() == Some("Bash|Read|Grep")
                 && g["hooks"].as_array().is_some_and(|h| {
                     h.iter().any(|hook| {
                         hook["command"]
