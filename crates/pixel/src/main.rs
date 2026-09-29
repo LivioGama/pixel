@@ -5209,14 +5209,29 @@ const READ_ONLY_COMMANDS: &[&str] = &[
     "token-savings",
 ];
 
-/// Whether the command that just ran may be executed again by the relaunch.
-fn read_only_command(command_label: &str) -> bool {
-    READ_ONLY_COMMANDS.contains(&command_label)
+/// Whether the parsed invocation may be executed again by the relaunch:
+/// the top-level label and every nested mode must be read-only. A mutating
+/// nested mode (`recall index` ingests, `list-errors gc` applies
+/// retention) or a flag that reaches outward (`list-branches --fetch`
+/// runs `git fetch --prune`) makes the invocation mutating.
+fn read_only_invocation(matches: &ArgMatches) -> bool {
+    let Some(label) = matches.subcommand_name() else {
+        return false;
+    };
+    if !READ_ONLY_COMMANDS.contains(&label) {
+        return false;
+    }
+    match matches.subcommand() {
+        Some(("recall", nested)) => nested.subcommand_name() != Some("index"),
+        Some(("list-errors", nested)) => nested.subcommand_name() != Some("gc"),
+        Some(("list-branches", nested)) => !nested.get_flag("fetch"),
+        _ => true,
+    }
 }
 
 #[cfg(test)]
 mod update_close_tests {
-    use super::{Cli, READ_ONLY_COMMANDS, read_only_command};
+    use super::{Cli, READ_ONLY_COMMANDS, read_only_invocation};
     use clap::CommandFactory;
 
     #[test]
@@ -5239,33 +5254,55 @@ mod update_close_tests {
         check.join().unwrap();
     }
 
+    fn read_only(args: &[&str]) -> bool {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let check = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let matches = Cli::command()
+                    .try_get_matches_from(
+                        std::iter::once("pixel")
+                            .chain(args.iter().map(std::string::String::as_str)),
+                    )
+                    .unwrap();
+                read_only_invocation(&matches)
+            })
+            .unwrap();
+        check.join().unwrap()
+    }
+
     #[test]
     fn read_only_should_accept_retrieval_and_refuse_state_changers() {
-        assert!(read_only_command("search-content"));
-        assert!(read_only_command("impact"));
-        assert!(read_only_command("diff"));
+        assert!(read_only(&["search-content", "pattern"]));
+        assert!(read_only(&["impact", "symbol"]));
+        assert!(read_only(&["diff", "HEAD~1"]));
         // Every one of these re-run would mutate state: the gate must keep
         // the update question away from them.
-        for label in [
-            "push",
-            "commit",
-            "commit-and-push",
-            "install",
-            "uninstall",
-            "config",
-            "scope-task",
-            "build-index",
-            "doctor",
-            "self-update",
-            "run-hook",
-            "rename",
-            "plan-rollback",
-            "sync-branch",
-            "squash-branch",
-            "edit-env",
+        for args in [
+            &["push", "origin", "main", "--request-id", "x"][..],
+            &["commit", "--request-id", "x", "--message", "m"],
+            &["install"],
+            &["config", "classify-engine", "local"],
+            &["scope-task", "--clear"],
+            &["build-index", "."],
+            &["doctor"],
+            &["self-update"],
+            &["run-hook", "guard"],
+            &["rename", "a", "b"],
         ] {
-            assert!(!read_only_command(label), "{label} must not relaunch");
+            assert!(!read_only(args), "{args:?} must not relaunch");
         }
+    }
+
+    #[test]
+    fn nested_mutating_modes_and_outward_flags_should_refuse() {
+        assert!(read_only(&["recall", "search", "pattern"]));
+        assert!(read_only(&["recall", "sessions"]));
+        assert!(!read_only(&["recall", "index"]));
+        assert!(read_only(&["list-errors", "last"]));
+        assert!(!read_only(&["list-errors", "gc"]));
+        assert!(read_only(&["list-branches"]));
+        assert!(!read_only(&["list-branches", "--fetch"]));
     }
 }
 
@@ -5496,7 +5533,7 @@ fn run() -> Result<(), String> {
             owned_exit,
             command_label: &command_label,
             stdin_is_terminal: std::io::IsTerminal::is_terminal(&std::io::stdin()),
-            read_only: read_only_command(&command_label),
+            read_only: read_only_invocation(&matches),
             hint: release_upgrade_hint(),
             // A path that survives the upgrade: the stable PATH entry, not
             // the versioned store path `current_exe` resolves to.
