@@ -18,7 +18,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/examples/pixel-scope-comparison.webp" width="100%" alt="The same task without Pixel and with it: the agent wanders the repository, or starts from a ranked list of files" />
+  <img src="docs/examples/pixel-scope-comparison.webp" width="800" alt="The same task without Pixel and with it: the agent wanders the repository, or starts from a ranked list of files" />
 </p>
 
 ## Why
@@ -28,6 +28,53 @@
 - **Evidence with boundaries.** Every answer says whether it is complete, capped or stale; a static call graph never claims it saw every caller.
 - **Local and deterministic.** The index lives in `.pixel/` at the repository root and never leaves the machine; no telemetry. Only Git remotes, the optional `pixel classify` (the one model-backed command) and `pixel web-search`, a one-time embedding model download, and a once-a-day release check made only for a person at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) use the network.
 - **Safe Git.** `pixel impact` before an edit, crash-safe `pixel commit-and-push` after it, never a raw `--force`.
+
+## `pixel classify`: your local Jev
+
+Use `pixel classify` to choose between named options. The example below is the
+same one shown on the [homepage](https://pixel-cli.dev/): it compares three
+model tiers for a Rust PR review and returns one probability per label, then
+`predicted:` for the highest score.
+
+```bash
+pixel classify "Review this Rust PR, find correctness bugs, and propose a safe patch." \
+  --engine ollaya \
+  --context "Choose the cheapest model that can reliably handle the request." \
+  --label 'claude-haiku-4.5_(fast)' \
+  --label 'claude-opus-5.5_(strong)' \
+  --label 'claude-fable-5.1_(reasoning)' \
+  --criterion 'claude-haiku-4.5_(fast)=Simple rewriting, extraction, or classification; no deep reasoning.' \
+  --criterion 'claude-opus-5.5_(strong)=Complex coding, multi-file review, or tool use; accuracy matters.' \
+  --criterion 'claude-fable-5.1_(reasoning)=Multi-step analysis, difficult debugging, or high uncertainty.'
+
+claude-fable-5.1_(reasoning): 0.192
+claude-haiku-4.5_(fast): 0.098
+claude-opus-5.5_(strong): 0.710
+predicted: claude-opus-5.5_(strong)
+```
+
+One local run using Ollaya: each score is the model's probability for that
+label; `predicted:` is the top choice. This is Pixel's local Jev-style decision
+mode. In the published typed-decision benchmark, Ollaya's `winnow:e4b` scored
+0.722 accuracy; hosted TypeSafe Jev scored 0.738. [Benchmark details](https://pixel-cli.dev/benchmarks/#coding-decisions).
+
+Remote decisions (uses fast LLMs, not the System One model) can also return scores, through
+OpenRouter, Ollama Cloud, DeepSeek, OpenCode Go, or a local OpenAI-compatible
+endpoint (`--engine remote
+--remote-preset openrouter|ollama|deepseek|opencode-go|local`). On 14 public
+coding prompts:
+
+| Model | Provider (preset) | Score |
+|---|---|---|
+| deepseek-v4.1-flash | Ollama Cloud (`ollama`) | **14/14 (1.00)** |
+| deepseek-v4-flash | Ollama Cloud (`ollama`) | 13/14 (0.93) |
+| gpt-oss:120b / gpt-oss:20b | Ollama Cloud (`ollama`) | 13/14 (0.93) |
+| nemotron-3-ultra | Ollama Cloud (`ollama`) | 12/14 (0.86) |
+| google/gemini-3.1-flash-lite | OpenRouter (`openrouter`) | 11/14 (0.79) |
+| qwen3.5:397b | Ollama Cloud (`ollama`) | 10/14 (0.71) |
+
+These are benchmark accuracy scores, not per-decision probabilities.
+[Full model results and method](docs/bench/decide-bakeoff.md).
 
 ## Install
 

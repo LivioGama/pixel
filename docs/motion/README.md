@@ -71,4 +71,7 @@ scripts/render.sh PixelScope AgentDemo   # some of them
 - `<name>.mp4`: 1600×1000 H.264, played by the website;
 - `<name>.jpg`: its last frame, the website's poster;
 - `<name>.webp`: 800×500 at 15 fps, embedded by the root README, since GitHub
-  renders an animated image inline but not a video.
+  renders an animated image inline but not a video. For a sharper README asset,
+  set `README_WEBP_SCALE=2` (1600×1000), `README_RENDER_CRF=18` and
+  `README_WEBP_ONLY=1`. README WebP frames use lossless encoding; the last
+  option leaves the website video and poster untouched.

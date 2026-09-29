@@ -39,6 +39,7 @@ apply to:
 | `change-propagation.md` | always | list every producer and reader of a value before changing it; siblings without the new input, version bumps, named constants, secrets in every sink, timers around the real cost |
 | `graph-resolver.md` | `crates/pixel-graph/**` | the chain a resolution change crosses (extraction, storage, index, six resolution paths, `rename`, diagnostics), the language rule it models, tier honesty |
 | `install-layouts.md` | `crates/pixel-install/**` | repo equal to `$HOME`, foreign configs, quoted paths in pasted commands, global and repo-local state kept apart |
+| `readme-webp.md` | `docs/examples/*.webp`, `docs/motion/**` | the verified lossless pipeline for README animated webp: render crf=10, 1600×1000 lanczos frames, `img2webp -lossless`, embed `width="800"` |
 
 `.claude/rules` is a symlink to that directory (Claude Code loads it by
 itself, honouring `paths:`), and `CLAUDE.md` is a symlink to this file. A
