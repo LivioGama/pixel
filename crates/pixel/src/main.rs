@@ -5167,6 +5167,145 @@ fn checks_deployed_prompts(command_label: &str, protected: bool) -> bool {
     !protected && !matches!(command_label, "install" | "doctor" | "uninstall")
 }
 
+/// The command labels the update close may relaunch. The relaunch executes
+/// the command again, so only the read-only surface — retrieval, graph
+/// queries, git and pixel reporting — is ever offered; a mutating command
+/// (`push`, `install`, `scope-task --clear`, ...) finishes and stays
+/// finished, and its notice stays informative without a prompt. Labels are
+/// clap's kebab-case subcommand names, the same strings
+/// `matches.subcommand_name()` reports.
+const READ_ONLY_COMMANDS: &[&str] = &[
+    "search-content",
+    "search-like-rg",
+    "search-meaning",
+    "find-code",
+    "find-symbol",
+    "list-signatures",
+    "call-path",
+    "who-calls",
+    "impact",
+    "repo-map",
+    "pack-context",
+    "execution-brief",
+    "evidence",
+    "list-flows",
+    "list-areas",
+    "what-changed",
+    "status",
+    "coverage",
+    "audit",
+    "index-stats",
+    "recall",
+    "list-errors",
+    "repo-state",
+    "review-changes",
+    "commit-history",
+    "diff",
+    "file-history",
+    "search-history",
+    "dig-history",
+    "who-wrote",
+    "list-branches",
+    "token-savings",
+];
+
+/// Whether the parsed invocation may be executed again by the relaunch:
+/// the top-level label and every nested mode must be read-only. A mutating
+/// nested mode (`recall index` ingests, `list-errors gc` applies
+/// retention) or a flag that reaches outward (`list-branches --fetch`
+/// runs `git fetch --prune`) makes the invocation mutating.
+fn read_only_invocation(matches: &ArgMatches) -> bool {
+    let Some(label) = matches.subcommand_name() else {
+        return false;
+    };
+    if !READ_ONLY_COMMANDS.contains(&label) {
+        return false;
+    }
+    match matches.subcommand() {
+        Some(("recall", nested)) => nested.subcommand_name() != Some("index"),
+        Some(("list-errors", nested)) => nested.subcommand_name() != Some("gc"),
+        Some(("list-branches", nested)) => !nested.get_flag("fetch"),
+        _ => true,
+    }
+}
+
+#[cfg(test)]
+mod update_close_tests {
+    use super::{Cli, READ_ONLY_COMMANDS, read_only_invocation};
+    use clap::CommandFactory;
+
+    #[test]
+    fn every_read_only_label_is_a_real_command() {
+        // Building the full clap command overflows a test thread's default
+        // 2 MiB stack; give the builder room.
+        let check = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cli = Cli::command();
+                let real: Vec<&str> = cli.get_subcommands().map(clap::Command::get_name).collect();
+                for label in READ_ONLY_COMMANDS {
+                    assert!(
+                        real.contains(label),
+                        "{label} is not a subcommand name; the allow-list entry is dead"
+                    );
+                }
+            })
+            .unwrap();
+        check.join().unwrap();
+    }
+
+    fn read_only(args: &[&str]) -> bool {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let check = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let matches = Cli::command()
+                    .try_get_matches_from(
+                        std::iter::once("pixel")
+                            .chain(args.iter().map(std::string::String::as_str)),
+                    )
+                    .unwrap();
+                read_only_invocation(&matches)
+            })
+            .unwrap();
+        check.join().unwrap()
+    }
+
+    #[test]
+    fn read_only_should_accept_retrieval_and_refuse_state_changers() {
+        assert!(read_only(&["search-content", "pattern"]));
+        assert!(read_only(&["impact", "symbol"]));
+        assert!(read_only(&["diff", "HEAD~1"]));
+        // Every one of these re-run would mutate state: the gate must keep
+        // the update question away from them.
+        for args in [
+            &["push", "origin", "main", "--request-id", "x"][..],
+            &["commit", "--request-id", "x", "--message", "m"],
+            &["install"],
+            &["config", "classify-engine", "local"],
+            &["scope-task", "--clear"],
+            &["build-index", "."],
+            &["doctor"],
+            &["self-update"],
+            &["run-hook", "guard"],
+            &["rename", "a", "b"],
+        ] {
+            assert!(!read_only(args), "{args:?} must not relaunch");
+        }
+    }
+
+    #[test]
+    fn nested_mutating_modes_and_outward_flags_should_refuse() {
+        assert!(read_only(&["recall", "search", "pattern"]));
+        assert!(read_only(&["recall", "sessions"]));
+        assert!(!read_only(&["recall", "index"]));
+        assert!(read_only(&["list-errors", "last"]));
+        assert!(!read_only(&["list-errors", "gc"]));
+        assert!(read_only(&["list-branches"]));
+        assert!(!read_only(&["list-branches", "--fetch"]));
+    }
+}
+
 /// One stderr line naming the deployed prompts that differ from this
 /// binary's copies. Nothing outside `pixel doctor` said so, and every agent kept the
 /// old command map after an upgrade until someone reran the install.
@@ -5319,15 +5458,16 @@ fn run() -> Result<(), String> {
     // After the answer, before the metrics block: a person at a terminal
     // reads it last-but-one, and nothing else ever sees it. After `elapsed`
     // too: waiting on the release check is not the command's cost.
-    if let Some(check) = release_check
-        && let Some(notice) = update_notice::finish(
+    let update_line = release_check.and_then(|check| {
+        update_notice::finish(
             check,
             task_scheduler::now_unix(),
             env!("CARGO_PKG_VERSION"),
             release_upgrade_hint,
             std::env::var_os("NO_COLOR").is_none_or(|v| v.is_empty()),
         )
-    {
+    });
+    if let Some(notice) = &update_line {
         eprint!("{notice}");
     }
     // A command that owns its exit code still reports its outcome to the
@@ -5382,6 +5522,36 @@ fn run() -> Result<(), String> {
     // metrics history and the next invocation's footer read it back.
     // `finish` would drop it whenever the process exits first.
     logger.finish_flush();
+    // The update question closes the command, after the journal: an exec
+    // here must not lose the record of what just ran. `close_with_update`
+    // re-checks the updater, the opt-outs and the owned exit code, asks,
+    // upgrades, and on a taken update replaces this process with the new
+    // binary on the same arguments.
+    update_notice::close_with_update(
+        update_notice::Close {
+            notice: update_line.as_deref(),
+            owned_exit,
+            command_label: &command_label,
+            stdin_is_terminal: std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            read_only: read_only_invocation(&matches),
+            hint: release_upgrade_hint(),
+            // A path that survives the upgrade: the stable PATH entry, not
+            // the versioned store path `current_exe` resolves to.
+            exe: std::env::current_exe()
+                .ok()
+                .map(pixel_install::install::stable_exe_path),
+            args: &argv[1..],
+        },
+        |name| std::env::var_os(name),
+        &mut |prompt| {
+            eprint!("{prompt}");
+            let _ = std::io::stderr().flush();
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer).map(|_| answer)
+        },
+        &mut update_notice::run_upgrade,
+        &mut |exe, args| update_notice::relaunch(exe, args),
+    );
     if let Some(code) = owned_exit {
         std::process::exit(code);
     }

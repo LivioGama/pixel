@@ -1,5 +1,10 @@
 //! The "a newer pixel is released" line, once a day, on a terminal only.
 //!
+//! The "a newer pixel is released" line, once a day, on a terminal only —
+//! and, when stdin is a terminal too, the question under it: update now
+//! and relaunch? A yes runs the upgrade command and replaces the process
+//! with the fresh binary on the same arguments.
+//!
 //! Pixel ships often and most installs are never updated by hand, so the
 //! binary says when it is behind. Most invocations come from hooks and
 //! agents, whose stderr lands in a model's context, so the line is printed
@@ -247,6 +252,134 @@ pub(crate) fn finish(
         let _ = store(&check.path, &check.state);
     }
     notice
+}
+
+/// The opt-out variable for the update-and-relaunch prompt: any value but
+/// empty or `0` keeps the question from being asked.
+pub(crate) const PROMPT_OPT_OUT_VAR: &str = "PIXEL_NO_UPDATE_PROMPT";
+/// The question under the notice, Enter included, is yes.
+const PROMPT: &str = "update now and relaunch? [Y/n] ";
+
+/// Whether this invocation may ask the update question: a person is on the
+/// other end of stdin, the command is not the updater itself, and the
+/// opt-out is not set. The notice's own gating (terminal stderr, no `CI`,
+/// [`OPT_OUT_VAR`]) already ran, or there is no notice to ask about.
+fn prompt_enabled(
+    command_label: &str,
+    stdin_is_terminal: bool,
+    env: impl Fn(&str) -> Option<OsString>,
+) -> bool {
+    let set = |name: &str| env(name).is_some_and(|v| !v.is_empty() && v != "0");
+    stdin_is_terminal && command_label != "self-update" && !set(PROMPT_OPT_OUT_VAR)
+}
+
+/// Whether the typed answer accepts the update: yes, `y`, or a bare Enter
+/// (the capital `Y` in the prompt marks the default). Anything else,
+/// including a read error, declines.
+fn accepted(answer: &str) -> bool {
+    let answer = answer.trim().to_ascii_lowercase();
+    answer.is_empty() || answer == "y" || answer == "yes"
+}
+
+/// What `offer` decided after the answer.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    /// The upgrade ran: main replaces this process with the new binary.
+    Relaunch,
+    /// Declined, failed, or nothing to offer: main returns normally.
+    Stay,
+}
+
+/// Ask the question the notice raises, and run the upgrade when taken.
+/// The prompt and the child's output go to this process's stderr, the
+/// streams `enabled` already checked belong to a person. `ask` reads one
+/// answer and `run` executes one upgrade command; both are seams the
+/// tests drive in place of the terminal and `sh`.
+fn offer(
+    hint: Option<String>,
+    current: &str,
+    ask: &mut dyn FnMut(&str) -> std::io::Result<String>,
+    run: &mut dyn FnMut(&str) -> bool,
+) -> Outcome {
+    let Some(hint) = hint else {
+        return Outcome::Stay;
+    };
+    if !ask(PROMPT).is_ok_and(|answer| accepted(&answer)) {
+        return Outcome::Stay;
+    }
+    eprintln!("updating pixel: {hint}");
+    if run(&hint) {
+        return Outcome::Relaunch;
+    }
+    eprintln!("the update failed; staying on pixel {current}");
+    Outcome::Stay
+}
+
+/// Run the upgrade command through `sh -c` (the Homebrew hint composes two
+/// commands with `&&`), the child sharing this process's streams.
+pub(crate) fn run_upgrade(command: &str) -> bool {
+    std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Replace this process with the freshly upgraded binary on the same
+/// arguments: the user continues in the new pixel and nothing of this
+/// invocation runs after the swap.
+#[cfg_attr(test, mutants::skip)] // exec never returns; nothing in-process can observe it
+pub(crate) fn relaunch(exe: &Path, args: &[String]) -> ! {
+    let mut command = std::process::Command::new(exe);
+    command.args(args);
+    let error = std::os::unix::process::CommandExt::exec(&mut command);
+    eprintln!("pixel: could not relaunch {}: {error}", exe.display());
+    std::process::exit(1);
+}
+
+/// What the finished command hands the update close: the notice already on
+/// stderr, the exit code a command owns (never asked when set), the label
+/// and stdin state the prompt gates on, whether the command may re-run
+/// (the relaunch executes it again), the upgrade command for the running
+/// binary, its stable executable path — one that survives the upgrade, a
+/// PATH symlink, not a versioned store path — and the invocation to
+/// continue it with.
+pub(crate) struct Close<'a> {
+    pub(crate) notice: Option<&'a str>,
+    pub(crate) owned_exit: Option<i32>,
+    pub(crate) command_label: &'a str,
+    pub(crate) stdin_is_terminal: bool,
+    pub(crate) read_only: bool,
+    pub(crate) hint: Option<String>,
+    pub(crate) exe: Option<PathBuf>,
+    pub(crate) args: &'a [String],
+}
+
+/// The close of a command that saw an update notice: re-check every gate
+/// (`offer`'s question must never fire for a hook, an agent, CI, the
+/// updater itself, a command that owns its exit code, or a command whose
+/// re-run would mutate state), ask it, run the upgrade on a yes, and hand
+/// `start` the binary to launch. On a taken update `start` never returns;
+/// everything else comes back to main.
+pub(crate) fn close_with_update(
+    close: Close,
+    env: impl Fn(&str) -> Option<OsString>,
+    ask: &mut dyn FnMut(&str) -> std::io::Result<String>,
+    run: &mut dyn FnMut(&str) -> bool,
+    start: &mut dyn FnMut(&Path, &[String]),
+) {
+    if close.notice.is_none()
+        || close.owned_exit.is_some()
+        || !close.read_only
+        || !prompt_enabled(close.command_label, close.stdin_is_terminal, &env)
+    {
+        return;
+    }
+    if offer(close.hint, env!("CARGO_PKG_VERSION"), ask, run) == Outcome::Relaunch
+        && let Some(exe) = close.exe
+    {
+        start(&exe, close.args);
+    }
 }
 
 /// The latest release tag, from where GitHub's `releases/latest` redirects.
@@ -535,5 +668,278 @@ mod tests {
         std::fs::write(&path, b"{not json").unwrap();
         assert_eq!(load(&path), State::default());
         let _ = std::fs::remove_dir_all(path.parent().unwrap().parent().unwrap());
+    }
+
+    #[test]
+    fn accepted_should_take_yes_or_a_bare_enter_only() {
+        assert!(accepted("\n"));
+        assert!(accepted(" \n"));
+        assert!(accepted("y\n"));
+        assert!(accepted("YES\r\n"));
+        assert!(!accepted("n\n"));
+        assert!(!accepted("no\n"));
+        assert!(!accepted("ok\n"));
+    }
+
+    #[test]
+    fn prompt_enabled_should_demand_a_tty_and_honour_the_opt_out() {
+        let none = env_of(&[]);
+        assert!(prompt_enabled("search", true, &none));
+        assert!(!prompt_enabled("search", false, &none));
+        // The updater must not offer to update itself.
+        assert!(!prompt_enabled("self-update", true, &none));
+        assert!(!prompt_enabled(
+            "search",
+            true,
+            env_of(&[(PROMPT_OPT_OUT_VAR, "1")])
+        ));
+        // Empty and `0` stay unset, like `OPT_OUT_VAR`.
+        assert!(prompt_enabled(
+            "search",
+            true,
+            env_of(&[(PROMPT_OPT_OUT_VAR, "0")])
+        ));
+    }
+
+    /// An `ask` that answers from a list and counts its prompts, paired
+    /// with the count after the call.
+    fn scripted(
+        answers: Vec<Result<&str, std::io::Error>>,
+    ) -> (
+        impl FnMut(&str) -> std::io::Result<String>,
+        impl Fn() -> usize,
+    ) {
+        let mut next = answers.into_iter();
+        let asked = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let counter = asked.clone();
+        (
+            move |prompt| {
+                asked.set(asked.get() + 1);
+                assert_eq!(prompt, PROMPT);
+                next.next().map_or_else(
+                    || {
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "no scripted answer",
+                        ))
+                    },
+                    |answer| answer.map(String::from),
+                )
+            },
+            move || counter.get(),
+        )
+    }
+
+    #[test]
+    fn offer_should_stay_when_there_is_no_hint() {
+        let (mut ask, asked) = scripted(vec![]);
+        assert_eq!(
+            offer(None, "0.6.0", &mut ask, &mut |_| {
+                panic!("no upgrade without a hint")
+            }),
+            Outcome::Stay
+        );
+        assert_eq!(asked(), 0);
+    }
+
+    #[test]
+    fn offer_should_stay_without_running_anything_on_a_decline_or_a_read_error() {
+        for answer in [
+            Ok("n\n"),
+            Err(std::io::Error::other("stdin closed")),
+            Ok("maybe\n"),
+        ] {
+            let (mut ask, asked) = scripted(vec![answer]);
+            assert_eq!(
+                offer(Some("brew up".into()), "0.6.0", &mut ask, &mut |_| {
+                    panic!("a declined update must not run")
+                }),
+                Outcome::Stay
+            );
+            assert_eq!(asked(), 1);
+        }
+    }
+
+    #[test]
+    fn offer_should_relaunch_when_the_upgrade_succeeds_and_stay_when_it_fails() {
+        let (mut ask, asked) = scripted(vec![Ok("\n")]);
+        let commands = std::cell::RefCell::new(Vec::new());
+        assert_eq!(
+            offer(
+                Some("brew update && brew upgrade".into()),
+                "0.6.0",
+                &mut ask,
+                &mut |command: &str| {
+                    commands.borrow_mut().push(command.to_string());
+                    true
+                },
+            ),
+            Outcome::Relaunch
+        );
+        assert_eq!(asked(), 1);
+        assert_eq!(commands.into_inner(), ["brew update && brew upgrade"]);
+        let (mut ask, _) = scripted(vec![Ok("y\n")]);
+        assert_eq!(
+            offer(Some("brew up".into()), "0.6.0", &mut ask, &mut |_| false),
+            Outcome::Stay
+        );
+    }
+
+    #[test]
+    fn run_upgrade_should_report_the_child_status() {
+        assert!(run_upgrade("true"));
+        assert!(!run_upgrade("exit 3"));
+        assert!(!run_upgrade("definitely-not-a-command-px"));
+    }
+
+    /// Drive `close_with_update` with a fixed hint/exe and a `start` that
+    /// records its arguments; returns the notice state (asked, started).
+    #[allow(clippy::too_many_arguments)]
+    fn closed(
+        update_line: Option<&str>,
+        owned_exit: Option<i32>,
+        label: &str,
+        tty: bool,
+        read_only: bool,
+        env: impl Fn(&str) -> Option<OsString>,
+        answers: Vec<Result<&str, std::io::Error>>,
+        upgrade_ok: bool,
+    ) -> (usize, Vec<String>) {
+        let (mut ask, asked) = scripted(answers);
+        let started = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let seen = started.clone();
+        let mut run = |_: &str| upgrade_ok;
+        let mut start = |exe: &Path, args: &[String]| {
+            seen.borrow_mut()
+                .push(format!("{} {args:?}", exe.display()));
+        };
+        close_with_update(
+            Close {
+                notice: update_line,
+                owned_exit,
+                command_label: label,
+                stdin_is_terminal: tty,
+                read_only,
+                hint: Some("brew up".into()),
+                exe: Some(PathBuf::from("/tmp/px-close-none/bin/pixel")),
+                args: &["doctor".to_string()],
+            },
+            env,
+            &mut ask,
+            &mut run,
+            &mut start,
+        );
+        (asked(), started.borrow().clone())
+    }
+
+    #[test]
+    fn close_should_ask_and_hand_over_the_binary_when_the_update_is_taken() {
+        let (asked, started) = closed(
+            Some("pixel 9"),
+            None,
+            "search",
+            true,
+            true,
+            env_of(&[]),
+            vec![Ok("y\n")],
+            true,
+        );
+        assert_eq!(asked, 1);
+        assert_eq!(
+            started,
+            ["/tmp/px-close-none/bin/pixel [\"doctor\"]".to_string()]
+        );
+    }
+
+    #[test]
+    fn close_should_return_without_asking_when_any_gate_holds() {
+        // No notice, an owned exit code, a pipe on stdin, the updater
+        // itself, and the opt-out each keep the question unasked.
+        // No notice, an owned exit code, a mutating command, a pipe on
+        // stdin, the updater itself, and the opt-out each keep the
+        // question unasked.
+        for (update_line, owned_exit, label, tty, read_only, env) in [
+            (None, None, "search", true, true, env_of(&[])),
+            (Some("pixel 9"), Some(3), "search", true, true, env_of(&[])),
+            (Some("pixel 9"), None, "search", true, false, env_of(&[])),
+            (Some("pixel 9"), None, "search", false, true, env_of(&[])),
+            (
+                Some("pixel 9"),
+                None,
+                "self-update",
+                true,
+                true,
+                env_of(&[]),
+            ),
+            (
+                Some("pixel 9"),
+                None,
+                "search",
+                true,
+                true,
+                env_of(&[(PROMPT_OPT_OUT_VAR, "1")]),
+            ),
+        ] {
+            let (asked, started) = closed(
+                update_line,
+                owned_exit,
+                label,
+                tty,
+                read_only,
+                env,
+                vec![],
+                true,
+            );
+            assert_eq!((asked, started), (0, vec![]), "{label} {tty:?}");
+        }
+    }
+
+    #[test]
+    fn close_should_stay_when_the_answer_declines_or_the_upgrade_fails() {
+        let (asked, started) = closed(
+            Some("pixel 9"),
+            None,
+            "search",
+            true,
+            true,
+            env_of(&[]),
+            vec![Ok("n\n")],
+            true,
+        );
+        assert_eq!((asked, started), (1, vec![]));
+        let (asked, started) = closed(
+            Some("pixel 9"),
+            None,
+            "search",
+            true,
+            true,
+            env_of(&[]),
+            vec![Ok("y\n")],
+            false,
+        );
+        assert_eq!((asked, started), (1, vec![]));
+    }
+
+    #[test]
+    fn close_should_stay_when_the_binary_path_is_unknown() {
+        let (mut ask, asked) = scripted(vec![Ok("y\n")]);
+        let mut start = |_: &Path, _: &[String]| panic!("nothing to launch");
+        close_with_update(
+            Close {
+                notice: Some("pixel 9"),
+                owned_exit: None,
+                command_label: "search",
+                stdin_is_terminal: true,
+                read_only: true,
+                hint: Some("brew up".into()),
+                exe: None,
+                args: &[],
+            },
+            env_of(&[]),
+            &mut ask,
+            &mut |_| true,
+            &mut start,
+        );
+        assert_eq!(asked(), 1);
     }
 }
