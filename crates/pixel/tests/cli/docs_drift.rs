@@ -528,8 +528,13 @@ fn the_architecture_crate_table_matches_the_workspace_manifests() {
     let documented: BTreeSet<&String> = rows.iter().map(|(name, _)| name).collect();
     let actual: BTreeSet<&String> = members.iter().map(|(name, _, _)| name).collect();
     assert_eq!(
-        documented, actual,
+        rows.len(),
+        actual.len(),
         "ARCHITECTURE.md `## Crates` must have exactly one row per workspace member"
+    );
+    assert_eq!(
+        documented, actual,
+        "ARCHITECTURE.md `## Crates` must have exactly one row per workspace member (set)"
     );
 
     for (name, cell) in &rows {
