@@ -1,0 +1,1 @@
+**install:** `pixel install --repo` no longer refuses to run when `.codex/hooks.json` was deleted but its composed-guard sidecar survived — the missing file now starts a fresh install that restores the sidecar's adopted `PreToolUse` groups instead of a "lost its PreToolUse group" refusal. ([#365](https://github.com/LivioGama/pixel/pull/365))
