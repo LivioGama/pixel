@@ -847,13 +847,19 @@ mod tests {
             crate::config_file::load(&path).unwrap()["classify"]["enabled"],
             false
         );
+        let mut output = Vec::new();
         assert!(
             setup_with(
                 &path,
                 &mut std::io::Cursor::new("y\ny\ny\ny\ny\ny\n"),
-                &mut Vec::new()
+                &mut output
             )
             .unwrap()
+        );
+        assert!(
+            String::from_utf8(output)
+                .unwrap()
+                .contains("classify.enabled=true")
         );
         let doc = crate::config_file::load(&path).unwrap();
         assert_eq!(doc["metrics"], "on");
