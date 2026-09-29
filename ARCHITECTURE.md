@@ -476,12 +476,13 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   small git fixtures in a temp dir and call `Service::handle` directly.
 - CLI integration tests in `crates/pixel/tests/cli/` (one binary, one module per file) invoke the built binary
   through `CARGO_BIN_EXE_pixel` against a temp fixture repo.
-- CI runs `cargo fmt --check`, `cargo clippy --all-targets` with warnings
-  denied, `cargo nextest run --profile ci` (`.config/nextest.toml`: one
-  process per test, retry once but fail on flaky, kill after 180 s) plus
-  `cargo test --doc` for the workspace, then `cargo check` of the two
-  reduced feature lanes (`--no-default-features`, `model2vec` only), the
-  installer and gate-runner contract scripts, and separate MSRV and
+- CI runs `cargo fmt --check`, `cargo nextest run --profile ci`
+  (`.config/nextest.toml`: one process per test, retry once but fail on
+  flaky, kill after 180 s) plus `cargo test --doc` for the workspace, and
+  the installer and gate-runner contract scripts in the Test job; beside it,
+  a Lint job (`cargo clippy --all-targets` with warnings denied, then
+  `cargo check` of the two reduced feature lanes, `--no-default-features`
+  and `model2vec` only), the NDCG ranking gate, and separate MSRV and
   `cargo deny` jobs.
 - After any change to `crates/` the project rule in `CLAUDE.md` applies:
   rebuild, reinstall the binary atomically, re-index, reinstall hooks, and
