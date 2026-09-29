@@ -8270,14 +8270,6 @@ mod tests {
     // run in the same crate (test_workspace = false) — that is why each
     // assertion lives in `pixel`'s own test module.
 
-    /// Serializes every test that mutates `PIXEL_GUARD_*` env vars.
-    /// cargo test runs tests in parallel within a binary by default, so a
-    /// test that sets `PIXEL_GUARD_RETRIEVAL=0` would race with another
-    /// that unsets it before the first observes its effect. Locking on this
-    /// mutex is the simplest way to keep the tests deterministic without
-    /// pulling in `serial_test`.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     fn empty_tool_input() -> serde_json::Map<String, Value> {
         serde_json::Map::new()
     }
@@ -8312,7 +8304,7 @@ mod tests {
     /// suppress the retrieval advisory; the helper is the seam.
     #[test]
     fn should_retrieval_advisory_is_suppressed_by_expired_manifest() {
-        let _env_guard = ENV_LOCK
+        let _env_guard = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The kill-switch test toggles PIXEL_GUARD_RETRIEVAL; tests run in
@@ -8360,7 +8352,7 @@ mod tests {
     /// env set to "0", the helper must return false.
     #[test]
     fn should_retrieval_advisory_respects_the_kill_switch() {
-        let _env_guard = ENV_LOCK
+        let _env_guard = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: setting an env var in a test races with other tests that
@@ -8400,7 +8392,7 @@ mod tests {
     /// and :3540). Both negations gate the read-scoping branch.
     #[test]
     fn should_read_scoping_advisory_is_gated_by_negations_and_path() {
-        let _env_guard = ENV_LOCK
+        let _env_guard = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Build a real source file in a scratch repo so the path resolves
@@ -8509,7 +8501,7 @@ mod tests {
     /// mutations in one assertion.
     #[test]
     fn should_read_scoping_advisory_rejects_non_source_files() {
-        let _env_guard = ENV_LOCK
+        let _env_guard = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let repo = scratch_repo("read-scoping-non-source");
@@ -8559,7 +8551,7 @@ mod tests {
     /// advisory; a path outside the scratch repo kills that mutation.
     #[test]
     fn should_read_scoping_advisory_rejects_unresolved_paths() {
-        let _env_guard = ENV_LOCK
+        let _env_guard = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let repo = scratch_repo("read-scoping-unresolved");
@@ -8610,7 +8602,7 @@ mod tests {
     /// suppresses the read-scoping advisory.
     #[test]
     fn should_read_scoping_advisory_respects_the_kill_switch() {
-        let _env_guard = ENV_LOCK
+        let _env_guard = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let repo = scratch_repo("read-scoping-killswitch");
@@ -8664,7 +8656,7 @@ mod tests {
     /// boundary against the `>`, `>=`, `==` and `<` mutants.
     #[test]
     fn read_scoping_advisory_size_is_strictly_greater_than_threshold() {
-        let _env_guard = ENV_LOCK
+        let _env_guard = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let min = read_advisory_min_lines();
@@ -8724,7 +8716,7 @@ mod tests {
     /// asserts the pair is wired correctly.
     #[test]
     fn manifest_state_pairing_is_consistent_with_helpers() {
-        let _env_guard = ENV_LOCK
+        let _env_guard = crate::ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         // The kill-switch test toggles PIXEL_GUARD_RETRIEVAL; clear it for
