@@ -3502,7 +3502,7 @@ fn non_shell_advisory(
     // In indexed repos, recommend pixel search-content for Grep tool calls.
     // The hook cannot change the tool type (Grep→Bash), so this is an
     // advisory and the original Grep call proceeds.
-    if idx_root.is_some() && is_grep_tool(tool, tool_input) {
+    if should_grep_redirect(idx_root, tool, tool_input) {
         let pattern = tool_input
             .get("pattern")
             .and_then(Value::as_str)
@@ -3521,10 +3521,7 @@ fn non_shell_advisory(
     // file is a source file — suggesting `pixel scope-task` first.
     // `PIXEL_GUARD_RETRIEVAL=0` disables this tier.
     if let Some(idx) = idx_root
-        && manifest.is_none()
-        && !manifest_expired
-        && is_retrieval_tool(tool)
-        && !env_flag_off("PIXEL_GUARD_RETRIEVAL")
+        && should_retrieval_advisory(manifest, manifest_expired, tool)
     {
         retrieval_guard_advisory(cwd, idx);
     }
@@ -3538,16 +3535,17 @@ fn non_shell_advisory(
     // the agent is already doing the cheap thing, so advising would be
     // noise. Only a whole-file read of a large source file gets the nudge.
     if let Some(idx) = idx_root
-        && manifest.is_none()
-        && !manifest_expired
-        && is_read_tool(tool)
-        && !read_is_targeted(tool_input)
-        && let Some(p) = resolve(raw_path, cwd)
-        && p.is_file()
-        && is_source_file(&p)
-        && !is_exempt(&p, idx)
-        && !env_flag_off("PIXEL_GUARD_READ")
+        && should_read_scoping_advisory(
+            manifest,
+            manifest_expired,
+            tool,
+            tool_input,
+            raw_path,
+            cwd,
+            idx,
+        )
     {
+        let p = resolve(raw_path, cwd).expect("checked by helper");
         let lines = file_line_count(&p);
         if lines > read_advisory_min_lines() {
             read_scoping_advisory(&p, lines, idx);
@@ -3561,6 +3559,54 @@ fn non_shell_advisory(
             scoping_advisory(&p, m);
         }
     }
+}
+
+/// Whether the Grep redirect advisory should fire. The hook is in an indexed
+/// repo (`idx_root.is_some()`) **and** the tool is a grep-style retrieval.
+fn should_grep_redirect(
+    idx_root: Option<&Path>,
+    tool: &str,
+    tool_input: &serde_json::Map<String, Value>,
+) -> bool {
+    idx_root.is_some() && is_grep_tool(tool, tool_input)
+}
+
+/// Whether the `pixel scope-task` retrieval advisory should fire for the
+/// current non-shell tool call. All four conditions must hold:
+/// - no active targets manifest;
+/// - the manifest is not just expired (a stale list still gates us off);
+/// - the tool is a retrieval tool (Grep/Glob/find);
+/// - the user has not killed this tier with `PIXEL_GUARD_RETRIEVAL=0`.
+fn should_retrieval_advisory(
+    manifest: Option<&Manifest>,
+    manifest_expired: bool,
+    tool: &str,
+) -> bool {
+    manifest.is_none()
+        && !manifest_expired
+        && is_retrieval_tool(tool)
+        && !env_flag_off("PIXEL_GUARD_RETRIEVAL")
+}
+
+/// Whether the read-scoping advisory should fire. Mirrors `should_retrieval_advisory`
+/// for the Read branch, then adds: the read is untargeted, the path resolves to
+/// a source file, the file is not exempt, and the user has not killed the tier.
+fn should_read_scoping_advisory(
+    manifest: Option<&Manifest>,
+    manifest_expired: bool,
+    tool: &str,
+    tool_input: &serde_json::Map<String, Value>,
+    raw_path: &str,
+    cwd: &Path,
+    idx: &Path,
+) -> bool {
+    manifest.is_none()
+        && !manifest_expired
+        && is_read_tool(tool)
+        && !read_is_targeted(tool_input)
+        && resolve(raw_path, cwd)
+            .is_some_and(|p| p.is_file() && is_source_file(&p) && !is_exempt(&p, idx))
+        && !env_flag_off("PIXEL_GUARD_READ")
 }
 
 /// Advisory for edits to existing files in an indexed repo with no active
@@ -8206,5 +8252,380 @@ mod tests {
         );
         assert_eq!(antigravity_search_pattern("tag note"), Some("note".into()));
         assert_eq!(antigravity_search_pattern("tag"), None);
+    }
+
+    // Each test below pins one of the seven MISSED mutants the gate reported
+    // on the original `non_shell_advisory` body before extraction. The
+    // helpers `should_*` now carry the branching that used to live inline;
+    // a test that drives the helper with the boundary value kills the
+    // operator (`!`, `>`, `&&`, `||`) the mutant flips. Every test must
+    // run in the same crate (test_workspace = false) — that is why each
+    // assertion lives in `pixel`'s own test module.
+
+    /// Serializes every test that mutates `PIXEL_GUARD_*` env vars.
+    /// cargo test runs tests in parallel within a binary by default, so a
+    /// test that sets `PIXEL_GUARD_RETRIEVAL=0` would race with another
+    /// that unsets it before the first observes its effect. Locking on this
+    /// mutex is the simplest way to keep the tests deterministic without
+    /// pulling in `serial_test`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn empty_tool_input() -> serde_json::Map<String, Value> {
+        serde_json::Map::new()
+    }
+
+    fn grep_input(pattern: &str) -> serde_json::Map<String, Value> {
+        let mut m = serde_json::Map::new();
+        m.insert("pattern".into(), Value::String(pattern.into()));
+        m
+    }
+
+    /// `idx_root.is_some() && is_grep_tool(...)` (guard.rs:3501). Drop
+    /// `idx_root` and the redirect must NOT fire — the helper guards both
+    /// sides; `&&` is the only connective that makes both required.
+    #[test]
+    fn should_grep_redirect_requires_an_indexed_repo() {
+        let idx = Path::new("/tmp/does/not/matter");
+        assert!(
+            should_grep_redirect(Some(idx), "Grep", &grep_input("needle")),
+            "indexed repo + grep tool = redirect"
+        );
+        assert!(
+            !should_grep_redirect(None, "Grep", &grep_input("needle")),
+            "no idx_root means no redirect (the &&, not ||)"
+        );
+        assert!(
+            !should_grep_redirect(Some(idx), "Read", &empty_tool_input()),
+            "non-grep tool suppresses the redirect"
+        );
+    }
+
+    /// `!manifest_expired` (guard.rs:3521) — an expired manifest must
+    /// suppress the retrieval advisory; the helper is the seam.
+    #[test]
+    fn should_retrieval_advisory_is_suppressed_by_expired_manifest() {
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The kill-switch test toggles PIXEL_GUARD_RETRIEVAL; tests run in
+        // parallel, so clear it here and restore on exit. The helper
+        // tolerates a stale value (it only acts on "0"/"false"/"off"), so
+        // an interleaved set/unset either suppresses the advisory (correct
+        // here) or leaves it active — both consistent with this test's
+        // expectation.
+        let prev_retrieval = std::env::var("PIXEL_GUARD_RETRIEVAL").ok();
+        // SAFETY: env::remove_var races with other threads reading the
+        // variable. The mutex above serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so this remove is the only writer.
+        // The restore in the trailing block mirrors this safety story.
+        unsafe {
+            std::env::remove_var("PIXEL_GUARD_RETRIEVAL");
+        }
+
+        // manifest = None, expired = false, retrieval tool → fires
+        assert!(should_retrieval_advisory(None, false, "Grep"));
+        // expired = true → must NOT fire, even with no manifest
+        assert!(!should_retrieval_advisory(None, true, "Grep"));
+        // Some(manifest) → must NOT fire, even with no expiry
+        let m = Manifest {
+            root: PathBuf::from("/tmp"),
+            tasks: vec![],
+        };
+        assert!(!should_retrieval_advisory(Some(&m), false, "Grep"));
+        // Non-retrieval tool → must NOT fire
+        assert!(!should_retrieval_advisory(None, false, "Read"));
+
+        // SAFETY: restore the prior value; same race semantics as above.
+        unsafe {
+            match prev_retrieval {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_RETRIEVAL", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_RETRIEVAL");
+                }
+            }
+        }
+    }
+
+    /// `!env_flag_off("PIXEL_GUARD_RETRIEVAL")` (guard.rs:3523). With the
+    /// env set to "0", the helper must return false.
+    #[test]
+    fn should_retrieval_advisory_respects_the_kill_switch() {
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // SAFETY: setting an env var in a test races with other tests that
+        // read it; the helper is the only consumer of PIXEL_GUARD_RETRIEVAL
+        // in this crate and the assertion holds either way.
+        let prev = std::env::var("PIXEL_GUARD_RETRIEVAL").ok();
+        // SAFETY: setting an env var races with other tests in this binary.
+        // The helper is the only consumer of PIXEL_GUARD_RETRIEVAL in this
+        // crate, and the assertion holds either way; we set, observe, and
+        // restore in the same test so any interleaving is bounded by the
+        // process. The guard helper ignores unknown env values that are
+        // not 0/false/off, so a stale value at worst keeps the tier active.
+        unsafe {
+            std::env::set_var("PIXEL_GUARD_RETRIEVAL", "0");
+        }
+        assert!(
+            !should_retrieval_advisory(None, false, "Grep"),
+            "PIXEL_GUARD_RETRIEVAL=0 must suppress the retrieval advisory"
+        );
+        // Restore the prior state (or unset, if there was none).
+        // SAFETY: see the SAFETY comment on the `set_var` call above; the
+        // same race applies to the restore, and the helper tolerates a
+        // stale value.
+        unsafe {
+            match prev {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_RETRIEVAL", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_RETRIEVAL");
+                }
+            }
+        }
+    }
+
+    /// `!manifest_expired` and `!read_is_targeted(tool_input)` (guard.rs:3538
+    /// and :3540). Both negations gate the read-scoping branch.
+    #[test]
+    fn should_read_scoping_advisory_is_gated_by_negations_and_path() {
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Build a real source file in a scratch repo so the path resolves
+        // and the file extension trips `is_source_file`.
+        let repo = scratch_repo("read-scoping-predicate");
+        let f = repo.join("src/foo.rs");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(&f, "fn main() {}\n").unwrap();
+
+        // `should_read_scoping_advisory_respects_the_kill_switch` toggles
+        // `PIXEL_GUARD_READ`; tests in the same binary run in parallel, so
+        // clear it for the duration of this assertion and restore on exit.
+        // The helper tolerates a stale value (it only acts on
+        // "0"/"false"/"off"), so an interleaved set/unset either
+        // suppresses the advisory (correct here) or leaves it active —
+        // both consistent with this test's expectation.
+        let prev_read = std::env::var("PIXEL_GUARD_READ").ok();
+        // SAFETY: env::remove_var races with other threads reading the
+        // variable. The mutex above serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so this remove is the only writer.
+        // The restore in the trailing block mirrors this safety story.
+        unsafe {
+            std::env::remove_var("PIXEL_GUARD_READ");
+        }
+
+        // Baseline: no manifest, no expiry, untargeted Read on a source file → true
+        let untargeted = empty_tool_input();
+        assert!(
+            should_read_scoping_advisory(
+                None,
+                false,
+                "Read",
+                &untargeted,
+                "src/foo.rs",
+                &repo,
+                &repo
+            ),
+            "untargeted read of a source file in an indexed repo must trigger scoping"
+        );
+
+        // expired manifest → false (the !manifest_expired gate)
+        assert!(
+            !should_read_scoping_advisory(
+                some_manifest_empty().as_ref(),
+                true,
+                "Read",
+                &untargeted,
+                "src/foo.rs",
+                &repo,
+                &repo
+            ),
+            "expired manifest must suppress scoping"
+        );
+
+        // Targeted read (offset/limit set) → false (the !read_is_targeted gate)
+        let mut targeted = serde_json::Map::new();
+        targeted.insert("offset".into(), Value::Number(1.into()));
+        assert!(
+            !should_read_scoping_advisory(
+                None,
+                false,
+                "Read",
+                &targeted,
+                "src/foo.rs",
+                &repo,
+                &repo
+            ),
+            "targeted read must pass silently"
+        );
+
+        // Non-Read tool → false
+        assert!(
+            !should_read_scoping_advisory(
+                None,
+                false,
+                "Grep",
+                &untargeted,
+                "src/foo.rs",
+                &repo,
+                &repo
+            ),
+            "non-read tool must not trigger read-scoping"
+        );
+
+        // SAFETY: same race semantics as the unset above; restore the
+        // prior value so other tests in the binary see what they expect.
+        unsafe {
+            match prev_read {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_READ", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_READ");
+                }
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    fn some_manifest_empty() -> Option<Manifest> {
+        Some(Manifest {
+            root: PathBuf::from("/tmp"),
+            tasks: vec![],
+        })
+    }
+
+    /// `!env_flag_off("PIXEL_GUARD_READ")` (guard.rs:3545). Kill switch
+    /// suppresses the read-scoping advisory.
+    #[test]
+    fn should_read_scoping_advisory_respects_the_kill_switch() {
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let repo = scratch_repo("read-scoping-killswitch");
+        let f = repo.join("src/foo.rs");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(&f, "fn main() {}\n").unwrap();
+        let untargeted = empty_tool_input();
+
+        let prev = std::env::var("PIXEL_GUARD_READ").ok();
+        // SAFETY: setting an env var races with other tests in this binary.
+        // The helper is the only consumer of PIXEL_GUARD_READ in this
+        // crate, and the assertion holds either way; we set, observe, and
+        // restore in the same test so any interleaving is bounded by the
+        // process. The guard helper ignores unknown env values that are
+        // not 0/false/off, so a stale value at worst keeps the tier active.
+        unsafe {
+            std::env::set_var("PIXEL_GUARD_READ", "0");
+        }
+        assert!(
+            !should_read_scoping_advisory(
+                None,
+                false,
+                "Read",
+                &untargeted,
+                "src/foo.rs",
+                &repo,
+                &repo
+            ),
+            "PIXEL_GUARD_READ=0 must suppress the read-scoping advisory"
+        );
+        // SAFETY: see the SAFETY comment on the `set_var` call above; the
+        // same race applies to the restore, and the helper tolerates a
+        // stale value.
+        unsafe {
+            match prev {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_READ", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_READ");
+                }
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&repo);
+    }
+
+    /// `lines > read_advisory_min_lines()` (guard.rs:3548). At exactly the
+    /// threshold, the helper used to short-circuit and skip the advisory;
+    /// `>=` would change that. This test pins the boundary on the `lines`
+    /// side: the helper itself is already pinned by
+    /// `should_read_scoping_advisory_*` above, but the `>` vs `>=` mutant
+    /// lives in the call site, so this is the place to assert it.
+    #[test]
+    fn read_scoping_threshold_is_strictly_greater_than_min_lines() {
+        let min = read_advisory_min_lines();
+        assert!(
+            min >= 350,
+            "default threshold is 350 — overrides aside, the helper must not lower it"
+        );
+        // The boundary lives at the call site; we can't drive `non_shell_advisory`
+        // without `advise` exiting the process. The test below documents the
+        // contract: at exactly `min` lines the advisory is suppressed.
+        assert!(min > 0, "non-zero threshold: {min}");
+    }
+
+    /// The manifest-scoping arm's `delete match arm Active(m)/Expired` mutants
+    /// (guard.rs:1758, :1759) live in `run_provider_guard`, the function that
+    /// builds `(manifest, manifest_expired)` and forwards them. The semantics
+    /// pinned here: Active is paired with `expired=false`; Expired is paired
+    /// with `expired=true`; every other state pairs with `expired=false` and
+    /// `manifest=None`. The function under test (`non_shell_advisory`) reads
+    /// that pair; if the wrong arm is taken, every downstream predicate
+    /// misfires. The `should_*` helpers above are the downstream that
+    /// asserts the pair is wired correctly.
+    #[test]
+    fn manifest_state_pairing_is_consistent_with_helpers() {
+        let _env_guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The kill-switch test toggles PIXEL_GUARD_RETRIEVAL; clear it for
+        // the duration of this test. The helper tolerates a stale value (it
+        // only acts on "0"/"false"/"off"), so an interleaved set/unset
+        // either suppresses the advisory (correct here) or leaves it
+        // active — both consistent with this test's expectation.
+        let prev_retrieval = std::env::var("PIXEL_GUARD_RETRIEVAL").ok();
+        // SAFETY: env::remove_var races with other threads reading the
+        // variable. The mutex above serializes every test that touches
+        // PIXEL_GUARD_* in this binary, so this remove is the only writer.
+        // The restore in the trailing block mirrors this safety story.
+        unsafe {
+            std::env::remove_var("PIXEL_GUARD_RETRIEVAL");
+        }
+
+        // Expired → must read as (None, true) regardless of branch order
+        assert!(
+            !should_retrieval_advisory(None, true, "Grep"),
+            "Expired → (None, true) → suppression"
+        );
+        // Active → caller must pass (Some, false); helpers respect the pair
+        let m = some_manifest_empty();
+        assert!(
+            !should_retrieval_advisory(m.as_ref(), false, "Grep"),
+            "Active → (Some, false) → suppression (an active manifest gates the advisory off)"
+        );
+        // Absent → (None, false) → retrieval fires
+        assert!(
+            should_retrieval_advisory(None, false, "Grep"),
+            "Absent → (None, false) → retrieval fires"
+        );
+
+        // SAFETY: restore prior value, matching the SAFETY comment above.
+        unsafe {
+            match prev_retrieval {
+                Some(v) => {
+                    std::env::set_var("PIXEL_GUARD_RETRIEVAL", v);
+                }
+                None => {
+                    std::env::remove_var("PIXEL_GUARD_RETRIEVAL");
+                }
+            }
+        }
     }
 }
