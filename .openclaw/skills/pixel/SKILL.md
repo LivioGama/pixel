@@ -209,3 +209,12 @@ Rules:
 
 `pixel` is on PATH; the repo index lives in `.pixel/` (graph `.pixel/graph.db`).
 All commands accept `[PATH]`, default current directory.
+
+## User configuration
+
+`pixel config` reports effective settings, sources, and configuration paths with
+credentials masked. `pixel config edit` opens `~/.pixel/config.yaml` in
+`$VISUAL`/`$EDITOR`; `--repo` edits `.pixel/config.yaml`. The commented template
+lists optional settings. Repository overrides win over global settings, and
+existing environment overrides win over files. Classification and credentials
+are global only. Legacy JSON remains supported until install/edit creates YAML.

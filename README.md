@@ -69,16 +69,26 @@ Then use Pixel the way [`PIXEL.md`](PIXEL.md) describes: it is the complete agen
 
 ## Configuration
 
-Pixel stores user settings in `~/.pixel/config.yaml`, with repository overrides
-in `.pixel/config.yaml`. Installation creates a commented template without
-replacing an existing YAML file. Uncomment an example to set a preference.
-`pixel config metrics on|off` updates repository settings (`--global` updates
-your user settings); credentials and classification preferences are global only.
+`pixel config` shows effective settings and their sources, including the global
+and repository file paths. `pixel config edit` opens `~/.pixel/config.yaml` in
+`$VISUAL`, then `$EDITOR` (falling back to `vi`). Use `pixel config edit --repo`
+for repository overrides in `.pixel/config.yaml`.
 
-Existing `config.json` files remain supported until installation copies their
-settings into YAML. JSON is retained as a backup and ignored once YAML exists
-in that scope. Config commands preserve YAML comments and unknown keys, refuse
-to overwrite malformed files, and create files owner-only on Unix.
+Installation and the editor create a commented template without overwriting
+existing YAML. Uncomment an example to change it. Settings include the metrics
+footer, repository daemon startup, automatic task-context suggestions,
+task-boundary detection, and global classification preferences and credentials.
+All existing defaults remain unchanged. Disabling daemon startup does not stop
+an already running daemon. Remote classification requires explicit credentials.
+
+Repository settings override global settings; existing environment overrides
+still win. Classification preferences and credentials are global only.
+`pixel config` masks credentials. Files created by Pixel are owner-only on Unix.
+Legacy `config.json` files remain readable and writable until install/edit copies
+their settings into YAML; JSON is retained as a backup and ignored once YAML
+exists in that scope. Config commands preserve YAML comments and unknown keys,
+and refuse to overwrite malformed configuration. After editing, invalid syntax
+or known setting types are reported without printing file contents.
 
 ## The flow
 

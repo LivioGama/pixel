@@ -14,6 +14,39 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
+/// The environment overrides and YAML switches exposed in the overview.
+const FEATURES: &[(&str, &str)] = &[
+    ("daemon_auto_start", "PIXEL_DAEMON_AUTO_START"),
+    ("task_context", "PIXEL_TASK_CONTEXT"),
+    ("task_boundary", "PIXEL_TASK_BOUNDARY"),
+];
+
+fn resolved(root: Option<&Path>, key: &str) -> (Option<bool>, String) {
+    let paths = root
+        .map(repo_config_path)
+        .into_iter()
+        .chain(global_config_path());
+    for path in paths {
+        if let Some(value) = read_config_doc(&path).and_then(|doc| doc.get(key)?.as_bool()) {
+            return (Some(value), path.display().to_string());
+        }
+    }
+    (None, "default".into())
+}
+
+/// Environment overrides win; absent feature switches preserve the enabled baseline.
+pub fn feature_enabled(root: Option<&Path>, key: &str, env: &str) -> bool {
+    feature_resolution(root, key, env).0
+}
+
+fn feature_resolution(root: Option<&Path>, key: &str, env: &str) -> (bool, String) {
+    if let Ok(value) = std::env::var(env) {
+        return (!matches!(value.as_str(), "0" | "false" | "off"), env.into());
+    }
+    let (value, source) = resolved(root, key);
+    (value.unwrap_or(true), source)
+}
+
 pub fn ensure_template(root: Option<&Path>) -> Result<PathBuf, String> {
     let directory = if let Some(root) = root {
         root.join(".pixel")
@@ -24,6 +57,129 @@ pub fn ensure_template(root: Option<&Path>) -> Result<PathBuf, String> {
     let path = directory.join(crate::config_file::FILE_NAME);
     crate::config_file::ensure(&path)?;
     Ok(path)
+}
+
+pub fn edit(path: &Path, repo: bool) -> Result<(), String> {
+    let root = if repo {
+        Some(crate::discover_root(path)?)
+    } else {
+        None
+    };
+    let path = ensure_template(root.as_deref())?;
+    let editor = std::env::var("VISUAL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::env::var("EDITOR")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
+        .unwrap_or_else(|| "vi".into());
+    let args = shell_words::split(&editor).map_err(|_| "invalid quoting in VISUAL/EDITOR")?;
+    let (program, args) = args.split_first().ok_or("empty editor command")?;
+    let status = std::process::Command::new(program)
+        .args(args)
+        .arg(&path)
+        .status()
+        .map_err(|e| format!("launch editor: {e}"))?;
+    if !status.success() {
+        return Err(format!("editor exited with {status}"));
+    }
+    validate(&path)?;
+    println!("configuration: {}", path.display());
+    Ok(())
+}
+
+fn validate(path: &Path) -> Result<(), String> {
+    let doc = crate::config_file::load(path)?;
+    for (key, _) in FEATURES {
+        if doc.get(key).is_some_and(|v| !v.is_boolean()) {
+            return Err(format!("{}: {key} must be true or false", path.display()));
+        }
+    }
+    if doc
+        .get("metrics")
+        .is_some_and(|v| !matches!(v.as_str(), Some("on" | "off")))
+    {
+        return Err(format!("{}: metrics must be on or off", path.display()));
+    }
+    if let Some(classify) = doc.get("classify") {
+        if !classify.is_object() {
+            return Err(format!("{}: classify must be a mapping", path.display()));
+        }
+        if classify
+            .get("engine")
+            .is_some_and(|v| !matches!(v.as_str(), Some("auto" | "local" | "remote")))
+        {
+            return Err(format!(
+                "{}: classify.engine must be auto, local, or remote",
+                path.display()
+            ));
+        }
+        if classify.get("remote_preset").is_some_and(|v| {
+            v.as_str()
+                .and_then(crate::decide_remote::Preset::parse_name)
+                .is_none()
+        }) {
+            return Err(format!(
+                "{}: unknown classify.remote_preset",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Print only known public settings; arbitrary configuration can contain secrets.
+pub fn overview(path: &Path) -> Result<(), String> {
+    let root = crate::discover_root(path).ok();
+    let global = global_config_path().ok_or("no HOME for the global config")?;
+    println!("global: {}", global.display());
+    validate(&global)?;
+    if let Some(root) = root.as_deref() {
+        let path = repo_config_path(root);
+        println!("repo: {}", path.display());
+        validate(&path)?;
+    }
+    let (metrics, source) = metrics_resolution(root.as_deref());
+    if std::env::var_os("PIXEL_METRICS").is_some_and(|v| v == "0") {
+        println!("metrics: off (PIXEL_METRICS)");
+    } else {
+        println!(
+            "metrics: {} ({source:?})",
+            if metrics { "on" } else { "off" }
+        );
+    }
+    for (key, env) in FEATURES {
+        let (enabled, source) = feature_resolution(root.as_deref(), key, env);
+        println!("{key}: {enabled} ({source})");
+    }
+    println!(
+        "classify.engine: {}",
+        classify_engine().unwrap_or_else(|| "auto (default)".into())
+    );
+    if let Some(preset) = classify_remote_preset() {
+        println!("classify.remote_preset: {}", preset.display());
+    }
+    let doc = crate::config_file::load(&global)?;
+    if let Some(keys) = doc.get("remote_keys").and_then(Value::as_object) {
+        for (name, value) in keys {
+            // Provider names are user input too: print only recognized presets.
+            if let Some(preset) = crate::decide_remote::Preset::parse_name(name) {
+                let name = preset.display();
+                println!(
+                    "remote_keys.{name}: {}",
+                    if value.as_str().is_some_and(|s| !s.is_empty()) {
+                        "set"
+                    } else {
+                        "unset"
+                    }
+                );
+            }
+        }
+    }
+    println!("Edit: pixel config edit (global), pixel config edit --repo (repository)");
+    Ok(())
 }
 
 /// The metrics setting one layer declares, or `None` when the layer does
@@ -383,6 +539,31 @@ mod tests {
     }
 
     #[test]
+    fn daemon_start_should_be_disabled_by_repo_yaml_without_an_environment_switch() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        write(
+            &home.0.join(".pixel/config.yaml"),
+            "daemon_auto_start: false\n",
+        );
+        let saved = std::env::var_os("PIXEL_DAEMON_AUTO_START");
+        // SAFETY: process-wide environment access is serialized by ENV_LOCK.
+        unsafe {
+            std::env::remove_var("PIXEL_DAEMON_AUTO_START");
+        }
+        assert!(matches!(
+            crate::auto_start_daemon(&home.0, &crate::Request::Status {}),
+            Err(crate::InProcessReason::AutoStartDisabled)
+        ));
+        // SAFETY: same lock as above.
+        unsafe {
+            if let Some(value) = saved {
+                std::env::set_var("PIXEL_DAEMON_AUTO_START", value);
+            }
+        }
+    }
+
+    #[test]
     fn yaml_should_preserve_comments_and_unknown_values_when_commands_update_settings() {
         let home = HomeGuard::set();
         let path = home.0.join("config.yaml");
@@ -449,6 +630,113 @@ mod tests {
             assert!(!err.contains("secret-invalid"));
             assert_eq!(std::fs::read_to_string(path).unwrap(), contents);
         }
+    }
+
+    #[test]
+    fn invalid_feature_values_should_fall_through_without_claiming_their_source() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        let repo = home.0.join("repo");
+        let global = home.0.join(".pixel/config.yaml");
+        let local = repo.join(".pixel/config.yaml");
+        let env = format!("PIXEL_TEST_INVALID_FEATURE_{}", std::process::id());
+        for (key, _) in FEATURES {
+            for invalid in ["'off'", "'no'", "0", "null", "{}"] {
+                write(&global, &format!("{key}: false\n"));
+                write(&local, &format!("{key}: {invalid}\n"));
+                assert_eq!(
+                    feature_resolution(Some(&repo), key, &env),
+                    (false, global.display().to_string()),
+                    "invalid repository {key}={invalid} must not hide the global opt-out"
+                );
+                write(&global, &format!("{key}: {invalid}\n"));
+                assert_eq!(
+                    feature_resolution(Some(&repo), key, &env),
+                    (true, "default".into()),
+                    "invalid values at both layers must leave the default as the source"
+                );
+            }
+        }
+        restore_home(saved);
+    }
+
+    #[test]
+    fn features_should_resolve_environment_then_repo_then_global_then_default() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let saved = home_env();
+        point_home(&home.0);
+        let repo = home.0.join("repo");
+        let env = format!("PIXEL_TEST_FEATURE_{}", std::process::id());
+        for (key, _) in FEATURES {
+            let global = home.0.join(".pixel/config.yaml");
+            let local = repo.join(".pixel/config.yaml");
+            write(&global, "{}");
+            write(&local, "{}");
+            assert_eq!(
+                feature_resolution(Some(&repo), key, &env),
+                (true, "default".into())
+            );
+            write(&global, &format!("{key}: false\n"));
+            assert_eq!(
+                feature_resolution(Some(&repo), key, &env),
+                (false, global.display().to_string())
+            );
+            write(&local, &format!("{key}: true\n"));
+            assert_eq!(
+                feature_resolution(Some(&repo), key, &env),
+                (true, local.display().to_string())
+            );
+            for (value, enabled) in [
+                ("0", false),
+                ("off", false),
+                ("false", false),
+                ("1", true),
+                ("", true),
+                ("no", true),
+            ] {
+                // SAFETY: this test owns the unique environment name under ENV_LOCK.
+                unsafe {
+                    std::env::set_var(&env, value);
+                }
+                assert_eq!(
+                    feature_resolution(Some(&repo), key, &env),
+                    (enabled, env.clone())
+                );
+                assert_eq!(feature_enabled(Some(&repo), key, &env), enabled);
+            }
+            // SAFETY: same lock and unique variable as above.
+            unsafe {
+                std::env::remove_var(&env);
+            }
+        }
+        restore_home(saved);
+    }
+
+    #[test]
+    fn template_should_be_inert_and_validation_should_reject_wrong_known_types() {
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        crate::config_file::ensure(&path).unwrap();
+        assert_eq!(crate::config_file::load(&path).unwrap(), json!({}));
+        validate(&path).unwrap();
+        for invalid in [
+            "metrics: false",
+            "task_context: 'off'",
+            "classify: []",
+            "classify: {engine: invalid}",
+            "classify: {remote_preset: invalid}",
+        ] {
+            write(&path, invalid);
+            assert!(validate(&path).is_err(), "{invalid}");
+        }
+        write(
+            &path,
+            "metrics: 'on'\nclassify: {engine: local, remote_preset: deepseek}\ntask_context: true",
+        );
+        validate(&path).unwrap();
     }
 
     struct HomeGuard(PathBuf);
