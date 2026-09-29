@@ -122,10 +122,18 @@ jobs:
       # `cargo mutants` exits 0 both when every mutant was caught and when it
       # produced none at all, and the run's own output cannot tell those
       # apart after the fact. `--list` builds nothing, so this costs seconds.
+      # The configuration is this workflow's, copied beside the diff for the
+      # shards: cargo-mutants reads `.cargo/mutants.toml` from the tree it
+      # mutates, and a dispatch's tip may predate the arguments every lane
+      # now takes from it (`--locked`, `--all-targets`). On a pull request
+      # the two files are the same one.
       - name: List the mutants the diff produces
         env:
           SRC: ${{ steps.diff.outputs.src }}
-        run: cargo mutants --list --dir "$SRC" --in-diff "$PWD/pr.diff" > mutants-list.txt
+        run: |
+          cp .cargo/mutants.toml mutants-config.toml
+          cargo mutants --list --dir "$SRC" --config "$PWD/mutants-config.toml" \
+            --in-diff "$PWD/pr.diff" > mutants-list.txt
 
       # One shard per 10 mutants, at most 10 (the reasoning sits beside
       # MUTANTS_PER_SHARD and MAX_SHARDS in the script). No mutants means an
@@ -137,7 +145,7 @@ jobs:
           SRC: ${{ steps.diff.outputs.src }}
         run: >
           python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt
-          --config "$SRC/.cargo/mutants.toml" --github-output "$GITHUB_OUTPUT"
+          --config mutants-config.toml --github-output "$GITHUB_OUTPUT"
 
       - name: Upload the diff and the listing
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
@@ -146,6 +154,7 @@ jobs:
           path: |
             pr.diff
             mutants-list.txt
+            mutants-config.toml
           # A re-run of the whole workflow uploads it again under the same
           # name; without this the second upload is refused.
           overwrite: true
@@ -263,14 +272,17 @@ jobs:
       - name: Disk before the mutants
         run: df -h / && sudo du -sh target ~/.cache/pixel "$RUNNER_TEMP" /tmp 2>&1 || true
 
+      # --config: the plan's copy of this workflow's configuration, the one
+      # the listing was made with (see "List the mutants the diff produces").
       - name: Run this shard's mutants
         # The explicit shell adds pipefail: `tee` must not mask the exit code.
         shell: bash
         env:
           CARGO_INCREMENTAL: 1
+          SHARD: ${{ matrix.shard }}
         run: >
-          cargo mutants -vV --no-shuffle --in-place --in-diff pr.diff
-          --shard ${{ matrix.shard }} 2>&1 | tee results.txt
+          cargo mutants -vV --no-shuffle --in-place --config mutants-config.toml
+          --in-diff pr.diff --shard "$SHARD" 2>&1 | tee results.txt
 
       - name: Disk after the mutants
         if: always()
