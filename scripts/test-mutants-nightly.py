@@ -12,11 +12,14 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 
 SCRIPT = Path(__file__).with_name("mutants-nightly.py")
+WORKFLOW = Path(__file__).resolve().parent.parent / ".github/workflows/mutants-nightly.yml"
 _spec = importlib.util.spec_from_file_location("mutants_nightly", SCRIPT)
 nightly = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(nightly)
@@ -181,6 +184,89 @@ class Report(unittest.TestCase):
             body = nightly.update_body(body, d, nightly.section(d, 0, nightly.Counter(), [], None, "u", "s" * 12))
         order = [int(x) for x in __import__("re").findall(r"<!-- mutants-nightly slice (\d+) -->", body)]
         self.assertEqual(order, [0, 3, 5])
+
+
+def issue_step_shell() -> str:
+    """The workflow's `Update the tracking issue` step, dedented as a script."""
+    block = WORKFLOW.read_text().split("- name: Update the tracking issue", 1)[1]
+    body = block.split("run: |", 1)[1].splitlines()[1:]
+    lines = []
+    for line in body:
+        if line.strip() and not line.startswith("          "):
+            break
+        lines.append(line[10:])
+    return "\n".join(lines)
+
+
+class TrackingIssueWrite(unittest.TestCase):
+    """The report step must never replace the issue with an empty body.
+
+    `> new.md` truncates the file before the reporter runs, and the reporter
+    prints nothing when it fails before the end (prose over the limit exits
+    2). `gh issue edit --body-file new.md` on that empty file would erase the
+    other six slices and any human note; the write is guarded on a non-empty
+    body and the step still fails with the reporter's exit code.
+    """
+
+    def stubs(self, tmp: Path, reporter: str, listed: str) -> Path:
+        """`python3` and `gh` in front of PATH; the latter records every call."""
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        calls = tmp / "gh-calls"
+        (bin_dir / "python3").write_text(f"#!/bin/sh\n{reporter}\n")
+        (bin_dir / "gh").write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' \"$*\" >> '{calls}'\n"
+            "case \"$1 $2\" in\n"
+            f"  'issue list') printf '%s' '{listed}' ;;\n"
+            "  'issue view') printf 'the existing body\\n' ;;\n"
+            "esac\n"
+        )
+        for stub in (bin_dir / "python3", bin_dir / "gh"):
+            stub.chmod(0o755)
+        return calls
+
+    def run_step(self, tmp: Path, reporter: str, listed: str) -> tuple[subprocess.CompletedProcess[str], Path]:
+        """The step's own shell, run by bash -e as the runner runs it."""
+        calls = self.stubs(tmp, reporter, listed)
+        env = {
+            **os.environ,
+            "PATH": f"{tmp / 'bin'}:{os.environ['PATH']}",
+            "GH_CALLS": str(calls),
+            "GH_TOKEN": "x",
+            "SLICE": "3",
+            "EXPECTED": "2",
+            "RUN_URL": "https://example/run/1",
+            "GITHUB_SHA": "a" * 40,
+            "GITHUB_STEP_SUMMARY": str(tmp / "summary.md"),
+        }
+        result = subprocess.run(["bash", "-e", "-c", issue_step_shell()], cwd=tmp, env=env,
+                                capture_output=True, text=True)
+        return result, calls
+
+    def test_a_failed_reporter_leaves_an_existing_issue_untouched(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, calls = self.run_step(Path(tmp), "exit 2", "7")
+            self.assertEqual(result.returncode, 2, result.stderr)
+            writes = [c for c in calls.read_text().splitlines()
+                      if c.startswith(("issue edit", "issue create"))]
+            self.assertEqual(writes, [], result.stderr)
+            self.assertIn("leaving the tracking issue untouched", result.stderr)
+
+    def test_a_failed_reporter_creates_no_issue(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, calls = self.run_step(Path(tmp), "exit 2", "")
+            self.assertEqual(result.returncode, 2, result.stderr)
+            writes = [c for c in calls.read_text().splitlines()
+                      if c.startswith(("issue edit", "issue create"))]
+            self.assertEqual(writes, [], result.stderr)
+
+    def test_a_reported_body_reaches_the_issue_and_keeps_the_exit_code(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result, calls = self.run_step(Path(tmp), "printf 'NEW BODY\\n'\nexit 1", "7")
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn("issue edit 7 --body-file new.md", calls.read_text())
+            self.assertEqual((Path(tmp) / "new.md").read_text(), "NEW BODY\n")
 
 
 if __name__ == "__main__":

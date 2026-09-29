@@ -182,7 +182,9 @@ jobs:
       # One issue, found by its label, holds a section per slice. The script
       # rewrites this slice's section and keeps the others; its exit code
       # (1 when the slice has a survivor or an unjudged mutant) is the job's,
-      # after the issue is written.
+      # after the issue is written. A reporter that fails before printing
+      # (exit 2 on prose over the limit, or a crash) leaves the issue as it
+      # was: an empty body must never replace the other slices and the notes.
       - name: Update the tracking issue
         env:
           GH_TOKEN: ${{ github.token }}
@@ -202,9 +204,13 @@ jobs:
           python3 scripts/mutants-nightly.py report --slice "$SLICE" --expected "$EXPECTED" \
             --outcomes-root shards --run-url "$RUN_URL" --sha "$GITHUB_SHA" \
             --issue-body current.md --summary "$GITHUB_STEP_SUMMARY" > new.md || status=$?
-          if [ -n "$issue" ]; then
-            gh issue edit "$issue" --body-file new.md
+          if [ -s new.md ]; then
+            if [ -n "$issue" ]; then
+              gh issue edit "$issue" --body-file new.md
+            else
+              gh issue create --title "Mutants nightly: survivors" --label mutants-nightly --body-file new.md
+            fi
           else
-            gh issue create --title "Mutants nightly: survivors" --label mutants-nightly --body-file new.md
+            echo "the reporter wrote no body; leaving the tracking issue untouched" >&2
           fi
           exit "$status"
