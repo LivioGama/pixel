@@ -33,6 +33,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] If the change moves anything `ARCHITECTURE.md` describes (a crate or an internal dependency, a file on disk, the wire contract, what `pixel install` writes, a hook, a CI job), the matching section is updated in the same pull request ([`.agents/rules/architecture-doc.md`](.agents/rules/architecture-doc.md) maps change to section; `docs_drift::` checks the command and crate tables).
 - [ ] If `crates/` changed: the binary was rebuilt and reinstalled, and `pixel doctor .` is green (see "Local install loop").
 - [ ] Every CodeRabbit finding on the pull request has an answer in its own thread — a fix naming its commit, or the reason it does not apply — and the thread is resolved (see "CodeRabbit reviews").
+- [ ] The work was tracked on [project 3, view 1](https://github.com/users/LivioGama/projects/3/views/1): the PR body opens with `Task <number>`, or with `no task: <reason>` for the declared exceptions (see [`.agents/rules/project-task.md`](.agents/rules/project-task.md)).
 
 ## Prerequisites
 

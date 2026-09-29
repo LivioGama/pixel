@@ -41,6 +41,7 @@ apply to:
 | `graph-resolver.md` | `crates/pixel-graph/**` | the chain a resolution change crosses (extraction, storage, index, six resolution paths, `rename`, diagnostics), the language rule it models, tier honesty |
 | `install-layouts.md` | `crates/pixel-install/**` | repo equal to `$HOME`, foreign configs, quoted paths in pasted commands, global and repo-local state kept apart |
 | `readme-webp.md` | `docs/examples/*.webp`, `docs/motion/**` | the verified lossless pipeline for README animated webp: render crf=10, 1600×1000 lanczos frames, `img2webp -lossless`, embed `width="800"` |
+| `project-task.md` | always | before any work: find the issue on [project 3, view 1](https://github.com/users/LivioGama/projects/3/views/1) or open one and add it; the PR body opens with `Task <number>` (declared exceptions: `no task: <reason>`) |
 
 `.claude/rules` is a symlink to that directory (Claude Code loads it by
 itself, honouring `paths:`), and `CLAUDE.md` is a symlink to this file. A
