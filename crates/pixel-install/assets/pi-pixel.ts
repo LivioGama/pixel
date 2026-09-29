@@ -2,8 +2,8 @@
 // __MANAGED_BEGIN__
 // __MANAGED_END__
 import { spawnSync } from "node:child_process";
-import { appendFileSync, mkdirSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { appendFileSync, mkdirSync, realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -199,30 +199,280 @@ function commandFor(action: Action, p: any): string[][] {
   }
 }
 
-function simpleTranslation(command: string, root: string) {
-  const text = command.trim();
-  if (/[|;&`$<>\\\n]/.test(text)) return null;
-  const match = /^(ls|rg|grep|git|cat)(?:\s+|$)(.*)$/.exec(text);
-  if (!match) return null;
-  const [, verb, rest] = match;
-  if (rest.startsWith("-")) return null;
-  if ((verb === "cat" || verb === "ls") && rest && !inRepo(root, rest)) return null;
-  if (verb === "cat" && /^[\w./-]+$/.test(rest)) {
-    return ["search-content", "^", rest, "--json", "--limit", "200"];
+/// Split only unquoted `|`, `;`, `&`, `&&`, `||` and newlines. Mirrors
+/// `split_segments` in `crates/pixel/src/guard.rs`; an unterminated quote or
+/// an empty segment leaves the compound native so the host's permissions
+/// stay authoritative.
+function splitShellSegments(text: string): { text: string; piped: boolean }[] | undefined {
+  const segments: { text: string; piped: boolean }[] = [];
+  let quote: string | null = null;
+  let start = 0;
+  let piped = false;
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (quote !== null) {
+      if (c === quote) quote = null;
+      i++;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      i++;
+      continue;
+    }
+    if (c === "|" || c === ";" || c === "&" || c === "\n") {
+      const segment = text.slice(start, i).trim();
+      if (!segment) return undefined;
+      segments.push({ text: segment, piped });
+      const doubled = (c === "|" || c === "&") && text[i + 1] === c;
+      const end = doubled ? i + 1 : i;
+      piped = c === "|" && !doubled;
+      start = end + 1;
+      i = end + 1;
+      continue;
+    }
+    i++;
   }
-  if (verb === "ls" && /^[\w./-]*$/.test(rest)) return ["list-areas", "--json"];
-  if ((verb === "rg" || verb === "grep") && /^['"]?[\w.*/:-]+['"]?(?:\s+[\w./-]+)?$/.test(rest)) {
-    const [query, path] = rest.split(/\s+/);
-    if (path && !inRepo(root, path)) return null;
-    return ["search-content", query.replace(/^['"]|['"]$/g, ""), ...(path ? [path] : []), "--limit", "40"];
+  if (quote !== null) return undefined;
+  const last = text.slice(start).trim();
+  if (!last) return undefined;
+  segments.push({ text: last, piped });
+  return segments;
+}
+
+/// The bounded shell grammar of `search_compat::shell_argv`: quotes are
+/// accepted, expansions/escapes/redirection/unquoted-globs are not.
+function tokenizeShell(segment: string): string[] | undefined {
+  const args: string[] = [];
+  let current = "";
+  let started = false;
+  let quote: string | null = null;
+  for (let i = 0; i < segment.length; i++) {
+    const c = segment[i];
+    if (c === "\n" || c === "\r" || c === "\\" || c === "$" || c === "`") return undefined;
+    if (quote !== null) {
+      if (c === quote) quote = null;
+      else current += c;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      started = true;
+      continue;
+    }
+    if (";|<>&()*?[]{}~#".includes(c)) return undefined;
+    if (c === " " || c === "\t") {
+      if (started) {
+        args.push(current);
+        current = "";
+        started = false;
+      }
+      continue;
+    }
+    if (/\s/.test(c)) return undefined;
+    current += c;
+    started = true;
   }
-  if (verb === "git") {
-    if (rest === "status") return ["repo-state", "--json"];
-    if (rest === "diff") return ["review-changes", "--json"];
-    if (rest === "log") return ["commit-history", "--json"];
-    if (/^blame [\w./-]+$/.test(rest)) return ["who-wrote", rest.slice(6), "--json"];
+  if (quote !== null) return undefined;
+  if (started) args.push(current);
+  return args;
+}
+
+/// The canonical-path containment check that backs every reader leaf: a
+/// path is a repo read only when its canonical form sits inside the
+/// canonical repository root. Missing files, home expansion, `..` escapes,
+/// FIFOs and symlinks out of the root all stay native.
+function argReadsRepo(root: string, path: string): boolean {
+  if (!path || path === "-") return false;
+  const absolute = isAbsolute(path) ? path : resolve(root, path);
+  let canonical: string;
+  try { canonical = realpathSync(absolute); }
+  catch { return false; }
+  let canonicalRoot: string;
+  try { canonicalRoot = realpathSync(root); }
+  catch { return false; }
+  return canonical === canonicalRoot || canonical.startsWith(canonicalRoot + sep);
+}
+
+/// `awk` may write via redirect, pipe or `system()`: refuse a denial when
+/// the script itself could be doing more than reading.
+function awkMayWrite(args: string[]): boolean {
+  return args.some((arg) => arg.includes(">") || arg.includes("|") || arg.includes("system("));
+}
+
+/// `sed -i`/`-ni`/`-i.bak`/`--in-place`: a write, never a plain read.
+function sedEditsInPlace(args: string[]): boolean {
+  return args.some((arg) => {
+    if (arg.startsWith("--in-place")) return true;
+    if (arg.startsWith("-") && !arg.startsWith("--") && arg.includes("i")) return true;
+    return false;
+  });
+}
+
+/// `sed -n 'A,Bp' F` with a bounded line window: the follow-up to a Pixel
+/// hit. Never denied; the path must be shape-valid (canonical containment
+/// is enforced elsewhere).
+function isBoundedSedRead(args: string[]): boolean {
+  if (args[0] !== "sed" || args[1] !== "-n") return false;
+  const range = args[2];
+  if (!range || !range.endsWith("p")) return false;
+  const inside = range.slice(0, -1);
+  const parts = inside.split(",");
+  if (parts.length !== 2) return false;
+  const start = Number(parts[0]);
+  const end = Number(parts[1]);
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return false;
+  if (start < 1 || end < start || end - start > 199) return false;
+  const path = args[3];
+  if (!path || path.startsWith("-")) return false;
+  if (CREDENTIAL_PATH.test(path)) return false;
+  return true;
+}
+
+const REPO_READ_REASON = "repository read: use pixel search-content or pixel pack-context <uid>";
+const REPO_SEARCH_REASON = "repository search: use pixel search-content";
+const LS_REASON = "repository discovery: use pixel list-areas or find-code";
+const FIND_REASON = "repository discovery: use pixel find-code or list-areas";
+const CREDENTIAL_REASON = "credential path";
+
+/// Port of `enforce_leaf` (`crates/pixel/src/guard.rs`). One Bash leaf at a
+/// time: the first matching rule returns `{reason, operation?}`. Returning
+/// `undefined` keeps the command native.
+function enforceLeaf(segment: string, words: string[], piped: boolean, root: string): { reason: string; operation?: string } | undefined {
+  const [bin, ...args] = words;
+  let effectiveBin = bin;
+  let effectiveArgs = args;
+  let rtkWrapped = false;
+  if (bin === "rtk" && args.length > 0 && (["cat", "head", "tail", "awk", "sed", "read"] as string[]).includes(args[0])) {
+    rtkWrapped = true;
+    effectiveBin = args[0];
+    effectiveArgs = args.slice(1);
   }
-  return null;
+  const nonFlagPaths = (skip: number) => effectiveArgs.filter((arg) => !arg.startsWith("-")).slice(skip);
+  const credentialPath = (path: string) => CREDENTIAL_PATH.test(path);
+  switch (effectiveBin) {
+    case "rg":
+    case "grep": {
+      const nonFlag = effectiveArgs.filter((arg) => !arg.startsWith("-"));
+      const explicitPath = nonFlag.length === 2;
+      if (piped && !explicitPath) return undefined;
+      if (!explicitPath) return undefined;
+      const path = nonFlag[1];
+      if (credentialPath(path)) return { reason: CREDENTIAL_REASON };
+      if (!argReadsRepo(root, path)) return undefined;
+      return { reason: REPO_SEARCH_REASON, operation: "search-content" };
+    }
+    case "git": {
+      let i = 0;
+      let sub: string | undefined;
+      while (i < effectiveArgs.length) {
+        const word = effectiveArgs[i];
+        if (["-C", "-c", "--git-dir", "--work-tree", "--namespace"].includes(word)) {
+          i += 2;
+          continue;
+        }
+        if (word.startsWith("-")) {
+          i++;
+          continue;
+        }
+        sub = word;
+        i++;
+        break;
+      }
+      if (i !== effectiveArgs.length || !sub) return undefined;
+      let alternative: string;
+      switch (sub) {
+        case "status": alternative = "repo-state"; break;
+        case "diff": alternative = "review-changes"; break;
+        case "log": alternative = "commit-history"; break;
+        default: return undefined;
+      }
+      return { reason: `repository inspection: use pixel ${alternative}`, operation: alternative };
+    }
+    case "cat":
+    case "head":
+    case "tail": {
+      const paths = nonFlagPaths(0);
+      for (const p of paths) if (credentialPath(p)) return { reason: CREDENTIAL_REASON };
+      if (!paths.some((p) => argReadsRepo(root, p))) return undefined;
+      return { reason: REPO_READ_REASON, operation: "search-content" };
+    }
+    case "awk": {
+      if (awkMayWrite(effectiveArgs)) return undefined;
+      const paths = nonFlagPaths(1);
+      for (const p of paths) if (credentialPath(p)) return { reason: CREDENTIAL_REASON };
+      if (!paths.some((p) => argReadsRepo(root, p))) return undefined;
+      return { reason: REPO_READ_REASON, operation: "search-content" };
+    }
+    case "sed": {
+      if (sedEditsInPlace(effectiveArgs)) return undefined;
+      if (isBoundedSedRead(effectiveArgs)) return undefined;
+      const paths = nonFlagPaths(1);
+      for (const p of paths) if (credentialPath(p)) return { reason: CREDENTIAL_REASON };
+      if (!paths.some((p) => argReadsRepo(root, p))) return undefined;
+      return { reason: REPO_READ_REASON, operation: "search-content" };
+    }
+    case "read": {
+      if (!rtkWrapped) return undefined;
+      const paths = nonFlagPaths(0);
+      for (const p of paths) if (credentialPath(p)) return { reason: CREDENTIAL_REASON };
+      if (!paths.some((p) => argReadsRepo(root, p))) return undefined;
+      return { reason: REPO_READ_REASON, operation: "search-content" };
+    }
+    case "cp": {
+      const operands = effectiveArgs.filter((arg) => !arg.startsWith("-"));
+      if (operands.length < 2) return undefined;
+      const sources = operands.slice(0, -1);
+      for (const p of sources) if (credentialPath(p)) return { reason: CREDENTIAL_REASON };
+      if (!sources.some((p) => argReadsRepo(root, p))) return undefined;
+      return { reason: REPO_READ_REASON };
+    }
+    case "ls":
+    case "tree": {
+      const allowedFlags = new Set(["-a", "-l", "-la", "-al", "--all", "--long"]);
+      for (const arg of effectiveArgs) {
+        if (arg.startsWith("-") && !allowedFlags.has(arg)) return undefined;
+      }
+      const path = [...effectiveArgs].reverse().find((arg) => !arg.startsWith("-")) ?? ".";
+      if (credentialPath(path)) return { reason: CREDENTIAL_REASON };
+      if (!argReadsRepo(root, path)) return undefined;
+      return { reason: LS_REASON, operation: "list-areas" };
+    }
+    case "find": {
+      const path = effectiveArgs[0];
+      if (!path) return undefined;
+      if (credentialPath(path)) return { reason: CREDENTIAL_REASON };
+      if (!argReadsRepo(root, path)) return undefined;
+      return { reason: FIND_REASON, operation: "find-code" };
+    }
+    default:
+      return undefined;
+  }
+}
+
+/// Decide whether the bash tool's command should be blocked under
+/// `enforce`. Mirrors `enforce_shell_for_provider` from the Rust guard:
+/// unknown segments, `cd`/`command`/`builtin` compounds and shells outside
+/// the bounded parser stay native so the host's permissions stay
+/// authoritative. Returns `undefined` to allow.
+function enforceLeafDecision(command: string, root: string): { reason: string; operation?: string } | undefined {
+  const trimmed = command.trim();
+  if (!trimmed) return undefined;
+  const segments = splitShellSegments(trimmed);
+  if (!segments) return undefined;
+  const tokens: (string[] | undefined)[] = segments.map((segment) => tokenizeShell(segment.text));
+  if (tokens.some((t) => t === undefined)) return undefined;
+  // A preceding directory change alters relative operands; the Rust guard
+  // leaves the compound native rather than guessing the runtime cwd.
+  if (tokens.some((words) => words!.length > 0 && (["cd", "command", "builtin"] as string[]).includes(words![0]))) {
+    return undefined;
+  }
+  for (let i = 0; i < segments.length; i++) {
+    const decision = enforceLeaf(segments[i].text, tokens[i]!, segments[i].piped, root);
+    if (decision) return decision;
+  }
+  return undefined;
 }
 
 /// `find-code` matches carry the pieces of a uid; pack-context and impact
@@ -284,10 +534,12 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
   }
   if (tool === "bash" || tool === "run_command") {
     const command = String(input.command ?? input.cmd ?? "").trim();
-    // Only suggest routes for simple commands with known capabilities.
-    // Compositions and unsupported syntax retain their shell semantics.
-    const translation = simpleTranslation(command, root);
-    if (translation) return { kind: "blocked", reason: `Use pixel ${translation[0]} for repository retrieval`, operation: translation[0] };
+    // Port of the Rust guard's leaf table: block-only. Compositions,
+    // unsupported shell syntax, and unknown binaries retain their host
+    // semantics so the native tool stays authoritative. `powershell` is
+    // out of scope (it is absent from `classify` on the Rust side).
+    const decision = enforceLeafDecision(command, root);
+    if (decision) return { kind: "blocked", reason: decision.reason, operation: decision.operation };
     return { kind: "exception", reason: "native command or unsupported shell syntax" };
   }
   if (["grep", "find", "ls", "glob", "list_dir", "grep_search", "file_search"].includes(tool)) {
