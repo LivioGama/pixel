@@ -397,4 +397,154 @@ mod tests {
             GuardState::Installed(repo.join(EXTENSION))
         );
     }
+
+    /// Runs `script` under bun against the extension with pi's SDK imports
+    /// stubbed and `PIXEL_BIN` pointing at an argv-echoing shell stub; the
+    /// script sees `classify`, `commandFor`, `run` and `activate`. Returns
+    /// its stdout, or `None` where bun is not installed.
+    fn run_in_bun(script: &str) -> Option<String> {
+        if std::process::Command::new("bun")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return None;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("pixel-stub");
+        write(
+            &stub,
+            "#!/bin/sh\ncase \"$1\" in\n  --version) echo 'pixel 0.0.0';;\n  --help) printf '  status  s\\n  search-content  s\\n  scope-task  s\\n  repo-state  s\\n';;\n  status) echo '{\"index\":{\"base_files\":1},\"graph\":{\"present\":true}}';;\n  scope-task) echo '{\"path\":\"a.rs\"}';;\n  repo-state) echo '{}';;\n  *) echo \"$@\";;\nesac\n",
+        );
+        fs::set_permissions(&stub, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let source = extension_source(&stub)
+            .replace(
+                "import { Type } from \"@earendil-works/pi-ai\";",
+                "const Type: any = new Proxy({}, { get: () => () => ({}) });",
+            )
+            .replace(
+                "import type { ExtensionAPI } from \"@earendil-works/pi-coding-agent\";",
+                "type ExtensionAPI = any;",
+            );
+        write(
+            &dir.path().join("ext.ts"),
+            &format!("{source}\nexport {{ classify, commandFor, run, activate }};\n"),
+        );
+        write(
+            &dir.path().join("t.ts"),
+            &format!(
+                "import {{ classify, commandFor, run, activate }} from \"./ext.ts\";\n{script}\n"
+            ),
+        );
+        let out = std::process::Command::new("bun")
+            .arg("t.ts")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        Some(String::from_utf8(out.stdout).unwrap())
+    }
+
+    #[test]
+    fn classify_should_block_a_bounded_read_of_a_bootstrap_path_until_pixel_was_called() {
+        let script = r#"
+const root = "/repo";
+const paths = new Set(["src/a.rs"]);
+const read = { path: "src/a.rs", limit: 50 };
+const before = classify("read", read, root, paths, { pixelHealthy: true, pixelCalled: false });
+const after = classify("read", read, root, paths, { pixelHealthy: true, pixelCalled: true });
+const outside = classify("read", { path: "/etc/hosts" }, root, paths, { pixelHealthy: true, pixelCalled: false });
+console.log(JSON.stringify([before.kind, after.kind, after.reason, outside.kind]));
+"#;
+        let Some(out) = run_in_bun(script) else {
+            return;
+        };
+        assert_eq!(
+            out.trim(),
+            r#"["blocked","exception","bounded Pixel-resolved target read","exception"]"#
+        );
+    }
+
+    #[test]
+    fn tool_result_should_unlock_bootstrap_reads_only_after_a_successful_pixel_tool_result() {
+        let script = r#"
+process.env.PIXEL_POLICY = "enforce";
+const root = process.cwd();
+const verdicts: Record<string, string> = {};
+for (const [toolName, isError] of [["none", false], ["pixel", false], ["pixel_project", false], ["pixel", true], ["read", false]] as const) {
+  const handlers: Record<string, any> = {};
+  activate({ on: (n: string, f: any) => { handlers[n] = f; }, registerTool: () => {}, getActiveTools: () => [], getAllTools: () => [], setActiveTools: () => {} });
+  await handlers["before_agent_start"]({ prompt: "fix the failing parser test please" }, { cwd: root });
+  if (toolName !== "none") await handlers["tool_result"]({ toolName, isError, content: [] }, { cwd: root });
+  const out = await handlers["tool_call"]({ toolName: "read", input: { path: "a.rs", limit: 10 } }, { cwd: root });
+  verdicts[`${toolName}/${isError}`] = out?.block ? "blocked" : "allowed";
+}
+console.log(JSON.stringify(verdicts));
+"#;
+        let Some(out) = run_in_bun(script) else {
+            return;
+        };
+        assert_eq!(
+            out.trim(),
+            r#"{"none/false":"blocked","pixel/false":"allowed","pixel_project/false":"allowed","pixel/true":"blocked","read/false":"blocked"}"#
+        );
+    }
+
+    #[test]
+    fn run_should_keep_the_metrics_box_for_tool_calls_and_silence_it_for_probes() {
+        let script = r#"
+console.log(JSON.stringify([
+  run("/", ["search-content", "q"]).trim(),
+  run("/", ["search-content", "q"], true).trim(),
+]));
+"#;
+        let Some(out) = run_in_bun(script) else {
+            return;
+        };
+        assert_eq!(
+            out.trim(),
+            r#"["search-content q","search-content q --metrics off"]"#
+        );
+    }
+
+    #[test]
+    fn command_for_should_reject_an_empty_search_query_even_with_a_symbol() {
+        let script = r#"
+const attempt = (action: any, p: any) => { try { return commandFor(action, p); } catch (e) { return String(e); } };
+console.log(JSON.stringify([
+  attempt("search_content", { query: "  " }),
+  attempt("search_content", { symbol: "x" }),
+  attempt("search_content", { query: "needle" }),
+  attempt("impact", { symbol: "x" }),
+]));
+"#;
+        let Some(out) = run_in_bun(script) else {
+            return;
+        };
+        assert_eq!(
+            out.trim(),
+            r#"["Error: search_content requires a goal, query, or symbol","Error: search_content requires a goal, query, or symbol",[["search-content","needle","--json","--limit","40"]],[["impact","x","--json"]]]"#
+        );
+    }
+
+    #[test]
+    fn extension_source_should_pass_metrics_off_only_from_the_quiet_path() {
+        let source = extension_source(Path::new("/opt/bin/pixel"));
+        assert!(
+            source.contains("...(quiet ? [\"--metrics\", \"off\"] : [])"),
+            "tool-facing runs must not hide the metrics box"
+        );
+        assert!(
+            source.contains("event.toolName === \"pixel\" || event.toolName === \"pixel_project\""),
+            "the global pixel tool must mark pixel as called"
+        );
+        assert!(
+            source.contains("state.pixelCalled && resolvedPaths.has(target)"),
+            "bootstrap paths must not unlock reads before a pixel call"
+        );
+    }
 }

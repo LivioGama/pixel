@@ -376,7 +376,7 @@ Existing hook entry points remain implemented, separately from active installati
 | `PostCompaction` | `pixel run-hook post-compaction` | Re-injects the active task evidence as additional context. |
 | `PreToolUse` | `pixel run-hook guard` | Bounded compatible command routing; native fallback and host permissions remain authoritative. |
 | `PostToolUse` | `pixel run-hook post-tool-use` | After an edit, emits the dependants of what was just changed. |
-| `PostToolUse` (Codex) | `pixel run-hook metrics` | Codex tool results drop stderr, so the finalized invocation's 🟩 metrics line is re-emitted as `additionalContext` — correlated to the action record by cwd + argv, silent on any miss, and suppressed by the same `metrics` opt-out. |
+| `PostToolUse` (Codex, Claude `Bash`, Devin `exec`) | `pixel run-hook metrics` | Codex tool results drop stderr, so the finalized invocation's 🟩 metrics line is re-emitted as `additionalContext` (Claude and Devin also get `systemMessage`/`additionalContext` output through the same relay, installed by `pixel install` and `pixel install --repo`; it stays silent when the tool result already carries the box) — correlated to the action record by cwd + argv, silent on any miss, and suppressed by the same `metrics` opt-out. |
 | (Codex install step) | `pixel run-hook composed-guard` | Runs a sealed install-time snapshot of a foreign hook before Pixel's Codex rewrite. |
 
 `pixel doctor` checks current installation artifacts and distinguishes configured

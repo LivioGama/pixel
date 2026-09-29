@@ -597,6 +597,10 @@ fn devin_should_auto_approve_only_safe_pixel_retrieval_commands() {
         "pixel find-code hook && sed -n '920,960p' crates/pixel/src/guard.rs",
         "pixel find-code hook; rtk sed -n '1,200p' crates/pixel/src/guard.rs",
         "pixel search-content -F 'one;two'",
+        // A lone bounded sed read has no retrieval segment beside it.
+        "sed -n '1,20p' crates/pixel/src/guard.rs",
+        "rtk sed -n '640,839p' crates/pixel/src/guard.rs",
+        "echo --- && rtk sed -n '1,20p' src/lib.rs; echo ---",
         "pixel find-code \"decides the permission response for retrieval commands\" 2>&1 | head -40",
         "rtk pixel search-content -F provider_rewrite | head -n 40",
     ] {
@@ -621,7 +625,19 @@ fn devin_should_auto_approve_only_safe_pixel_retrieval_commands() {
         ),
         ("pixel search-content needle src || grep needle src", vec![]),
         ("echo ---", vec![]),
-        ("sed -n '1,20p' crates/pixel/src/guard.rs", vec![]),
+        ("sed -n '1,201p' crates/pixel/src/guard.rs", vec![]),
+        ("sed -n '0,20p' crates/pixel/src/guard.rs", vec![]),
+        ("sed -n '/needle/p' crates/pixel/src/guard.rs", vec![]),
+        ("sed -i '1,20p' crates/pixel/src/guard.rs", vec![]),
+        ("sed -n '1,20p' .env", vec![]),
+        ("sed -n '1,20p' deploy/key.pem", vec![]),
+        ("sed -n '1,20p' src/lib.rs > out.txt", vec![]),
+        ("sed -n '1,20p' src/lib.rs | sort", vec![]),
+        ("sed -n '1,20p' src/lib.rs; rm marker", vec![]),
+        ("sed -n '1,20p' src/lib.rs || cat src/lib.rs", vec![]),
+        ("rtk read src/lib.rs -l 1-20", vec![]),
+        ("head -n 20 src/lib.rs", vec![]),
+        ("sed -n '1,20p' src/lib.rs", vec![("PIXEL_POLICY", "off")]),
         (
             "pixel find-code hook && sed -n '1,201p' crates/pixel/src/guard.rs",
             vec![],
@@ -644,6 +660,297 @@ fn devin_should_auto_approve_only_safe_pixel_retrieval_commands() {
             "must leave Devin's normal permission flow intact for {command}"
         );
     }
+}
+
+/// Devin (headless) reads `rtk read`, `head`, `tail` like `cat`: rewritten to
+/// the indexed reader, and `rtk read F -l A-B` to a bounded sed. Zcode shares
+/// the rewrite; Codex and Claude do not take it.
+#[test]
+fn devin_and_zcode_rewrite_rtk_read_head_tail_like_cat() {
+    let dir = indexed_dir("reader-rewrite");
+    let lines = (1..=300).map(|n| format!("l{n}\n")).collect::<String>();
+    std::fs::write(dir.join("src/big.rs"), lines).unwrap();
+    std::fs::write(dir.join(".env"), "K=v\n").unwrap();
+    let cat = "pixel search-content --limit 200 '.*' 'src/lib.rs'";
+    let rewrites = |command: &str, provider: &str| {
+        let event = match provider {
+            "devin" => devin_exec(command, &dir),
+            _ => payload("Bash", json!({"command":command}), &dir),
+        };
+        guard(provider, &event, &[])
+    };
+    for provider in ["devin", "zcode"] {
+        for (command, rewritten) in [
+            ("cat src/lib.rs", cat),
+            ("rtk read src/lib.rs", cat),
+            ("rtk read src/lib.rs -l aggressive", cat),
+            ("head src/lib.rs", cat),
+            ("rtk head -n 20 src/lib.rs", cat),
+            ("tail -5 src/lib.rs", cat),
+            (
+                "rtk read src/big.rs -l 640-820",
+                "sed -n '640,820p' 'src/big.rs'",
+            ),
+        ] {
+            let response = rewrites(command, provider);
+            assert_eq!(
+                response["hookSpecificOutput"]["updatedInput"]["command"], rewritten,
+                "{provider}: {command}"
+            );
+        }
+        // Not rewritable: wider than the bound, large file, credential,
+        // awk (no equivalent), the shell builtin, or a pipeline.
+        for command in [
+            "rtk read src/big.rs -l 1-201",
+            "rtk read src/big.rs",
+            "head src/big.rs",
+            "rtk read .env",
+            "awk '{print}' src/lib.rs",
+            "read src/lib.rs",
+            "head src/lib.rs | cat",
+        ] {
+            assert!(
+                rewrites(command, provider).is_null(),
+                "{provider}: must stay native by default: {command}"
+            );
+        }
+    }
+    // Codex has no reader rewrite: the call proceeds, with the same advisory
+    // `cat` gets in the default mode.
+    let note = "Pixel suggestion: repository read: use pixel search-content or pixel pack-context <uid>. Original call proceeds.";
+    for command in ["rtk read src/lib.rs", "head src/lib.rs", "cat src/lib.rs"] {
+        assert_eq!(
+            guard("codex", &shell(command, &dir), &[]),
+            json!({"systemMessage":note, "hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":note}}),
+            "{command}"
+        );
+    }
+}
+
+/// Under enforce every reader of a repository file is blocked like `cat`;
+/// the bounded sed read, writes and out-of-repo paths are not.
+#[test]
+fn enforce_blocks_head_tail_awk_sed_and_rtk_read_like_cat() {
+    let dir = indexed_dir("reader-enforce");
+    let lines = (1..=300).map(|n| format!("l{n}\n")).collect::<String>();
+    std::fs::write(dir.join("src/big.rs"), lines).unwrap();
+    let envs = [("PIXEL_POLICY", "enforce")];
+    let read = "repository read: use pixel search-content or pixel pack-context <uid>";
+    let range = "repository read: `rtk read -l` takes a level (none, minimal, aggressive), not a line range; use sed -n 'START,ENDp' <file> (at most 200 lines) or pixel pack-context <uid>";
+    let block =
+        |reason: &str| json!({"decision":"block","reason":format!("pixel policy: {reason}")});
+    // Devin: flagged forms too. Unrewritable ones reach the block.
+    for (command, reason) in [
+        ("awk '{print}' src/lib.rs", read),
+        ("awk -F, 'NR==1' src/lib.rs", read),
+        ("rtk awk '{print}' src/lib.rs", read),
+        ("sed 's/a/b/' src/lib.rs", read),
+        ("sed -n '/needle/p' src/lib.rs", read),
+        ("sed -n '1,201p' src/big.rs", read),
+        ("rtk sed -n '1,201p' src/big.rs", read),
+        ("rtk read src/big.rs", read),
+        ("head src/big.rs", read),
+        ("rtk tail -n 5 src/big.rs", read),
+        ("rtk read src/big.rs -l 1-201", range),
+    ] {
+        assert_eq!(
+            guard("devin", &devin_exec(command, &dir), &envs),
+            block(reason),
+            "{command}"
+        );
+    }
+    for command in [
+        "sed -n '1,200p' src/lib.rs",
+        "rtk sed -n '1,20p' src/lib.rs",
+        "sed -i 's/a/b/' src/lib.rs",
+        "sed -ni 's/needle/n/p' src/lib.rs",
+        "awk '{print > \"out\"}' src/lib.rs",
+        "head /etc/hosts",
+        "rtk read /etc/hosts",
+        "read src/lib.rs",
+    ] {
+        assert!(
+            guard("devin", &devin_exec(command, &dir), &envs).is_null(),
+            "{command}"
+        );
+    }
+    // Codex and Zcode-style shells: flagless forms only, like `cat`.
+    for command in [
+        "head src/lib.rs",
+        "rtk tail src/lib.rs",
+        "awk 'NR==1' src/lib.rs",
+        "sed 's/a/b/' src/lib.rs",
+        "rtk read src/lib.rs",
+        "rtk cat src/lib.rs",
+    ] {
+        assert_eq!(
+            guard("codex", &shell(command, &dir), &envs),
+            denied(read),
+            "{command}"
+        );
+    }
+    for command in [
+        "head -n 5 src/lib.rs",
+        "rtk read src/lib.rs -l aggressive",
+        "sed -n '/needle/p' src/lib.rs",
+        "sed -n '1,20p' src/lib.rs",
+    ] {
+        assert!(
+            guard("codex", &shell(command, &dir), &envs).is_null(),
+            "{command}"
+        );
+    }
+    // Claude keeps its own permission flow.
+    assert!(
+        guard(
+            "claude",
+            &payload("Bash", json!({"command":"head src/lib.rs"}), &dir),
+            &envs
+        )
+        .is_null()
+    );
+}
+
+/// A lone bounded sed read is approved for Zcode too, with its own shape.
+#[test]
+fn zcode_approves_a_lone_bounded_sed_read_and_nothing_wider() {
+    let dir = indexed_dir("zcode-sed");
+    assert_eq!(
+        guard(
+            "zcode",
+            &zcode_permission_request("rtk sed -n '640,820p' src/lib.rs", &dir),
+            &[]
+        ),
+        json!({"hookSpecificOutput":{
+            "hookEventName":"PermissionRequest",
+            "decision":{"behavior":"allow"}
+        }})
+    );
+    for command in [
+        "sed -n '1,201p' src/lib.rs",
+        "sed -n '1,20p' .env",
+        "echo ---",
+        "sed -n '1,20p' src/lib.rs && rm -rf .",
+    ] {
+        assert_eq!(
+            guard("zcode", &zcode_permission_request(command, &dir), &[]),
+            Value::Null,
+            "{command}"
+        );
+    }
+}
+
+/// Seed one finalized `impact` record in `dir`, as a real invocation leaves it.
+fn seed_metrics_record(dir: &Path) {
+    let mut event = pixel_actionlog::ActionEvent::new("impact", "impact src/lib.rs");
+    event.cwd = dir.canonicalize().unwrap().display().to_string();
+    event.metrics = Some(
+        pixel_actionlog::OperationMetrics::new(std::time::Duration::from_millis(4), 120, None)
+            .with_comparison_gap(pixel_actionlog::ComparisonGap::NoPolicy),
+    );
+    let mut log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(".pixel/actions.jsonl"))
+        .unwrap();
+    writeln!(log, "{}", serde_json::to_string(&event).unwrap()).unwrap();
+}
+
+/// Claude's Bash result already carries stderr, yet the user never sees it:
+/// the finalized box goes out as `systemMessage` alone (not model context
+/// again). A result without the box gets the usual `additionalContext`.
+/// Devin and Codex keep the silent dedupe.
+#[test]
+fn metrics_relay_shows_claude_users_the_box_already_in_the_result() {
+    let dir = indexed_dir("metrics-relay");
+    seed_metrics_record(&dir);
+    let envs = [("PIXEL_METRICS", "1")];
+    let relay = |provider: &str, payload: &Value| {
+        hook(
+            &["run-hook", "metrics", "--provider", provider],
+            payload,
+            &envs,
+        )
+    };
+    let claude = |response: Value| {
+        json!({
+            "hook_event_name":"PostToolUse",
+            "tool_name":"Bash",
+            "tool_input":{"command":"pixel impact src/lib.rs"},
+            "tool_response": response,
+            "cwd":dir.as_ref()
+        })
+    };
+    // No box in the result: replayed as model context, every provider.
+    let missing = claude(
+        json!({"stdout":"impact: 0 dependants","stderr":"","interrupted":false,"isImage":false}),
+    );
+    let advisory = relay("claude", &missing);
+    let line = advisory["systemMessage"].as_str().unwrap().to_string();
+    assert!(line.starts_with("🟩 pixel impact"), "{line}");
+    assert_eq!(
+        advisory,
+        json!({"systemMessage":line, "hookSpecificOutput":{"hookEventName":"PostToolUse","additionalContext":line}})
+    );
+    // Box in stderr, or in stdout: Claude gets the system message only.
+    for response in [
+        json!({"stdout":"impact: 0 dependants","stderr":format!("{line}\n"),"interrupted":false,"isImage":false}),
+        json!({"stdout":format!("impact: 0 dependants\n{line}"),"stderr":"","interrupted":false,"isImage":false}),
+    ] {
+        assert_eq!(
+            relay("claude", &claude(response.clone())),
+            json!({"systemMessage":line}),
+            "{response}"
+        );
+    }
+    // Box present but no matching record: nothing to finalize, so silence.
+    let unmatched = json!({
+        "hook_event_name":"PostToolUse", "tool_name":"Bash",
+        "tool_input":{"command":"pixel impact src/other.rs"},
+        "tool_response":{"stdout":"","stderr":"🟩 pixel impact ❀ 1ms","interrupted":false},
+        "cwd":dir.as_ref()
+    });
+    assert_eq!(relay("claude", &unmatched), Value::Null);
+    // Devin: `exec` with {success, output, error}. Box present: unchanged silence.
+    let devin = |response: Value| {
+        json!({
+            "hook_event_name":"PostToolUse",
+            "tool_name":"exec",
+            "tool_input":{"command":"pixel impact src/lib.rs"},
+            "tool_response": response,
+            "cwd":dir.as_ref()
+        })
+    };
+    assert_eq!(
+        relay(
+            "devin",
+            &devin(json!({"success":true,"output":format!("impact: 0\n{line}"),"error":""}))
+        ),
+        Value::Null
+    );
+    assert_eq!(
+        relay(
+            "devin",
+            &devin(json!({"success":true,"output":"impact: 0","error":format!("{line}")}))
+        ),
+        Value::Null
+    );
+    // Devin, box absent: the replay it always had.
+    assert_eq!(
+        relay(
+            "devin",
+            &devin(json!({"success":true,"output":"impact: 0","error":""}))
+        ),
+        advisory
+    );
+    // Codex, box present: silent too.
+    let codex = json!({
+        "hook_event_name":"PostToolUse", "tool_name":"shell",
+        "tool_input":{"command":"pixel impact src/lib.rs"},
+        "tool_response":{"output":format!("{line}")},
+        "cwd":dir.as_ref()
+    });
+    assert_eq!(relay("codex", &codex), Value::Null);
 }
 
 #[test]

@@ -453,7 +453,8 @@ fn provider_rewrite(provider: Provider, payload: &Value) -> Option<Value> {
         .map(|p| base.join(p))
         .unwrap_or(base);
     let rewritten = if matches!(provider, Provider::Devin | Provider::Zcode) {
-        crate::search_compat::rewrite_retrieval(&command, &cwd)?
+        crate::search_compat::rewrite_retrieval(&command, &cwd)
+            .or_else(|| reader_rewrite(&command, &cwd))?
     } else {
         crate::search_compat::rewrite(&command, &cwd)?
     };
@@ -582,10 +583,168 @@ fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
                 .into(),
         ),
         "read" | "view_file" | "notebook_read" if path.is_some() && !bounded_read(input) => {
-            Some("repository read: use pixel search-content or pixel pack-context <uid>".into())
+            Some(REPO_READ_REASON.into())
         }
         _ => None,
     }
+}
+
+const REPO_READ_REASON: &str =
+    "repository read: use pixel search-content or pixel pack-context <uid>";
+
+/// `rtk read -l` takes a compression level; agents pass a line range and the
+/// call falls through to the shell builtin `read`.
+const RTK_READ_RANGE_REASON: &str = "repository read: `rtk read -l` takes a level (none, minimal, aggressive), not a line range; use sed -n 'START,ENDp' <file> (at most 200 lines) or pixel pack-context <uid>";
+
+/// Readers that `rtk` may wrap without changing what they read.
+const RTK_READERS: &[&str] = &["cat", "head", "tail", "awk", "sed", "read"];
+
+/// Drop a leading `rtk` when it wraps one of `RTK_READERS`; the flag says so.
+fn strip_rtk_reader<'a>(bin: &'a String, args: &'a [String]) -> (&'a String, &'a [String], bool) {
+    match args.split_first() {
+        Some((reader, rest)) if bin == "rtk" && RTK_READERS.contains(&reader.as_str()) => {
+            (reader, rest, true)
+        }
+        _ => (bin, args, false),
+    }
+}
+
+/// A read of a repository file: some operand (past `program_operands` leading
+/// script operands) is an existing in-repo path. Flagged forms count only
+/// where retrieval is enforced.
+fn repo_read_reason(
+    args: &[String],
+    program_operands: usize,
+    cwd: &Path,
+    root: &Path,
+    enforce_retrieval: bool,
+) -> Option<String> {
+    let reads_repo = args
+        .iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .skip(program_operands)
+        .any(|path| arg_reads_repo(root, cwd, path));
+    (reads_repo && (enforce_retrieval || !args.iter().any(|arg| arg.starts_with('-'))))
+        .then(|| REPO_READ_REASON.into())
+}
+
+/// `sed -i`, `-ni`, `-i.bak`, `--in-place`: a write, so never judged a read.
+fn sed_edits_in_place(args: &[String]) -> bool {
+    args.iter().any(|arg| {
+        arg.starts_with("--in-place")
+            || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('i'))
+    })
+}
+
+/// An awk program that redirects, pipes or shells out is not a plain read.
+fn awk_may_write(args: &[String]) -> bool {
+    args.iter()
+        .any(|arg| arg.contains('>') || arg.contains('|') || arg.contains("system("))
+}
+
+/// The `(file, level)` of an `rtk read` argv: flags are skipped except `-l` /
+/// `--level`, whose value is returned and never mistaken for the file.
+fn rtk_read_operands(args: &[String]) -> (Vec<&str>, Option<&str>) {
+    let mut operands = Vec::with_capacity(1);
+    let mut level = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "-l" | "--level" => level = rest.next().map(String::as_str),
+            flag if flag.starts_with('-') => {}
+            operand => operands.push(operand),
+        }
+    }
+    (operands, level)
+}
+
+/// The line window of `rtk read F -l START-END`, when the level is one.
+fn rtk_read_range(args: &[String]) -> Option<(usize, usize)> {
+    let (start, end) = rtk_read_operands(args).1?.split_once('-')?;
+    Some((start.parse().ok()?, end.parse().ok()?))
+}
+
+/// Devin and Zcode only (`rewrite_retrieval` callers): the readers that
+/// `search_compat` does not know, rewritten to what it does.
+///
+/// - `rtk read F [-l none|minimal|aggressive]` and `head`/`tail [-n N|-N] F`
+///   (N at most 200) become the `cat F` rewrite, so they take exactly its
+///   gates (indexed repo, small text file, no credentials). Whole-file output
+///   is a superset of what they asked for, never a different file.
+/// - `rtk read F -l A-B` becomes `sed -n 'A,Bp' F` for a bounded window in
+///   an indexed repo; a wider window stays put and meets the enforce reason.
+///
+/// `awk` has no equivalent and is only judged by `enforce_leaf`. Claude and
+/// Codex rewrite through `search_compat::rewrite` and do not take this.
+fn reader_rewrite(command: &str, cwd: &Path) -> Option<String> {
+    let mut argv = crate::search_compat::shell_argv(command)?;
+    let rtk = argv.first().is_some_and(|program| program == "rtk");
+    if rtk {
+        argv.remove(0);
+    }
+    let (program, args) = argv.split_first()?;
+    let cat = |file: &str| {
+        crate::search_compat::rewrite_retrieval(
+            &format!("cat {}", crate::search_compat::shell_quote(file)),
+            cwd,
+        )
+    };
+    match program.as_str() {
+        "read" if rtk => {
+            if args
+                .iter()
+                .any(|arg| arg.starts_with('-') && !matches!(arg.as_str(), "-l" | "--level"))
+            {
+                return None;
+            }
+            let (operands, level) = rtk_read_operands(args);
+            let [file] = operands.as_slice() else {
+                return None;
+            };
+            match (level, rtk_read_range(args)) {
+                (_, Some((start, end))) => bounded_sed_rewrite(file, start, end, cwd),
+                (None | Some("none" | "minimal" | "aggressive"), None) => cat(file),
+                _ => None,
+            }
+        }
+        "head" | "tail" => {
+            let file = match args {
+                [file] => file,
+                [flag, count, file] if flag == "-n" && head_count_is_bounded(count) => file,
+                [count, file] if count.strip_prefix('-').is_some_and(head_count_is_bounded) => file,
+                _ => return None,
+            };
+            (!file.starts_with('-')).then(|| cat(file)).flatten()
+        }
+        _ => None,
+    }
+}
+
+fn head_count_is_bounded(count: &str) -> bool {
+    count
+        .parse::<usize>()
+        .is_ok_and(|count| (1..=BOUNDED_READ_LINES).contains(&count))
+}
+
+/// `sed -n 'A,Bp' F` for a bounded window of an existing, non-credential file
+/// of the indexed repository around `cwd`.
+fn bounded_sed_rewrite(file: &str, start: usize, end: usize, cwd: &Path) -> Option<String> {
+    if !line_range_is_bounded(start, end) || credential_shaped(file) {
+        return None;
+    }
+    let root = crate::discover_root(cwd).ok()?;
+    if !root.join(".pixel").is_dir() {
+        return None;
+    }
+    let absolute = cwd.join(file).canonicalize().ok()?;
+    let relative = absolute.strip_prefix(canonical(&root)).ok()?;
+    if !absolute.is_file() || relative.starts_with(".git") || relative.starts_with(".pixel") {
+        return None;
+    }
+    Some(format!(
+        "sed -n '{start},{end}p' {}",
+        crate::search_compat::shell_quote(file)
+    ))
 }
 
 /// A read is bounded when the caller states a line window of at most 200
@@ -604,7 +763,7 @@ fn bounded_read(input: &Value) -> bool {
             .or_else(|| input.get("end_line"))
             .and_then(Value::as_u64),
     ) {
-        (Some(start), Some(end)) => start > 0 && end >= start && end - start < 200,
+        (Some(start), Some(end)) => line_range_is_bounded(start as usize, end as usize),
         _ => false,
     }
 }
@@ -695,6 +854,7 @@ fn enforce_leaf(
     enforce_retrieval: bool,
 ) -> Option<String> {
     let (bin, args) = words.split_first()?;
+    let (bin, args, rtk_wrapped) = strip_rtk_reader(bin, args);
     match bin.as_str() {
         "rg" | "grep" => {
             // Compatibility parsing rejects unknown flags and multi-path
@@ -748,15 +908,26 @@ fn enforce_leaf(
             };
             Some(format!("repository inspection: use pixel {alternative}"))
         }
-        "cat" => args
-            .iter()
-            .filter(|arg| !arg.starts_with('-'))
-            .any(|path| arg_reads_repo(root, cwd, path))
-            .then_some(())
-            .filter(|_| enforce_retrieval || !args.iter().any(|arg| arg.starts_with('-')))
-            .map(|_| {
-                "repository read: use pixel search-content or pixel pack-context <uid>".into()
-            }),
+        // Readers of a repository file. `rtk <reader>` is the same read, and
+        // every provider that reaches this function judges all of them alike;
+        // flagged forms stay native except where `enforce_retrieval` is set
+        // (Devin), exactly as `cat` always did.
+        "cat" | "head" | "tail" => repo_read_reason(args, 0, cwd, root, enforce_retrieval),
+        "awk" if !awk_may_write(args) => repo_read_reason(args, 1, cwd, root, enforce_retrieval),
+        // A bounded `sed -n 'A,Bp' file` is how an agent reads a Pixel hit:
+        // never denied. In-place edits are writes, not reads.
+        "sed" if !sed_edits_in_place(args) && !is_bounded_sed_read(segment) => {
+            repo_read_reason(args, 1, cwd, root, enforce_retrieval)
+        }
+        // `rtk read` only; a bare `read` is the shell builtin.
+        "read" if rtk_wrapped => {
+            let reason = repo_read_reason(args, 0, cwd, root, enforce_retrieval)?;
+            Some(if rtk_read_range(args).is_some() {
+                RTK_READ_RANGE_REASON.into()
+            } else {
+                reason
+            })
+        }
         // Every operand but the destination is a read of that path.
         "cp" => {
             let sources: Vec<&String> = args.iter().filter(|arg| !arg.starts_with('-')).collect();
@@ -764,10 +935,7 @@ fn enforce_leaf(
                 Some((_, sources)) => sources
                     .iter()
                     .any(|path| arg_reads_repo(root, cwd, path))
-                    .then(|| {
-                        "repository read: use pixel search-content or pixel pack-context <uid>"
-                            .into()
-                    }),
+                    .then(|| REPO_READ_REASON.into()),
                 _ => None,
             }
         }
@@ -884,8 +1052,13 @@ fn retrieval_permission_response(provider: Provider, payload: &Value) -> Option<
     }
     let command = payload.get("tool_input")?.get("command")?.as_str()?;
     let mut has_pixel_retrieval = false;
+    let mut has_bounded_sed = false;
     for command in split_safe_command_chain(command)? {
-        if is_static_echo(command) || is_bounded_sed_read(command) {
+        if is_static_echo(command) {
+            continue;
+        }
+        if is_bounded_sed_read(command) {
+            has_bounded_sed = true;
             continue;
         }
         let command = pixel_retrieval_command(command)?;
@@ -906,7 +1079,9 @@ fn retrieval_permission_response(provider: Provider, payload: &Value) -> Option<
         }
         has_pixel_retrieval = true;
     }
-    if !has_pixel_retrieval {
+    // A lone bounded sed read is the follow-up to a Pixel hit and needs no
+    // retrieval segment beside it; a lone echo still earns nothing.
+    if !has_pixel_retrieval && !has_bounded_sed {
         return None;
     }
     Some(match provider {
@@ -1004,6 +1179,7 @@ fn is_bounded_sed_read(command: &str) -> bool {
     if std::path::Path::new(program).file_name() != Some(std::ffi::OsStr::new("sed"))
         || flag != "-n"
         || path.starts_with('-')
+        || credential_shaped(path)
     {
         return false;
     }
@@ -1016,7 +1192,56 @@ fn is_bounded_sed_read(command: &str) -> bool {
     let (Ok(start), Ok(end)) = (start.parse::<usize>(), end.parse::<usize>()) else {
         return false;
     };
-    start > 0 && end >= start && end - start < 200
+    line_range_is_bounded(start, end)
+}
+
+/// The widest line window a bounded read may name, inclusive of both ends.
+const BOUNDED_READ_LINES: usize = 200;
+
+/// A 1-based inclusive line window that is non-empty and at most
+/// `BOUNDED_READ_LINES` long. One spelling for the Read tool window, the
+/// bounded `sed` read and the `rtk read -l A-B` rewrite.
+fn line_range_is_bounded(start: usize, end: usize) -> bool {
+    start > 0 && end >= start && end - start < BOUNDED_READ_LINES
+}
+
+/// Credential-shaped file names never earn an automatic grant or rewrite.
+/// Mirrors the metadata-only rule of `search_compat`: a name, not a scan.
+fn credential_shaped(path: &str) -> bool {
+    let path = Path::new(path);
+    if path.components().any(|part| {
+        part.as_os_str()
+            .to_str()
+            .is_some_and(|name| name.eq_ignore_ascii_case("secrets"))
+    }) {
+        return true;
+    }
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    name.starts_with(".env")
+        || name.ends_with(".env")
+        || name.starts_with("credentials.")
+        || (name.contains("secret") && name.contains('.'))
+        || name == "serviceaccountkey.json"
+        || name.ends_with("-credentials.json")
+        || [
+            ".pem",
+            ".key",
+            ".p12",
+            ".pfx",
+            ".jks",
+            ".keystore",
+            ".truststore",
+            "_rsa",
+            "_dsa",
+            "_ecdsa",
+            "_ed25519",
+        ]
+        .iter()
+        .any(|suffix| name.ends_with(suffix))
 }
 
 /// Returns only standalone Pixel retrieval or a Pixel retrieval with bounded `head` output.
@@ -2196,9 +2421,6 @@ const METRICS_SHELL_TOOLS: &[&str] = &[
 /// advisory and must never turn a tool call into a failure.
 #[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; every decision lives in `metrics_hook_line`
 pub fn run_metrics_hook(provider: Option<Provider>) -> ! {
-    // One contract today: the advisory shape below is the PostToolUse
-    // response every supported provider consumes.
-    let _ = provider;
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
         std::process::exit(0);
@@ -2206,25 +2428,52 @@ pub fn run_metrics_hook(provider: Option<Provider>) -> ! {
     let Ok(payload) = serde_json::from_str::<Value>(&input) else {
         std::process::exit(0);
     };
-    if let Some(line) = metrics_hook_line(&payload) {
-        print!("{}", post_tool_use_advisory(&line));
+    if let Some(response) = metrics_hook_response(provider, &payload) {
+        print!("{response}");
     }
     std::process::exit(0);
+}
+
+/// Whether the host already put the invocation's 🟩 box in the tool result.
+fn result_carries_metrics_box(payload: &Value) -> bool {
+    payload
+        .get("tool_response")
+        .is_some_and(|r| r.to_string().contains("🟩 pixel"))
+}
+
+/// The hook's answer. A box missing from the result is replayed as
+/// `additionalContext` for every provider. A box already in the result is a
+/// duplicate for the model, so it is dropped, except for Claude Code: its
+/// Bash result carries stderr, which the user never sees, so the finalized
+/// box goes out as `systemMessage` only (user-visible, not model context).
+/// Devin and Codex document no `systemMessage` for this event and keep the
+/// silent dedupe.
+fn metrics_hook_response(provider: Option<Provider>, payload: &Value) -> Option<Value> {
+    if !result_carries_metrics_box(payload) {
+        return metrics_hook_line(payload).map(|line| post_tool_use_advisory(&line));
+    }
+    (provider == Some(Provider::Claude))
+        .then(|| metrics_record_line(payload))
+        .flatten()
+        .map(|line| serde_json::json!({"systemMessage": line}))
 }
 
 /// Resolve the payload to the metrics line of the invocation it describes,
 /// or `None` when there is nothing to relay.
 fn metrics_hook_line(payload: &Value) -> Option<String> {
-    let tool = payload.get("tool_name")?.as_str()?;
-    if !METRICS_SHELL_TOOLS.contains(&tool) {
-        return None;
-    }
     // A host that already put stderr in the tool result made the relay a
     // duplicate — leave the line where it is.
-    if payload
-        .get("tool_response")
-        .is_some_and(|r| r.to_string().contains("🟩 pixel"))
-    {
+    if result_carries_metrics_box(payload) {
+        return None;
+    }
+    metrics_record_line(payload)
+}
+
+/// The finalized record's line for the invocation, whether or not the tool
+/// result already shows it.
+fn metrics_record_line(payload: &Value) -> Option<String> {
+    let tool = payload.get("tool_name")?.as_str()?;
+    if !METRICS_SHELL_TOOLS.contains(&tool) {
         return None;
     }
     let command = tool_command_text(payload.get("tool_input")?)?;
@@ -2892,6 +3141,7 @@ fn bypass_advisory_lines(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<Strin
     if tokens.is_empty() {
         return None;
     }
+    let rtk_wrapped = tokens.first().map(String::as_str) == Some("rtk");
     // Strip shell wrapper prefixes (rtk, command, builtin) so `command grep`
     // and `rtk grep` are properly intercepted. This closes the wrapper-prefix
     // evasion where an agent invokes `command grep` to bypass a guard that
@@ -2912,6 +3162,14 @@ fn bypass_advisory_lines(cmd: &str, cwd: &Path, root: &Path) -> Option<Vec<Strin
     let bin = normalize_bin(bin_raw);
     match bin {
 
+        // `rtk read file -l 640-820`: `-l` is a level, so the range never
+        // applies; a bare `read` stays the shell builtin and is left alone.
+        "read" if rtk_wrapped && tokens.len() >= 2 => Some(vec![
+            "BLOCKED by pixel-guard: `rtk read -l` takes a level (none, minimal, aggressive), not a line range.".to_string(),
+            "  pixel pack-context <uid>  # a symbol with its surrounding code".to_string(),
+            "  sed -n 'START,ENDp' <file>  # a bounded line window, at most 200 lines".to_string(),
+            format!("  pixel search-content '<pattern>' {} --context 5", root.display()),
+        ]),
         // sed as search: sed -n '/pattern/p' file
         "sed" if tokens.len() >= 3 && tokens.contains(&"-n".to_string()) => Some(vec![
             "BLOCKED by pixel-guard: sed used as a search tool — use pixel search-content instead.".to_string(),
@@ -5693,6 +5951,45 @@ mod tests {
     }
 
     #[test]
+    fn metrics_hook_response_dedupes_except_for_claude_users() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let fixture = MetricsFixture::new("response");
+        let plain = fixture.payload(serde_json::json!("pixel impact src/login.rs"));
+        let line = metrics_hook_line(&plain).expect("seeded record");
+        let mut shown = plain.clone();
+        shown["tool_response"] = serde_json::json!({"stdout": "", "stderr": line});
+        // Box missing: the model context replay, for every provider.
+        let advisory = post_tool_use_advisory(&line);
+        for provider in [
+            None,
+            Some(Provider::Claude),
+            Some(Provider::Devin),
+            Some(Provider::Codex),
+        ] {
+            assert_eq!(
+                metrics_hook_response(provider, &plain),
+                Some(advisory.clone())
+            );
+        }
+        // Box shown: only Claude answers, with the system message alone.
+        assert_eq!(
+            metrics_hook_response(Some(Provider::Claude), &shown),
+            Some(serde_json::json!({"systemMessage": line}))
+        );
+        for provider in [
+            None,
+            Some(Provider::Devin),
+            Some(Provider::Codex),
+            Some(Provider::Zcode),
+        ] {
+            assert_eq!(metrics_hook_response(provider, &shown), None);
+        }
+        // Shown, but no record matches: nothing to finalize.
+        shown["tool_input"] = serde_json::json!({"command": "pixel impact other.rs"});
+        assert_eq!(metrics_hook_response(Some(Provider::Claude), &shown), None);
+    }
+
+    #[test]
     fn tool_command_text_accepts_string_and_argv_array_forms() {
         assert_eq!(
             tool_command_text(&serde_json::json!({"command": "pixel x"})),
@@ -6196,6 +6493,246 @@ mod tests {
         );
     }
 
+    /// Every reader of a repository file is judged like `cat`, with or
+    /// without the `rtk` wrapper, and each form of "must not be denied"
+    /// stays untouched. Consuming paths: Codex (`enforce_retrieval` false,
+    /// flagless forms only), Devin and Zcode (`true`, flagged forms too) and
+    /// Antigravity's `run_command` (false); Claude never reaches this.
+    #[test]
+    fn enforce_leaf_judges_head_tail_awk_sed_and_rtk_read_like_cat() {
+        let root = scratch_repo("enforce-readers");
+        std::fs::write(root.join("README.md"), "text\n").unwrap();
+        let leaf = |command: &str, enforce: bool| {
+            let words = crate::search_compat::shell_argv(command).unwrap();
+            enforce_leaf(command, &words, false, &root, &root, enforce)
+        };
+        for command in [
+            "cat README.md",
+            "rtk cat README.md",
+            "head README.md",
+            "rtk head README.md",
+            "tail README.md",
+            "rtk tail README.md",
+            "awk '{print}' README.md",
+            "rtk awk '{print}' README.md",
+            "sed 's/a/b/' README.md",
+            "rtk read README.md",
+        ] {
+            for enforce in [false, true] {
+                assert_eq!(
+                    leaf(command, enforce),
+                    Some(REPO_READ_REASON.into()),
+                    "{command} enforce={enforce}"
+                );
+            }
+        }
+        // Flagged forms are Devin's alone, exactly as for `cat -n`.
+        for command in [
+            "cat -n README.md",
+            "head -n 5 README.md",
+            "rtk tail -n 5 README.md",
+            "rtk read README.md -l aggressive",
+            "sed -n '/needle/p' README.md",
+            "awk -F, 'NR==1' README.md",
+        ] {
+            assert_eq!(leaf(command, false), None, "{command}");
+            assert_eq!(
+                leaf(command, true),
+                Some(REPO_READ_REASON.into()),
+                "{command}"
+            );
+        }
+        // A bounded line window is how a hit is read: never denied.
+        for command in ["sed -n '1,200p' README.md", "rtk sed -n '5,9p' README.md"] {
+            for enforce in [false, true] {
+                assert_eq!(leaf(command, enforce), None, "{command}");
+            }
+        }
+        // One line past the bound is a read like any other.
+        assert_eq!(
+            leaf("sed -n '1,201p' README.md", true),
+            Some(REPO_READ_REASON.into())
+        );
+        // Writes, the shell builtin and paths outside the repo stay native.
+        for command in [
+            "sed -i 's/a/b/' README.md",
+            "sed -ni 's/a/b/p' README.md",
+            "sed -i.bak 's/a/b/' README.md",
+            "sed --in-place 's/a/b/' README.md",
+            "awk '{print > \"out\"}' README.md",
+            "awk 'BEGIN{system(\"id\")}' README.md",
+            "read README.md",
+            "rtk head /etc/hosts",
+            "rtk read /etc/hosts",
+            "head missing.md",
+            "rtk mv README.md other.md",
+        ] {
+            assert_eq!(leaf(command, true), None, "{command}");
+        }
+        // The first operand of awk/sed is the program, so a script that
+        // happens to name a repo file is not a read of it.
+        assert_eq!(leaf("awk README.md", true), None);
+        assert_eq!(leaf("sed README.md", true), None);
+        // Piped stdin has no file operand.
+        assert_eq!(leaf("head -n 20", true), None);
+    }
+
+    /// `rtk read F -l A-B` gets its own reason; the other levels the generic one.
+    #[test]
+    fn enforce_leaf_explains_the_rtk_read_line_range_mistake() {
+        let root = scratch_repo("enforce-rtk-range");
+        std::fs::write(root.join("routing.rs"), "fn a() {}\n").unwrap();
+        let leaf = |command: &str| {
+            let words = crate::search_compat::shell_argv(command).unwrap();
+            enforce_leaf(command, &words, false, &root, &root, true)
+        };
+        for command in [
+            "rtk read routing.rs -l 640-820",
+            "rtk read routing.rs --level 1-5000",
+            "rtk read -l 640-820 routing.rs",
+        ] {
+            assert_eq!(
+                leaf(command),
+                Some(RTK_READ_RANGE_REASON.into()),
+                "{command}"
+            );
+        }
+        for command in [
+            "rtk read routing.rs -l aggressive",
+            "rtk read routing.rs -l 640",
+            "rtk read routing.rs -l a-b",
+            "rtk read routing.rs",
+        ] {
+            assert_eq!(leaf(command), Some(REPO_READ_REASON.into()), "{command}");
+        }
+        assert_eq!(
+            rtk_read_range(&["f".into(), "-l".into(), "3-9".into()]),
+            Some((3, 9))
+        );
+        assert_eq!(rtk_read_range(&["f".into(), "-l".into(), "3".into()]), None);
+        assert_eq!(rtk_read_range(&["f".into()]), None);
+    }
+
+    /// Devin and Zcode rewrite the readers `search_compat` does not know;
+    /// Codex and Claude (`search_compat::rewrite`) keep them native.
+    #[test]
+    fn provider_rewrite_maps_rtk_read_head_and_tail_for_devin_and_zcode_only() {
+        let repo = scratch_repo("reader-rewrite");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".pixel")).unwrap();
+        std::fs::write(repo.join("README.md"), "one\ntwo\n").unwrap();
+        let big = (1..=300).map(|n| format!("l{n}\n")).collect::<String>();
+        std::fs::write(repo.join("big.rs"), big).unwrap();
+        std::fs::write(repo.join(".env"), "K=v\n").unwrap();
+        let cat = "pixel search-content --limit 200 '.*' 'README.md'";
+        for (command, expected) in [
+            ("rtk read README.md", Some(cat.to_string())),
+            ("rtk read README.md -l aggressive", Some(cat.to_string())),
+            ("rtk read README.md --level minimal", Some(cat.to_string())),
+            ("rtk read README.md -l none", Some(cat.to_string())),
+            ("head README.md", Some(cat.to_string())),
+            ("rtk head README.md", Some(cat.to_string())),
+            ("head -n 20 README.md", Some(cat.to_string())),
+            ("tail -5 README.md", Some(cat.to_string())),
+            ("rtk tail -n 200 README.md", Some(cat.to_string())),
+            (
+                "rtk read big.rs -l 640-820",
+                Some("sed -n '640,820p' 'big.rs'".to_string()),
+            ),
+            (
+                "rtk read README.md --level 1-200",
+                Some("sed -n '1,200p' 'README.md'".to_string()),
+            ),
+            // Too wide, unknown flag, credential, missing, large, unknown level.
+            ("rtk read big.rs -l 1-201", None),
+            ("rtk read README.md -l 0-5", None),
+            ("rtk read README.md -n", None),
+            ("rtk read README.md -l bogus", None),
+            ("rtk read .env -l 1-5", None),
+            ("rtk read missing.md -l 1-5", None),
+            ("rtk read big.rs", None),
+            ("head -n 201 README.md", None),
+            ("head -n 0 README.md", None),
+            ("head -c 5 README.md", None),
+            ("head README.md big.rs", None),
+            ("tail -f README.md", None),
+            ("head .env", None),
+            ("read README.md", None),
+            ("awk '{print}' README.md", None),
+            ("head README.md | cat", None),
+        ] {
+            assert_eq!(reader_rewrite(command, &repo), expected, "{command}");
+        }
+        let payload = |command: &str| {
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "exec",
+                "tool_input": {"command": command},
+                "cwd": repo,
+            })
+        };
+        for provider in [Provider::Devin, Provider::Zcode] {
+            let rewritten =
+                provider_rewrite(provider, &payload("rtk read README.md -l aggressive"))
+                    .unwrap_or_else(|| panic!("{provider:?} rewrites rtk read"));
+            assert_eq!(
+                rewritten["hookSpecificOutput"]["updatedInput"]["command"],
+                cat
+            );
+        }
+        // Codex's exec tool is `exec_command`; it and Claude never take it.
+        let codex = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "exec_command",
+            "tool_input": {"cmd": "rtk read README.md"},
+            "cwd": repo,
+        });
+        assert_eq!(provider_rewrite(Provider::Codex, &codex), None);
+        let claude = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "head README.md"},
+            "cwd": repo,
+        });
+        assert_eq!(provider_rewrite(Provider::Claude, &claude), None);
+    }
+
+    /// The legacy advisory names the two working forms for `rtk read -l A-B`
+    /// and leaves the bare shell builtin `read` alone.
+    #[test]
+    fn bypass_advisory_explains_rtk_read_and_ignores_the_builtin() {
+        let root = scratch_repo("advisory-read");
+        let lines = bypass_advisory_lines("rtk read routing.rs -l 640-820", &root, &root)
+            .expect("advisory for rtk read");
+        assert_eq!(lines.len(), 4);
+        assert!(
+            lines[0].contains("`rtk read -l` takes a level"),
+            "{lines:?}"
+        );
+        assert!(lines[1].contains("pixel pack-context <uid>"), "{lines:?}");
+        assert!(lines[2].contains("sed -n 'START,ENDp' <file>"), "{lines:?}");
+        assert_eq!(bypass_advisory_lines("read line", &root, &root), None);
+        assert_eq!(bypass_advisory_lines("rtk read", &root, &root), None);
+        assert_eq!(
+            bypass_advisory_lines("command read x y", &root, &root),
+            None
+        );
+    }
+
+    /// The window bound is one spelling: 200 lines wide is allowed, 201 is not.
+    #[test]
+    fn line_range_bound_is_two_hundred_lines_inclusive() {
+        assert!(line_range_is_bounded(1, 200));
+        assert!(line_range_is_bounded(5, 5));
+        assert!(!line_range_is_bounded(1, 201));
+        assert!(!line_range_is_bounded(0, 5));
+        assert!(!line_range_is_bounded(6, 5));
+        assert!(credential_shaped(".env.local"));
+        assert!(credential_shaped("a/secrets/x.txt"));
+        assert!(credential_shaped("k.pem"));
+        assert!(!credential_shaped("src/lib.rs"));
+    }
+
     /// Only `PermissionRequest` reaches the pixel-approval path, and only a
     /// pixel retrieval subcommand inside it earns the approve.
     #[test]
@@ -6218,6 +6755,11 @@ mod tests {
             "pixel search-content 'needle' | head",
             "pixel status && pixel search-content 'needle'",
             "sed -n '1,5p' src/main.rs && pixel search-content 'needle'",
+            // A lone bounded sed read, alone or with static echoes, is the
+            // follow-up to a hit and needs no retrieval segment beside it.
+            "sed -n '1,5p' src/main.rs",
+            "rtk sed -n '640,839p' src/main.rs",
+            "echo --- && sed -n '1,5p' src/main.rs; echo ---",
         ] {
             assert_eq!(
                 devin("PermissionRequest", command),
@@ -6228,6 +6770,14 @@ mod tests {
         for command in [
             // Not a pixel invocation at all.
             "grep needle src",
+            // A lone echo is not a read; an unbounded, credential-shaped or
+            // chained-with-mutation sed is not a bounded read.
+            "echo ---",
+            "sed -n '1,201p' src/main.rs",
+            "sed -n '1,5p' .env",
+            "sed -n '1,5p' config/server.pem",
+            "sed -n '1,5p' src/main.rs; rm marker",
+            "sed -n '1,5p' src/main.rs || cat src/main.rs",
             // A pixel subcommand that is not retrieval.
             "pixel build-index .",
             // The wrapper must be rtk itself.

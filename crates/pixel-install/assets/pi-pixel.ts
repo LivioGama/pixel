@@ -60,9 +60,12 @@ function capabilities() {
   return installed;
 }
 
-function run(root: string, args: string[]) {
+// Tool-facing runs keep Pixel's metrics box so the user sees what Pixel
+// saved; `quiet` is for the extension's own probes (health, bootstrap, the
+// post-edit snapshot), which must not add boxes or count as usage.
+function run(root: string, args: string[], quiet = false) {
   const operation = resolveOperation(args[0]);
-  const result = spawnSync(PIXEL_BIN, [operation, ...args.slice(1), "--metrics", "off"], {
+  const result = spawnSync(PIXEL_BIN, [operation, ...args.slice(1), ...(quiet ? ["--metrics", "off"] : [])], {
     cwd: root, encoding: "utf8", timeout: 15000, maxBuffer: 2_000_000,
   });
   if (result.error || result.status !== 0) {
@@ -96,7 +99,7 @@ function rememberPaths(value: unknown, paths: Set<string>, root: string) {
 }
 
 function health(root: string, action: Action) {
-  const status = JSON.parse(run(root, ["status", "--json"]));
+  const status = JSON.parse(run(root, ["status", "--json"], true));
   if (!status.index?.base_files) {
     throw new Error("Pixel index unavailable; run `pixel build-index --history .`, then retry");
   }
@@ -149,8 +152,9 @@ function authorized(action: Action, ctx: any) {
 function commandFor(action: Action, p: any): string[][] {
   const target = String(p.query ?? p.goal ?? "").trim();
   const path = p.path ? [String(p.path)] : [];
+  const subject = action === "impact" || action === "pack_context" ? (p.symbol ?? target) : target;
   if (["scope_task", "search_content", "find_code", "impact", "pack_context"].includes(action)
-      && !(p.symbol ?? target)) {
+      && !String(subject).trim()) {
     throw new Error(`${action} requires a goal, query, or symbol`);
   }
   switch (action) {
@@ -219,7 +223,9 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
     const path = String(input.path ?? input.file_path ?? "");
     if (path && !inRepo(root, path)) return { kind: "exception", reason: "outside repository" };
     const target = path ? relativeTarget(root, path) : "";
-    if (path && resolvedPaths.has(target) && Number(input.limit) > 0 && Number(input.limit) <= READ_LIMIT) {
+    // Paths injected by the bootstrap are not evidence of a Pixel call: the
+    // bounded read unlocks only after the model itself called a Pixel tool.
+    if (path && state.pixelCalled && resolvedPaths.has(target) && Number(input.limit) > 0 && Number(input.limit) <= READ_LIMIT) {
       return { kind: "exception", reason: "bounded Pixel-resolved target read" };
     }
     return { kind: "blocked", reason: "Use pixel with a task goal, or specify a target and a read limit of at most 200 lines" };
@@ -242,7 +248,7 @@ function classify(tool: string, input: any, root: string, resolvedPaths: Set<str
 
 function pixelText(root: string, args: string[]): string | null {
   try {
-    const out = run(root, args);
+    const out = run(root, args, true);
     const trimmed = out.trim();
     if (!trimmed) return null;
     return trimmed;
@@ -364,8 +370,8 @@ export default function activate(pi: ExtensionAPI) {
     if (prompt.trim().length < MIN_PROMPT_LEN) return;
     try {
       const index = health(root, "scope_task");
-      const scope = run(root, ["scope-task", prompt, "--json", "--no-manifest", "--max-tier", "P1", "--limit", "15"]).trim();
-      const repo = run(root, ["repo-state", "--json"]).trim();
+      const scope = run(root, ["scope-task", prompt, "--json", "--no-manifest", "--max-tier", "P1", "--limit", "15"], true).trim();
+      const repo = run(root, ["repo-state", "--json"], true).trim();
       for (const text of [scope, repo]) rememberPaths(parseEvidence(text), resolvedPaths, root);
       state.pixelHealthy = true;
       audit(root, "bootstrap", "scope-task and repo-state injected", { graph_present: index.graph?.present });
@@ -413,6 +419,9 @@ export default function activate(pi: ExtensionAPI) {
   // A tool_result replacement must carry forward the original result. Only
   // successful edits have a post-edit snapshot; failures retain diagnostics.
   pi.on("tool_result", async (event, ctx) => {
+    // The global `pixel` tool never runs pixel_project.execute; its result is
+    // the only signal that the model consulted Pixel.
+    if ((event.toolName === "pixel" || event.toolName === "pixel_project") && !event.isError) state.pixelCalled = true;
     if (!EDIT_TOOLS.has(event.toolName) || event.isError) return;
     const root = ctx?.cwd ?? process.cwd();
     const raw = pixelText(root, ["what-changed", "--json", "--tests"]);

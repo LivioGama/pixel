@@ -4481,6 +4481,7 @@ fn lifecycle_counts(settings: &serde_json::Value) -> Vec<(&'static str, usize)> 
             "run-hook prompt-submit --provider claude",
         ),
         ("PostToolUse", "run-hook post-tool-use --provider claude"),
+        ("PostToolUse", "run-hook metrics --provider claude"),
     ]
     .into_iter()
     .map(|(event, verb)| {
@@ -4495,11 +4496,12 @@ fn lifecycle_counts(settings: &serde_json::Value) -> Vec<(&'static str, usize)> 
     .collect()
 }
 
-const ONE_EACH: [(&str, usize); 4] = [
+const ONE_EACH: [(&str, usize); 5] = [
     ("run-hook session-start --provider claude", 1),
     ("run-hook post-compaction --provider claude", 1),
     ("run-hook prompt-submit --provider claude", 1),
     ("run-hook post-tool-use --provider claude", 1),
+    ("run-hook metrics --provider claude", 1),
 ];
 
 /// A build not named `pixel` must replace the entries it wrote on the last
@@ -4573,7 +4575,8 @@ fn one_install_should_collapse_stacked_dev_hooks_and_keep_foreign_ones_unchanged
     let notify = serde_json::json!({"type":"command","command":"notify-send claude-started"});
     let mut session = vec![herdr.clone()];
     let mut prompt = Vec::new();
-    let mut edit = Vec::new();
+    let mut edit =
+        vec![serde_json::json!({"matcher":"Bash","hooks":[pixel("metrics --provider claude")]})];
     for copy in 0..3 {
         let mut start = vec![pixel("session-start")];
         if copy == 0 {
@@ -5144,4 +5147,315 @@ fn doctor_repo_claude_hooks_should_flag_a_guard_beside_a_global_rewriter() {
     let c = claude_check();
     assert_eq!(c.status, CheckStatus::Green, "{c:?}");
     assert!(c.summary.contains("not installed"), "{c:?}");
+}
+
+/// Read the `PostToolUse` groups whose command runs Pixel's metrics relay
+/// for `provider`, as `(matcher, command, timeout)`.
+fn metrics_relays(value: &serde_json::Value, provider: &str) -> Vec<(String, String, u64)> {
+    let verb = format!("run-hook metrics --provider {provider}");
+    let mut found = Vec::new();
+    for group in value["hooks"]["PostToolUse"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let matcher = group["matcher"].as_str().unwrap_or("");
+        for hook in group["hooks"].as_array().into_iter().flatten() {
+            let command = hook["command"].as_str().unwrap_or("");
+            if command.contains(&verb) {
+                let timeout = hook["timeout"].as_u64().unwrap_or(0);
+                found.push((matcher.to_string(), command.to_string(), timeout));
+            }
+        }
+    }
+    found
+}
+
+/// Claude's tool results carry the box already, but only the hook's
+/// `systemMessage` reaches the user's transcript: the global install
+/// registers the relay under PostToolUse on `Bash`, once, beside the edit
+/// hook and any foreign PostToolUse group, however often it reruns.
+#[test]
+#[cfg(unix)]
+fn claude_install_should_register_one_metrics_relay_on_bash_and_keep_foreign_groups() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = fake_pixel_exe(home);
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    let foreign = serde_json::json!({"matcher":"Write","hooks":[{"type":"command","command":"fmt-on-write.sh"}]});
+    fs::write(
+        home.join(".claude/settings.json"),
+        serde_json::to_string_pretty(
+            &serde_json::json!({"hooks":{"PostToolUse":[foreign.clone()]}}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    for _ in 0..3 {
+        install(&InstallOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: Some(exe.clone()),
+            shell: Some(TEST_SHELL.into()),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    let settings = read_json(&home.join(".claude/settings.json"));
+    let relays = metrics_relays(&settings, "claude");
+    assert_eq!(relays.len(), 1, "{settings}");
+    let (matcher, command, timeout) = &relays[0];
+    assert_eq!(matcher, "Bash");
+    assert!(
+        command.starts_with('\'')
+            && command.ends_with("/pixel' run-hook metrics --provider claude"),
+        "{command}"
+    );
+    assert!(
+        *timeout > 0,
+        "a hook with no timeout inherits the default: {settings}"
+    );
+    let groups = settings["hooks"]["PostToolUse"].as_array().unwrap();
+    assert!(groups.contains(&foreign), "foreign group kept: {settings}");
+    assert!(
+        groups.iter().any(|g| g["matcher"] == "Edit"),
+        "the edit hook stays: {settings}"
+    );
+    assert!(
+        metrics_relays(&settings, "codex").is_empty()
+            && metrics_relays(&settings, "devin").is_empty(),
+        "no other provider's relay in Claude's file: {settings}"
+    );
+}
+
+/// A stale install without the relay is red with the install fix, green once
+/// reinstalled; a Claude file that never held Pixel is still the existing
+/// "not found" red, so the relay adds no new state for a foreign config.
+#[test]
+#[cfg(unix)]
+fn doctor_should_flag_a_claude_install_missing_the_metrics_relay() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let exe = fake_pixel_exe(home);
+    let options = InstallOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(exe.clone()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    };
+    install(&options).unwrap();
+    let path = home.join(".claude/settings.json");
+    let mut settings = read_json(&path);
+    settings["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|g| g["matcher"] != "Bash");
+    fs::write(&path, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+    let doctor_hooks = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: Some(exe.clone()),
+            shell: Some(TEST_SHELL.into()),
+            only: vec!["install.claude-hooks".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "install.claude-hooks").clone()
+    };
+    let stale = doctor_hooks();
+    assert_eq!(stale.status, CheckStatus::Red, "{stale:?}");
+    assert!(
+        stale
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("PostToolUse(Bash)→metrics")),
+        "{stale:?}"
+    );
+    assert!(
+        stale
+            .fix
+            .as_deref()
+            .is_some_and(|f| f.starts_with("pixel install")),
+        "{stale:?}"
+    );
+    install(&options).unwrap();
+    let fixed = doctor_hooks();
+    assert_eq!(fixed.status, CheckStatus::Green, "{fixed:?}");
+}
+
+/// Devin's repo-local config gets the relay on `exec` beside its guard. A
+/// reinstall verifies instead of rewriting, a foreign PostToolUse group
+/// survives, doctor is green, and a guard-only file from an older install
+/// is red until reinstalled.
+#[test]
+#[cfg(unix)]
+fn devin_repo_install_should_register_an_idempotent_exec_metrics_relay() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".devin")).unwrap();
+    let foreign = serde_json::json!({"hooks":[{"type":"command","command":"vibe-island-bridge --source devin"}]});
+    let config = repo.join(".devin/config.local.json");
+    fs::write(
+        &config,
+        serde_json::to_string_pretty(
+            &serde_json::json!({"hooks":{"PostToolUse":[foreign.clone()]}}),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let options = repo_install_options(&repo, &home);
+    install(&options).unwrap();
+    let first = fs::read(&config).unwrap();
+    let report = install(&options).unwrap();
+    assert_eq!(
+        fs::read(&config).unwrap(),
+        first,
+        "reinstall is byte-identical"
+    );
+    let step = report.steps.iter().find(|s| s.id == "hooks.devin").unwrap();
+    assert!(step.summary.contains("verified"), "{step:?}");
+
+    let value = read_json(&config);
+    let relays = metrics_relays(&value, "devin");
+    assert_eq!(relays.len(), 1, "{value}");
+    assert_eq!(relays[0].0, "exec");
+    assert!(
+        relays[0].1.ends_with("run-hook metrics --provider devin"),
+        "{relays:?}"
+    );
+    assert!(
+        value["hooks"]["PostToolUse"]
+            .as_array()
+            .unwrap()
+            .contains(&foreign),
+        "{value}"
+    );
+
+    let doctor_options = DoctorOptions {
+        home: Some(home.clone()),
+        executable_path: Some(fake_pixel_exe(&home)),
+        repo_root: Some(repo.clone()),
+        ..Default::default()
+    };
+    let green = doctor(&doctor_options).unwrap();
+    assert_eq!(check(&green, "repo.devin-hooks").status, CheckStatus::Green);
+
+    let mut stale = value.clone();
+    stale["hooks"]["PostToolUse"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|g| g["matcher"] != "exec");
+    fs::write(&config, serde_json::to_string_pretty(&stale).unwrap()).unwrap();
+    let red = doctor(&doctor_options).unwrap();
+    let devin = check(&red, "repo.devin-hooks");
+    assert_eq!(devin.status, CheckStatus::Red, "{devin:?}");
+    assert!(
+        devin
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("metrics relay")),
+        "{devin:?}"
+    );
+    install(&options).unwrap();
+    assert_eq!(fs::read(&config).unwrap(), first, "reinstall restores it");
+}
+
+/// Uninstall takes only Pixel's relay out: Claude's global file keeps its
+/// foreign PostToolUse group, and the Devin repo file keeps its own.
+#[test]
+#[cfg(unix)]
+fn uninstall_should_remove_the_claude_and_devin_metrics_relays_only() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(repo.join(".devin")).unwrap();
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    let foreign = serde_json::json!({"matcher":"Write","hooks":[{"type":"command","command":"fmt-on-write.sh"}]});
+    for path in [
+        home.join(".claude/settings.json"),
+        repo.join(".devin/config.local.json"),
+    ] {
+        fs::write(
+            path,
+            serde_json::to_string_pretty(
+                &serde_json::json!({"hooks":{"PostToolUse":[foreign.clone()]}}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    }
+    let exe = fake_pixel_exe(&home);
+    install(&InstallOptions {
+        home: Some(home.clone()),
+        executable_path: Some(exe.clone()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    install(&repo_install_options(&repo, &home)).unwrap();
+    assert_eq!(
+        metrics_relays(&read_json(&home.join(".claude/settings.json")), "claude").len(),
+        1
+    );
+    assert_eq!(
+        metrics_relays(&read_json(&repo.join(".devin/config.local.json")), "devin").len(),
+        1
+    );
+
+    for repo in [Some(repo.clone()), None] {
+        uninstall(&UninstallOptions {
+            home: Some(home.clone()),
+            repo,
+            binary_path: Some(exe.clone()),
+            executable_path: Some(exe.clone()),
+            shell: Some(TEST_SHELL.into()),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+    for path in [
+        home.join(".claude/settings.json"),
+        repo.join(".devin/config.local.json"),
+    ] {
+        let value = read_json(&path);
+        assert!(pixel_commands(&value, "PostToolUse").is_empty(), "{value}");
+        assert_eq!(
+            value["hooks"]["PostToolUse"],
+            serde_json::json!([foreign]),
+            "{}",
+            path.display()
+        );
+    }
+}
+
+/// A repository at `$HOME`: Claude's relay lives in the global file (which
+/// is also the repo's shared one) exactly once, the personal guard file
+/// carries none, and Devin's repo-local relay sits in `~/.devin`, apart from
+/// the global `~/.config/devin/config.json`.
+#[test]
+#[cfg(unix)]
+fn repo_install_at_home_should_keep_each_metrics_relay_in_one_file() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    fs::create_dir_all(&home).unwrap();
+    let exe = fake_pixel_exe(&home);
+    install(&InstallOptions {
+        home: Some(home.clone()),
+        executable_path: Some(exe.clone()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .unwrap();
+    for _ in 0..2 {
+        install(&repo_install_options(&home, &home)).unwrap();
+    }
+    let global = read_json(&home.join(".claude/settings.json"));
+    assert_eq!(metrics_relays(&global, "claude").len(), 1, "{global}");
+    let local = read_json(&home.join(".claude/settings.local.json"));
+    assert!(metrics_relays(&local, "claude").is_empty(), "{local}");
+    let devin = read_json(&home.join(".devin/config.local.json"));
+    assert_eq!(metrics_relays(&devin, "devin").len(), 1, "{devin}");
+    assert!(!home.join(".config/devin/config.json").exists());
 }
