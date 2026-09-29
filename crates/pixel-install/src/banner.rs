@@ -85,6 +85,11 @@ pub fn render(report: &InstallReport, color: bool) -> String {
         out.push(' ');
         out.push_str(&step.summary);
         out.push('\n');
+        if let Some(detail) = step.detail.as_deref().filter(|detail| !detail.is_empty()) {
+            out.push_str("    ");
+            out.push_str(&paint(color, "2", detail));
+            out.push('\n');
+        }
     }
     out.push('\n');
     let crate::install::InstallSummary { green, yellow, red } = report.summary;
@@ -157,6 +162,20 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn a_nonempty_step_detail_renders_below_its_summary() {
+        let mut detailed = report(CheckStatus::Yellow, "legacy wrapper left");
+        detailed.steps[0].detail = Some("removed=old clean=[]".into());
+        let banner = render(&detailed, false);
+        assert!(banner.contains("• legacy wrapper left"), "{banner}");
+        assert!(banner.contains("\n    removed=old clean=[]"), "{banner}");
+
+        let mut empty = report(CheckStatus::Green, "verified");
+        empty.steps[0].detail = Some(String::new());
+        let plain = render(&empty, false);
+        assert!(!plain.contains("\n    \n"), "{plain}");
     }
 
     #[test]
