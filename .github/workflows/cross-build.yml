@@ -52,6 +52,19 @@ jobs:
     needs: scope
     if: needs.scope.outputs.release-prepare != 'true'
     runs-on: ${{ matrix.os }}
+    # A pull request into main builds `dev-release` (release without thin LTO
+    # and with 16 codegen units): the lane still has to link against musl
+    # with the release feature set and a --locked Cargo.lock, which is what
+    # this job exists to prove, but the 16 workspace crates no longer go
+    # through LTO. On PR runs every dependency already came from the cache
+    # and those crates were the whole build: 2 min 21 s to 3 min 53 s in
+    # `release` (runs 36576912510, 36579443968). The push to main keeps
+    # building `release` exactly as release.yml does, and the release skill
+    # tags only once that run is green, so an LTO-only failure still stops a
+    # release before its tag. A maintenance pull request into `release/x.y`
+    # keeps `release`: no push run covers that branch.
+    env:
+      PROFILE: ${{ github.event_name == 'pull_request' && github.base_ref == 'main' && 'dev-release' || 'release' }}
     strategy:
       fail-fast: true
       matrix:
@@ -102,14 +115,30 @@ jobs:
         with:
           tool: cross
 
-      # Must match release.yml exactly: fastembed (ONNX) has no musl build,
-      # but model2vec is pure Rust and ships in the Linux release. Building
-      # without it here would leave the released feature set untested.
+      # Must match release.yml exactly, but for the profile (see PROFILE
+      # above): fastembed (ONNX) has no musl build, but model2vec is pure
+      # Rust and ships in the Linux release. Building without it here would
+      # leave the released feature set untested.
       - name: Cross-build (model2vec only — ort-sys has no musl prebuilts)
         if: runner.os == 'Linux'
-        run: cross build --release --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
+        run: cross build --profile "$PROFILE" --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
 
-      # Must match release.yml's macOS step exactly: default features, native.
+      # Must match release.yml's macOS step exactly, but for the profile:
+      # default features, native.
       - name: Build (macOS native)
         if: runner.os == 'macOS'
-        run: cargo build --release --locked --target ${{ matrix.target }} -p pixel-cli
+        run: cargo build --profile "$PROFILE" --locked --target ${{ matrix.target }} -p pixel-cli
+
+      # The cache a pull request restores is the one main saves, and a
+      # `dev-release` build finds no dependency in a `release`-only target
+      # dir: it would compile all of them, slower than the LTO it skips. So
+      # main also builds the pull requests' profile, with the very command
+      # they run, before rust-cache saves both profiles under one key.
+      - name: Warm the pull requests' dev-release cache
+        if: github.event_name == 'push'
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            cross build --profile dev-release --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
+          else
+            cargo build --profile dev-release --locked --target ${{ matrix.target }} -p pixel-cli
+          fi
