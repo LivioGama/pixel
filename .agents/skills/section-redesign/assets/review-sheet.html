@@ -1,0 +1,170 @@
+<title>Pistes section Pixel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=Handjet:wght@500;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Review sheet for a pixel-cli.dev section: variants mocked at scale, votable points,
+   a feedback bar whose copy button builds the text the user pastes back.
+   Tokens: Pixel's own (website/assets/css/main.css), dark only like the site. */
+:root {
+  --ground: #0b1f17; --ground-2: #0f281d; --panel: #133426; --ink: #ecf7ef; --ink-soft: #a9c6b5;
+  --line: #1f4535; --cell: #173b2d; --green: #22c55e; --green-hi: #4ade80; --coral: #f0775a; --on-green: #04210e;
+  --display: "Handjet", "Archivo", ui-sans-serif, system-ui, sans-serif;
+  --sans: "Archivo", ui-sans-serif, system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --r: 4px; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--ground); color: var(--ink); font: 400 1rem/1.6 var(--sans); }
+.page { max-width: 1120px; margin-inline: auto; padding-inline: 20px; padding-block: 40px 120px; display: grid; gap: 56px; }
+h1, h2, h3 { margin: 0; line-height: 1.05; text-wrap: balance; }
+p { margin: 0; }
+code { font-family: var(--mono); font-size: .9em; }
+.eyebrow { font: 500 .75rem/1 var(--mono); letter-spacing: .12em; text-transform: uppercase; color: var(--green-hi); }
+.intro { display: grid; gap: 14px; max-width: 68ch; }
+.intro h1 { font: 700 clamp(2.6rem, 6vw, 4.2rem)/.95 var(--display); }
+.intro p { color: var(--ink-soft); }
+.variant { display: grid; gap: 20px; }
+.variant__head h2 { font: 700 clamp(1.9rem, 4vw, 2.6rem)/1 var(--display); }
+.variant__head h2 span { color: var(--green-hi); }
+.variant__head p { color: var(--ink-soft); max-width: 70ch; }
+
+/* The mock: sized in container units so it reads as a scaled screenshot; under 620px of
+   container width it switches to the phone layout. No navbar: it is out of scope. */
+.mock-frame { border: 1px solid var(--line); border-radius: var(--r); overflow: hidden; }
+.mock { container-type: inline-size; }
+.m { padding: 3cqi 4.5cqi 4cqi; display: grid; gap: 3cqi; font-size: 1.25cqi; }
+.m-h2 { font: 700 4.2cqi/.95 var(--display); }
+.m-h2 .glow { color: var(--green-hi); text-shadow: 0 0 1.4cqi rgba(74,222,128,.45); }
+.m-lede { font-size: 1.55cqi; line-height: 1.5; color: var(--ink-soft); max-width: 48ch; }
+@container (max-width: 620px) {
+  .m { padding: 20px 16px 24px; gap: 16px; font-size: 13px; }
+  .m-h2 { font-size: 34px; }
+  .m-lede { font-size: 15px; }
+}
+
+.points { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.pt { display: grid; grid-template-columns: 3.2rem 1fr auto; gap: 6px 14px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--r); background: var(--ground-2); }
+.pt[data-vote="like"] { border-color: var(--green); }
+.pt[data-vote="meh"] { border-color: #6f8f7d; }
+.pt[data-vote="no"] { border-color: var(--coral); }
+.pt__id { font: 700 1.5rem/1 var(--display); color: var(--green-hi); }
+.pt__txt { display: grid; gap: 4px; min-width: 0; }
+.pt__txt h3 { font: 600 1rem/1.35 var(--sans); }
+.pt__txt p { color: var(--ink-soft); font-size: .94rem; }
+.pt__votes { display: flex; gap: 4px; }
+.pt__votes button { font: 500 .82rem/1 var(--sans); color: var(--ink-soft); background: transparent; border: 1px solid var(--line); border-radius: 2px; padding: 7px 10px; cursor: pointer; }
+.pt__votes button[aria-pressed="true"][data-v="like"] { background: var(--green); border-color: var(--green); color: var(--on-green); }
+.pt__votes button[aria-pressed="true"][data-v="meh"] { background: var(--ink-soft); color: var(--ground); }
+.pt__votes button[aria-pressed="true"][data-v="no"] { background: var(--coral); border-color: var(--coral); color: #2a0b04; }
+.pt__note { grid-column: 2 / -1; }
+.pt__note input { width: 100%; font: 400 .9rem/1.4 var(--sans); color: var(--ink); background: var(--ground); border: 1px solid var(--line); border-radius: 2px; padding: 7px 10px; }
+@media (max-width: 640px) { .pt { grid-template-columns: 2.4rem 1fr; } .pt__votes { grid-column: 2; } }
+
+.bar { position: fixed; left: 0; right: 0; bottom: 0; padding: 12px 20px calc(12px + env(safe-area-inset-bottom, 0px)); background: rgba(11,31,23,.94); border-top: 1px solid var(--line); }
+.bar__in { max-width: 1120px; margin-inline: auto; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.bar__count { color: var(--ink-soft); font-size: .92rem; margin-right: auto; }
+.bar button { font: 600 .95rem/1 var(--sans); border-radius: 3px; padding: 11px 16px; cursor: pointer; }
+.bar .primary { background: var(--green); color: var(--on-green); border: 1px solid var(--green); }
+.bar .quiet { background: transparent; color: var(--ink-soft); border: 1px solid var(--line); }
+.bar textarea { width: 100%; min-height: 120px; font: 400 .85rem/1.5 var(--mono); color: var(--ink); background: var(--ground); border: 1px solid var(--line); padding: 10px; }
+.bar__status { color: var(--green-hi); font-size: .9rem; }
+</style>
+
+<main class="page">
+  <header class="intro">
+    <p class="eyebrow">Section #SECTION · task #TASK</p>
+    <h1>Pistes pour la section</h1>
+    <p><!-- One paragraph: what each variant bets on. Then how to answer: vote, note, « Copier mon retour », paste in chat. --></p>
+  </header>
+
+  <!-- One <section class="variant"> per variant; ids A, B, C. Cross-cutting points go in a last section with ids T1… -->
+  <section class="variant" aria-labelledby="va">
+    <div class="variant__head">
+      <p class="eyebrow">Variante A</p>
+      <h2 id="va">Idée de la variante, <span>en quelques mots</span></h2>
+      <p><!-- The thesis in two sentences. --></p>
+    </div>
+    <div class="mock-frame"><div class="mock"><div class="m">
+      <!-- The section mocked at scale, English copy, real numbers from website/data. -->
+      <h3 class="m-h2">Section title. <span class="glow">Its turn.</span></h3>
+      <p class="m-lede">Lede.</p>
+    </div></div></div>
+    <ol class="points">
+      <li class="pt" data-id="A1"><span class="pt__id">A1</span><div class="pt__txt"><h3>Ce que change ce point</h3><p>Pourquoi, et ce qu'on perd.</p></div></li>
+    </ol>
+  </section>
+</main>
+
+<div class="bar" role="region" aria-label="Ton retour">
+  <div class="bar__in">
+    <p class="bar__count" id="count">Aucun point marqué</p>
+    <span class="bar__status" id="status" aria-live="polite"></span>
+    <button class="quiet" type="button" id="reset">Tout effacer</button>
+    <button class="primary" type="button" id="copy">Copier mon retour</button>
+  </div>
+  <div class="bar__in" id="fallback" hidden><textarea id="fallback-text" aria-label="Ton retour à copier" readonly></textarea></div>
+</div>
+
+<script>
+(function () {
+  /* Votes live in this viewer's localStorage only (a convenience): the copied text is the record. */
+  var KEY = 'pixel-section-votes-SECTION';
+  var state = {};
+  try { state = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { state = {}; }
+  function save() { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch (e) {} }
+  var LABELS = { like: "J'aime", meh: 'Bof', no: 'Non' };
+  var pts = [].slice.call(document.querySelectorAll('.pt'));
+  pts.forEach(function (pt) {
+    var id = pt.getAttribute('data-id');
+    var s = state[id] || (state[id] = { v: '', n: '' });
+    var votes = document.createElement('div');
+    votes.className = 'pt__votes'; votes.setAttribute('role', 'group'); votes.setAttribute('aria-label', 'Avis sur ' + id);
+    ['like', 'meh', 'no'].forEach(function (v) {
+      var b = document.createElement('button');
+      b.type = 'button'; b.textContent = LABELS[v]; b.setAttribute('data-v', v);
+      b.addEventListener('click', function () { s.v = s.v === v ? '' : v; render(); save(); });
+      votes.appendChild(b);
+    });
+    pt.appendChild(votes);
+    var note = document.createElement('div'); note.className = 'pt__note';
+    var inp = document.createElement('input');
+    inp.id = 'note-' + id; inp.type = 'text'; inp.placeholder = 'Note (optionnel)'; inp.setAttribute('aria-label', 'Note sur ' + id);
+    inp.value = s.n || '';
+    inp.addEventListener('input', function () { s.n = inp.value; save(); });
+    note.appendChild(inp); pt.appendChild(note);
+  });
+  function render() {
+    var n = 0;
+    pts.forEach(function (pt) {
+      var s = state[pt.getAttribute('data-id')];
+      if (s.v) { pt.setAttribute('data-vote', s.v); n++; } else pt.removeAttribute('data-vote');
+      [].forEach.call(pt.querySelectorAll('.pt__votes button'), function (b) { b.setAttribute('aria-pressed', String(b.getAttribute('data-v') === s.v)); });
+    });
+    document.getElementById('count').textContent = n ? n + ' / ' + pts.length + ' points marqués' : 'Aucun point marqué';
+  }
+  function summary() {
+    var groups = { like: [], meh: [], no: [] }, notes = [];
+    pts.forEach(function (pt) {
+      var id = pt.getAttribute('data-id'), s = state[id], title = pt.querySelector('h3').textContent;
+      if (s.v) groups[s.v].push('- ' + id + ' ' + title);
+      if (s.n && s.n.trim()) notes.push('- ' + id + ' : ' + s.n.trim());
+    });
+    var out = ['Retour section Pixel'];
+    ['like', 'meh', 'no'].forEach(function (v) { if (groups[v].length) out.push('', LABELS[v] + ' :', groups[v].join('\n')); });
+    if (notes.length) out.push('', 'Notes :', notes.join('\n'));
+    return out.join('\n');
+  }
+  var status = document.getElementById('status');
+  document.getElementById('copy').addEventListener('click', function () {
+    var text = summary(), fb = document.getElementById('fallback'), ta = document.getElementById('fallback-text');
+    function fallback() { ta.value = text; fb.hidden = false; ta.focus(); ta.select(); status.textContent = 'Sélectionné : copie avec Cmd+C'; }
+    try { navigator.clipboard.writeText(text).then(function () { fb.hidden = true; status.textContent = 'Copié, colle-le dans le chat'; }, fallback); }
+    catch (e) { fallback(); }
+  });
+  document.getElementById('reset').addEventListener('click', function () {
+    pts.forEach(function (pt) { state[pt.getAttribute('data-id')] = { v: '', n: '' }; pt.querySelector('input').value = ''; });
+    save(); render(); status.textContent = 'Effacé';
+  });
+  render();
+})();
+</script>
