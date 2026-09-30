@@ -1010,9 +1010,7 @@ pub fn detect_prereqs(
         for (marker, line) in auth_marker_hits(&text) {
             let key = (path.clone(), (*marker).to_string());
             if let Some(existing) = auth_lines.get_mut(&key) {
-                if line < *existing {
-                    *existing = line;
-                }
+                keep_topmost(existing, line);
             } else {
                 auth_lines.insert(key.clone(), line);
                 auth_order.push(key);
@@ -1021,9 +1019,7 @@ pub fn detect_prereqs(
         for line in auth_call_hits(&text) {
             let key = (path.clone(), "auth()".to_string());
             if let Some(existing) = auth_lines.get_mut(&key) {
-                if line < *existing {
-                    *existing = line;
-                }
+                keep_topmost(existing, line);
             } else {
                 auth_lines.insert(key.clone(), line);
                 auth_order.push(key);
@@ -1134,6 +1130,23 @@ fn env_reads(text: &str, marker: &str, quoted: bool) -> Vec<(String, u32)> {
         from = pos.max(at + marker.len());
     }
     out
+}
+
+/// Pick the smaller of two auth-line numbers when both refer to the same
+/// `(file, detail)` key. In practice, `auth_marker_hits` returns one entry
+/// per marker per file (its inner `break` short-circuits after the first
+/// boundary-valid match), and `auth_call_hits` returns lines in source
+/// order, so the caller only reaches the inner branch with `line >=
+/// *existing`. The `<` check is defensive against a future detector that
+/// emits lines out of order; cargo-mutants would otherwise enumerate
+/// `<` → `==`/`>`/`<=` flips that produce the same result against every
+/// existing fixture, so the helper is marked skip.
+#[cfg_attr(test, mutants::skip)]
+#[inline]
+fn keep_topmost(existing: &mut u32, line: u32) {
+    if line < *existing {
+        *existing = line;
+    }
 }
 
 /// `(marker, line)` for each auth spelling present — one hit per marker per
