@@ -615,7 +615,7 @@ cmd_up() {
             gather_worktrees
         fi
     else
-        wt="$(resolve_worktree "$num" "$branch" "$oid")" \
+        wt="$(resolve_worktree "$num" "$branch" "")" \
             || { echo "pr-swarm up: no worktree for #$num ($branch); pass --worktree" >&2; exit 2; }
     fi
 
