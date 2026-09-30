@@ -9503,6 +9503,26 @@ mod renamed_command_tests {
     }
 
     #[test]
+    fn only_the_remote_key_command_starts_the_mask() {
+        // The mask starts at the pair `config remote-key`, not at either
+        // word on its own: `config metrics off .` names no key at all, and
+        // a search for the words `remote-key` is a query rather than a
+        // credential. Either half of that pair being enough on its own
+        // would redact the tail of both commands, and the log would stop
+        // being readable exactly where it is asked to be.
+        assert_eq!(
+            logged_args(&argv(&["config", "metrics", "off", "--global", "."])),
+            "config metrics off --global .",
+            "a `config` command that is not `remote-key` carries no secret"
+        );
+        assert_eq!(
+            logged_args(&argv(&["search-content", "remote-key", "src", "crates"])),
+            "search-content remote-key src crates",
+            "the word `remote-key` in someone else's argument is a search term"
+        );
+    }
+
+    #[test]
     fn an_auth_url_never_reaches_the_action_log() {
         // The URL the auth flow is replayed with carries a one-time
         // `code`/`state` payload: the log is plain text under `.pixel/`, so
