@@ -478,6 +478,17 @@ mod tests {
     use super::*;
     use pixel_graph::plan::Severity;
 
+    /// Serialises every test in this module that mutates `PIXEL_FLOW_DIR`.
+    /// `cargo test` runs in parallel threads inside one binary; without
+    /// the lock, two tests can stomp each other's flow directory and the
+    /// `auth_flow_names` lookup reads the wrong list. The pixel-flow
+    /// crate owns the canonical mutex used by its own tests; this one
+    /// is local because pixel-flow's `ENV_MUTEX` is `pub(crate)` and
+    /// pixel-cli cannot reach across crates — the two mutexes do not
+    /// need to be the same one because no path under test executes both
+    /// crates' tests against the same env value.
+    static ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn finding(file: &str, line: u32, fan_in: u32) -> PlanFinding {
         PlanFinding {
             file: file.to_string(),
@@ -683,6 +694,7 @@ mod tests {
     /// sat comfortably below the cap and the bug survived.
     #[test]
     fn gates_of_boundary_does_not_emit_zero_more() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let flows = std::env::temp_dir().join(format!(
             "px-plan-gate-boundary-{}-{}",
             std::process::id(),
@@ -789,6 +801,14 @@ mod tests {
     /// could leak into test output.
     #[test]
     fn gates_of_auth_asks_for_an_account_when_no_flow_is_saved() {
+        // Held for the whole test: another test in this binary that mutates
+        // `PIXEL_FLOW_DIR` would otherwise read a stale value while this one
+        // holds the env var, and `cargo test` schedules tests in this
+        // binary on multiple threads. The lock is local to this test
+        // module; pixel-flow owns its own `ENV_MUTEX` (the two never collide
+        // because no path under test runs both crates' tests against the
+        // same env value).
+        let _guard = ENV_MUTEX.lock().unwrap();
         // SAFETY: serialised by a process-wide env lock convention used by
         // the pixel-flow tests too; this test binary does not run them in
         // parallel because `cargo test` schedules one binary at a time.
@@ -841,6 +861,7 @@ mod tests {
     /// tags do not.
     #[test]
     fn gates_of_auth_lists_every_matching_flow_in_lexicographic_order() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let flows = std::env::temp_dir().join(format!(
             "px-plan-gate-multi-{}-{}",
             std::process::id(),
@@ -889,6 +910,7 @@ mod tests {
     /// or `login` only), names are sorted, duplicates are dropped.
     #[test]
     fn gates_of_auth_lists_every_matching_flow_and_caps_at_three() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let flows = std::env::temp_dir().join(format!(
             "px-plan-gate-cap-{}-{}",
             std::process::id(),
@@ -946,6 +968,7 @@ mod tests {
     /// cap arithmetic (a `>=` mutant renders `+0 more` at 4 too).
     #[test]
     fn gates_of_auth_lists_three_names_and_appends_one_more_at_four() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let flows =
             std::env::temp_dir().join(format!("px-plan-gate-4-{}-{}", std::process::id(), line!()));
         let _ = std::fs::remove_dir_all(&flows);
@@ -989,6 +1012,7 @@ mod tests {
     /// or `login` only), names are sorted, duplicates are dropped.
     #[test]
     fn auth_flow_names_filters_and_sorts() {
+        let _guard = ENV_MUTEX.lock().unwrap();
         let flows = std::env::temp_dir().join(format!(
             "px-plan-gate-fns-{}-{}",
             std::process::id(),
