@@ -1138,21 +1138,24 @@ fn auth_marker_hits(text: &str) -> Vec<(&'static str, u32)> {
         let mut from = 0;
         while let Some(off) = text[from..].find(marker) {
             let at = from + off;
-            let end = at + marker.len();
+            // `from` strictly advances past the match — without this, a
+            // mutant that breaks the `+ / len()` expression could leave
+            // `from` equal to its starting value and spin forever.
+            let next = at + marker.len();
             let left_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
-            let right_ok = end >= bytes.len() || !bytes[end].is_ascii_lowercase();
+            let right_ok = next >= bytes.len() || !bytes[next].is_ascii_lowercase();
             if left_ok && right_ok {
                 out.push((marker, line_at(text, at)));
                 break;
             }
-            from = end;
+            from = next;
         }
     }
     out
 }
 
 /// Lines with an `auth(` call site — the next-auth style gate. The left
-/// identifier boundary keeps `oauth(` and `reauth(` out, and the paren must
+/// identifier boundary keeps `oauth(` and `reauth()` out, and the paren must
 /// be immediate so prose like `auth (the token)` is not a call.
 fn auth_call_hits(text: &str) -> Vec<u32> {
     let mut out = Vec::new();
@@ -1160,11 +1163,12 @@ fn auth_call_hits(text: &str) -> Vec<u32> {
     let mut from = 0;
     while let Some(off) = text[from..].find("auth") {
         let at = from + off;
-        let pos = at + 4;
-        if (at == 0 || !is_ident_byte(bytes[at - 1])) && pos < bytes.len() && bytes[pos] == b'(' {
+        // `from` strictly advances past the match — see `auth_marker_hits`.
+        let next = at + "auth".len();
+        if (at == 0 || !is_ident_byte(bytes[at - 1])) && next < bytes.len() && bytes[next] == b'(' {
             out.push(line_at(text, at));
         }
-        from = pos;
+        from = next;
     }
     out
 }
@@ -2264,6 +2268,19 @@ mod tests {
         assert_eq!(calls, vec![1, 4]);
         // A space before the paren is prose, not a call.
         assert!(auth_call_hits("// auth (the token) is checked\n").is_empty());
+    }
+
+    /// `auth` at the very end of the file (no `(` follows it) must not be
+    /// reported as a call. A `<` → `<=` mutant flips the boundary check
+    /// to `next <= bytes.len()`, then reads `bytes[next]` past the end —
+    /// which the existing fixtures never exercise. Without this test, that
+    /// out-of-bounds read survives as a missed mutant and a runtime panic
+    /// in production code.
+    #[test]
+    fn auth_call_hits_ignores_auth_at_end_of_file() {
+        assert!(auth_call_hits("const x = auth").is_empty());
+        assert!(auth_call_hits("auth").is_empty());
+        assert!(auth_call_hits("oauth\nauth").is_empty());
     }
 
     /// Plan targets pull one import hop in both directions: a resolved
