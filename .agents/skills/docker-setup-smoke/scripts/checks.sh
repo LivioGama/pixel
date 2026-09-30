@@ -191,6 +191,33 @@ report_ok /evidence/uninstall-2.json
 personal_kept uninstalled
 echo 'PASS global uninstall restores personal settings and hooks; repeat succeeds'
 # Files left behind are reported, not failed: the contract above is what must hold.
-(cd "$HOME" && find .claude .codex .pi .local/share/pixel .pixel -type f 2>/dev/null | sed 's|^|./|' | sort) \
+# Shell profile backups sit at the root of the home.
+(cd "$HOME" && { find .claude .codex .pi .local/share/pixel .pixel -type f 2>/dev/null;
+    find . -maxdepth 1 -type f -name '*.pixel-bak.*' | sed 's|^\./||'; } | sed 's|^|./|' | sort) \
     | comm -13 /evidence/personal-files.txt - > /evidence/residue.txt
 echo "NOTE $(wc -l < /evidence/residue.txt) file(s) left after uninstall, listed in residue.txt"
+# The backups among them must be exactly those the last uninstall reported,
+# with a removal command a shell reads back as the same paths; the rest is
+# the pixel config the checks set with `pixel config --global`.
+python3 - /evidence/uninstall-2.json /evidence/residue.txt <<'PY'
+import json
+import os
+import shlex
+import sys
+report, residue = sys.argv[1], sys.argv[2]
+home = os.path.expanduser("~")
+steps = [s for s in json.load(open(report))["steps"] if s["id"] == "backups"]
+left = open(residue).read().splitlines()
+if not steps:
+    print("NOTE this pixel does not report the backups uninstall leaves (IN-03)")
+    sys.exit(0)
+detail = steps[0].get("detail")
+words = shlex.split(detail) if detail else ["rm", "--"]
+assert words[:2] == ["rm", "--"], detail
+reported = sorted("./" + os.path.relpath(p, home) for p in words[2:])
+backups = sorted(line for line in left if ".pixel-bak." in line)
+assert reported == backups, (reported, backups)
+others = sorted(line for line in left if ".pixel-bak." not in line)
+assert others == ["./.pixel/config.yaml"], others
+print(f"PASS uninstall reports the {len(reported)} backup(s) left, and how to remove them")
+PY

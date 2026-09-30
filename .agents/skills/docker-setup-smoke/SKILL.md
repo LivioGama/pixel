@@ -73,7 +73,11 @@ sh .agents/skills/docker-setup-smoke/scripts/run.sh --agents --source main
    text files byte for byte, removes the prompt and a binary pixel owns (not a
    Homebrew one), and a second uninstall succeeds.
 9. Files left behind that the user did not have before are listed in
-   `residue.txt` and counted in a `NOTE` line, not failed.
+   `residue.txt` and counted in a `NOTE` line, not failed. Its `*.pixel-bak.*`
+   files must be exactly those the last uninstall's `backups` step names in its
+   `rm --` command (read back with `shlex`), and the only other file
+   `~/.pixel/config.yaml`, which `pixel config --global` wrote; a release
+   without that step gets a `NOTE` instead.
 
 A personal `PreToolUse` hook matching Bash makes `pixel install --repo` skip the
 Claude guard (yellow `claude guard not installed`); the fixture matches

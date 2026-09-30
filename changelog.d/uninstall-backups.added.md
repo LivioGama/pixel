@@ -1,0 +1,1 @@
+**install:** `pixel uninstall` (and `--repo`) ends on a `backups` step naming every `.pixel-bak` copy that install and uninstall left beside the files they rewrote, with a quoted `rm --` command to drop them; they are still kept, each being the undo of one write. ([#PR](https://github.com/LivioGama/pixel/pull/PR))

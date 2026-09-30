@@ -153,6 +153,15 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         )?,
         // 8. Remove the pixel binary.
         remove_binary(&target, dry_run)?,
+        // 9. Name the backups install and uninstall kept, and how to drop them.
+        backups_step(
+            &find_backups(&global_backup_dirs(
+                &home,
+                &crate::codex_config::codex_home(&home, options.home.is_some()),
+                &crate::opencode_config::opencode_config_dir(&home, options.home.is_some()),
+            )),
+            dry_run,
+        ),
     ];
 
     let green = steps
@@ -277,6 +286,7 @@ fn uninstall_project(
         crate::pi_project::uninstall(repo, dry_run)?,
         crate::warp::retire(repo, dry_run)?,
         crate::pixel_first::uninstall_rules(repo, dry_run)?,
+        backups_step(&find_backups(&project_backup_dirs(repo)), dry_run),
     ];
 
     let green = steps
@@ -1221,6 +1231,118 @@ fn remove_binary(target: &RemovalTarget, dry_run: bool) -> Result<InstallStep> {
 }
 
 // -------------------------------------------------------------------------
+// Step 9: the backups left behind
+// -------------------------------------------------------------------------
+
+/// What [`config::backup_if_changing`] puts between a file's name and the
+/// timestamp of the copy it keeps.
+const BACKUP_MARKER: &str = ".pixel-bak.";
+
+/// The directory holding `rel` under `root`.
+fn parent_of(root: &Path, rel: &str) -> PathBuf {
+    let path = root.join(rel);
+    path.parent()
+        .map_or_else(|| root.to_path_buf(), Path::to_path_buf)
+}
+
+/// Every directory where a global `pixel install` or `pixel uninstall`
+/// rewrites a file, hence may have left a backup beside it.
+fn global_backup_dirs(home: &Path, codex_home: &Path, opencode_dir: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![
+        // Shell profiles, CLAUDE.md and AGENTS.md at the root of the home.
+        home.to_path_buf(),
+        install::fish_config_dir(home).join("conf.d"),
+        home.join(".claude"),
+        home.join(config::CLAUDE_HOOKS_DIR),
+        home.join(config::DEVIN_CONFIG_DIR),
+        parent_of(home, config::CODEX_HOOKS_FILE),
+        codex_home.to_path_buf(),
+        parent_of(home, config::GEMINI_SETTINGS_FILE),
+        home.join(".zcode"),
+        parent_of(home, config::ZCODE_CONFIG_FILE),
+        parent_of(home, config::CURSOR_HOOKS_FILE),
+        home.join(config::PI_CONFIG_DIR),
+        home.join(config::PI_CONFIG_DIR).join("extensions"),
+        parent_of(home, config::PIXEL_RULES_REL),
+        home.join(".local/share/pixel"),
+        crate::antigravity::antigravity_config_dir(home),
+        crate::antigravity::plugin_dir(home),
+        crate::antigravity::cli_plugin_dir(home),
+        opencode_dir.to_path_buf(),
+    ];
+    for root in project_hook_search_roots(home) {
+        dirs.push(root.join(".codex"));
+    }
+    dirs
+}
+
+/// Every directory where `pixel install --repo` or `pixel uninstall --repo`
+/// rewrites a file inside `repo`.
+fn project_backup_dirs(repo: &Path) -> Vec<PathBuf> {
+    vec![
+        // The root AGENTS.md.
+        repo.to_path_buf(),
+        repo.join(".codex"),
+        repo.join(".claude"),
+        repo.join(".devin"),
+        repo.join(".pi/extensions"),
+        repo.join(".pi/agent"),
+        repo.join(".pi/agent/extensions"),
+        parent_of(repo, crate::warp::CONFIG_FILE),
+    ]
+}
+
+/// The backups present in `dirs` (not recursive), sorted and without
+/// duplicates: two entries of `dirs` may name the same directory.
+fn find_backups(dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = dirs
+        .iter()
+        .filter_map(|dir| fs::read_dir(dir).ok())
+        .flat_map(|entries| entries.flatten().map(|entry| entry.path()))
+        .filter(|path| {
+            path.is_file()
+                && path
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().contains(BACKUP_MARKER))
+        })
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Report the backups left in place. They are never deleted here: each one
+/// is the only undo of a write install or uninstall made, and the user's own
+/// files are already restored without them, so dropping them is the user's
+/// call, made with the command this step prints.
+fn backups_step(backups: &[PathBuf], dry_run: bool) -> InstallStep {
+    if backups.is_empty() {
+        return InstallStep {
+            id: "backups".into(),
+            status: CheckStatus::Green,
+            summary: install::dry_run_summary(dry_run, "no pixel backup left"),
+            detail: None,
+        };
+    }
+    let quoted: Vec<String> = backups
+        .iter()
+        .map(|path| routing::quoted_executable(path))
+        .collect();
+    InstallStep {
+        id: "backups".into(),
+        status: CheckStatus::Green,
+        summary: install::dry_run_summary(
+            dry_run,
+            &format!(
+                "kept {} backup(s) of the files pixel rewrote, each the undo of one write; remove them once you no longer need them",
+                backups.len()
+            ),
+        ),
+        detail: Some(format!("rm -- {}", quoted.join(" "))),
+    }
+}
+
+// -------------------------------------------------------------------------
 // Shared helper: remove pixel run-hook entries from a settings file with a
 // top-level `hooks` object (Claude/Devin/Codex/Gemini schema).
 // -------------------------------------------------------------------------
@@ -1506,5 +1628,78 @@ mod routing_tests {
         }
         #[cfg(not(unix))]
         let _ = path;
+    }
+}
+
+#[cfg(test)]
+mod backup_tests {
+    use super::*;
+
+    #[test]
+    fn find_backups_lists_each_backup_file_once_in_path_order() {
+        let root = tempfile::tempdir().unwrap();
+        let a = root.path().join("a");
+        let b = root.path().join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        for path in [
+            b.join("settings.json.pixel-bak.2-0"),
+            a.join("hooks.json.pixel-bak.1-1"),
+            // The user's own files and pixel's temp files are not backups.
+            a.join("hooks.json"),
+            a.join("hooks.pixel-tmp"),
+        ] {
+            fs::write(path, "x").unwrap();
+        }
+        // A directory is never a backup, whatever its name.
+        fs::create_dir_all(a.join("dir.pixel-bak.3-0")).unwrap();
+
+        // `a` twice: the global list can name one directory two ways
+        // (`~/.codex` and `$CODEX_HOME`).
+        let found = find_backups(&[b.clone(), a.clone(), a.clone(), root.path().join("absent")]);
+
+        assert_eq!(
+            found,
+            vec![
+                a.join("hooks.json.pixel-bak.1-1"),
+                b.join("settings.json.pixel-bak.2-0")
+            ]
+        );
+    }
+
+    #[test]
+    fn parent_of_names_the_directory_holding_a_managed_file() {
+        let home = Path::new("/home/me");
+        assert_eq!(
+            parent_of(home, config::GEMINI_SETTINGS_FILE),
+            home.join(".gemini")
+        );
+        assert_eq!(
+            parent_of(home, config::ZCODE_CONFIG_FILE),
+            home.join(".zcode/cli")
+        );
+    }
+
+    #[test]
+    fn backups_step_quotes_each_path_of_the_removal_command() {
+        let step = backups_step(
+            &[
+                PathBuf::from("/home/it's me/.claude/settings.json.pixel-bak.1-0"),
+                PathBuf::from("/home/me/.codex/hooks.json.pixel-bak.2-1"),
+            ],
+            true,
+        );
+        assert_eq!(step.id, "backups");
+        assert_eq!(step.status, CheckStatus::Green);
+        assert_eq!(
+            step.summary,
+            "[dry-run] would report: kept 2 backup(s) of the files pixel rewrote, each the undo of one write; remove them once you no longer need them"
+        );
+        assert_eq!(
+            step.detail.as_deref(),
+            Some(
+                "rm -- '/home/it'\\''s me/.claude/settings.json.pixel-bak.1-0' '/home/me/.codex/hooks.json.pixel-bak.2-1'"
+            )
+        );
     }
 }
