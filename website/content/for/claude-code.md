@@ -8,6 +8,6 @@ agent: "claude-code"
 
 {{% agent-setup %}}
 
-## Measured
+## Evidence and limits
 
-On one scoping task in Pixel's own repository, Claude Code with Pixel took a median **30% less wall time** than the same agent without it, over 11 runs per side (Claude Sonnet 5, Pixel 0.5.0, September 2026). That is one task on one repository: a direction, not a promise for yours. [The runs, their spread and the cases where Pixel is slower](../../benchmarks/#on-whole-agent-tasks)
+An Opus medium trial with install hooks reported 42.9 s without Pixel and 47.6 s with it on one scoping task: no speed gain there. The raw runs are outside the repository, so this limited summary does not establish a result for your sessions. [Method and limits](../../benchmarks/#on-whole-agent-tasks)

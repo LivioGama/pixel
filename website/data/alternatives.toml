@@ -574,7 +574,7 @@ name = "grep"
 about = "The line search every agent already knows, and the one it reaches for first: grep, ripgrep, the agent's own search tool."
 measure = "baseline"
 bench = "well-known-files"
-answer = '''Grep finds the line; the cost is what comes next, when the agent opens the whole file to understand the match. On {big.owner} {big.lines}-line {big.file} that read costs {big.full} tokens, and Pixel's answer to the same question {big.pixel}. <code>pixel search-content</code> keeps grep's regex syntax, so the agent changes nothing but the bill.'''
+answer = '''Grep finds the line; the cost is what comes next, when the agent opens the whole file to understand the match. On {big.owner} {big.lines}-line {big.file} the full file is {big.full} estimated tokens versus {big.pixel} for signatures (UTF-8 bytes divided by four, not session cost). <code>pixel search-content</code> keeps grep's regex syntax, so the agent can keep familiar search syntax.'''
 wins = "nothing to install and no index to build: it runs on any file, anywhere, the moment it exists."
 checked = 2026-09-25
 

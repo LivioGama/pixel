@@ -7,7 +7,7 @@
 {{- $c := partial "context-share.html" . -}}
 {{ lang.FormatNumberCustom 0 $c.full }} tokens, {{ $c.share }}% of a {{ lang.FormatNumberCustom 0 $c.window }}-token context window
 {{- else -}}
-| Project | File | Lines | Full read, tokens | With Pixel, tokens | Saved | Signatures |
+| Project | File | Lines | Full read, estimated tokens | Signatures, estimated tokens | Saved | Signatures |
 | --- | --- | --- | --- | --- | --- | --- |
 {{ range $rows -}}
 | {{ .project }} | [`{{ path.Base .path }}`](https://github.com/{{ .repo }}/blob/{{ .commit }}/{{ .path }}) | {{ lang.FormatNumberCustom 0 .lines }} | {{ lang.FormatNumberCustom 0 .full }} | {{ lang.FormatNumberCustom 0 .pixel }} | {{ if eq .status "kept" }}{{ .saved }}%{{ else }}~~{{ .saved }}%~~ excluded{{ end }} | {{ .signatures }} |
