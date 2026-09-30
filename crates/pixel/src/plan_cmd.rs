@@ -22,8 +22,8 @@ pub struct PlanOptions {
     pub limit: Option<usize>,
     pub format: String,
     pub no_verify: bool,
-    /// Omit the verification-gate block derived from the daemon's `prereqs`.
-    pub no_prereqs: bool,
+    /// Omit the verification-gate block above the numbered checklist.
+    pub no_gates: bool,
     pub max_todos: Option<usize>,
     pub status: bool,
     pub done: Vec<usize>,
@@ -48,7 +48,7 @@ pub fn run(opts: PlanOptions) -> Result<(), String> {
         false,
     )?;
     let findings = findings_of(&data)?;
-    let gates = if opts.no_prereqs {
+    let gates = if opts.no_gates {
         Vec::new()
     } else {
         gates_of(&prereqs_of(&data)?, &findings)
@@ -499,7 +499,7 @@ mod tests {
             limit: None,
             format: "markdown".to_string(),
             no_verify: false,
-            no_prereqs: false,
+            no_gates: false,
             max_todos: None,
             status: false,
             done: Vec::new(),
