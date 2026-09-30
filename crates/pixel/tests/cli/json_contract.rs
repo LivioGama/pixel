@@ -1074,6 +1074,32 @@ fn search_names_a_truncation_cap_once_in_prose() {
     );
 }
 
+/// When the stdout cap cuts the page, the warning names the stdout cap and
+/// the daemon's own caps stay in the bounded-result note: the two lines
+/// name different bounds, and dropping the daemon's row cap from the note
+/// would lose the only place prose names it.
+#[test]
+fn the_stdout_cap_warning_leaves_the_daemon_caps_in_the_note() {
+    let dir = fixture_with_many_matches("search-note-stdout-cap");
+    let out = pixel_command()
+        .args(["search-content", "the", ".", "--context", "20"])
+        .current_dir(&dir)
+        .env("PIXEL_OUTPUT_CAP_BYTES", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("stdout cap"),
+        "the stdout-cap warning fires: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("row limit").count(),
+        1,
+        "the daemon's row cap survives in the note: {stderr}"
+    );
+}
+
 /// `--limit` counts the matching lines a `-g`/`-t` search prints, not the
 /// index rows read before the filter: `--limit 1 -g 'tests/*'` used to ask
 /// the index for one row, drop it (it was `NOTES.md`), and print nothing

@@ -3936,6 +3936,11 @@ fn run_search_one(
     // is never a surprise.
     let match_count = data.get("match_count").and_then(Value::as_u64).unwrap_or(0);
     let limit = data.get("limit").and_then(Value::as_u64).unwrap_or(0);
+    // Whether the `⚠ results truncated` line below named the daemon's row
+    // and byte caps: only then does the note further down drop them. A
+    // stdout-cap cut names a different cap, so the daemon's caps stay in
+    // the note there.
+    let mut row_cap_warned = false;
     if page.cap_fired {
         // The `--context` text is added on this side of the daemon's byte
         // cap, so the stdout cap can be what cut this page: name that cap and
@@ -3952,6 +3957,7 @@ fn run_search_one(
             page.next_offset,
         );
     } else if page.truncated {
+        row_cap_warned = true;
         eprintln!(
             "⚠ results truncated: returned {match_count}; more matches exist (row limit {limit}, byte cap {} bytes). \
              Continue with --offset {} or pass --limit to raise the row cap (maximum 10000).",
@@ -3961,14 +3967,15 @@ fn run_search_one(
     }
     // Epistemics surfacing for search's line-oriented output (which prints
     // matches, not the whole response object): when the answer is a bounded
-    // partial, say so on stderr with the named caps — minus the caps a
-    // truncation warning above already stated.
+    // partial, say so on stderr with the named caps — minus the caps the
+    // row-cap warning above already stated. A stdout-cap cut names a
+    // different cap, so the daemon's caps stay in the note there.
     if let Some(e) = data.get("epistemics")
         && e.get("lower_bound").and_then(Value::as_bool) == Some(true)
         && let Some(basis) = e.get("basis").and_then(Value::as_str)
         && let Some(note) = bounded_result_note(
             basis,
-            page.truncated || page.cap_fired,
+            row_cap_warned,
             limit,
             data.get("byte_cap").and_then(Value::as_u64).unwrap_or(0),
         )
@@ -9821,6 +9828,19 @@ mod renamed_command_tests {
             bounded_result_note(basis, true, 100, 65_536).as_deref(),
             Some(
                 "text index; caps: 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches; ranked candidate pool capped at 10000 matches; ranking never saw candidates beyond the cap"
+            )
+        );
+    }
+
+    #[test]
+    fn bounded_result_note_trims_the_joiner_a_last_cap_strips_leave() {
+        // The last cap carries no `"; "` joiner, so its bare strip leaves the
+        // previous cap's joiner behind; the trim must take it.
+        let basis = "text index; caps: 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches; match list truncated at row limit 100; more matches exist — continue via next_offset";
+        assert_eq!(
+            bounded_result_note(basis, true, 100, 65_536).as_deref(),
+            Some(
+                "text index; caps: 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches"
             )
         );
     }
