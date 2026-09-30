@@ -878,7 +878,7 @@ const DB_SPECS: &[&str] = &[
 ///
 /// The result feeds the CLI's gate items, which is why detection returns
 /// raw evidence rather than wording: the caller resolves names the daemon
-/// cannot (e.g. which saved replay-flow to replay).
+/// cannot (e.g. which saved flow to run).
 pub fn detect_prereqs(
     store: &GraphStore,
     root: &Path,

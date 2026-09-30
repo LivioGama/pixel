@@ -1,4 +1,4 @@
-//! Replay engine — emit ready-to-run agent-browser commands from a flow.
+//! Run engine — emit ready-to-run agent-browser commands from a flow.
 
 use std::collections::HashMap;
 
@@ -12,7 +12,7 @@ use crate::vars::{resolve_value, substitute};
 /// `vars` is a map of `key=value` substitutions. Missing required vars
 /// produce an error. A step `value_var` the caller did not pass falls back
 /// to the variable's declared default, then to a placeholder `{{var}}`.
-pub fn replay(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, String> {
+pub fn run(flow: &Flow, vars: &HashMap<String, String>) -> Result<String, String> {
     // Validate required vars are present.
     for v in &flow.vars {
         if v.required && !vars.contains_key(&v.name) && v.default.is_none() {
@@ -343,7 +343,7 @@ mod tests {
             }],
             vec![],
         );
-        let rendered = replay(&flow, &HashMap::new()).unwrap();
+        let rendered = run(&flow, &HashMap::new()).unwrap();
         let dir = std::env::temp_dir().join(format!("pixel-replay-shell-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let stub = dir.join("agent-browser");
@@ -383,7 +383,7 @@ mod tests {
             ],
             vec![],
         );
-        let out = replay(&flow, &HashMap::new()).unwrap();
+        let out = run(&flow, &HashMap::new()).unwrap();
         assert!(out.contains("agent-browser --session comet open \"https://example.com\""));
         assert!(out.contains("agent-browser --session comet snapshot -i"));
         assert!(out.contains("# Step 1: Open the page"));
@@ -408,7 +408,7 @@ mod tests {
         );
         let mut vars = HashMap::new();
         vars.insert("code".into(), "ABCD-1234".into());
-        let out = replay(&flow, &vars).unwrap();
+        let out = run(&flow, &vars).unwrap();
         assert!(out.contains("\"ABCD-1234\""));
     }
 
@@ -427,7 +427,7 @@ mod tests {
                 default: None,
             }],
         );
-        assert!(replay(&flow, &HashMap::new()).is_err());
+        assert!(run(&flow, &HashMap::new()).is_err());
     }
 
     #[test]
@@ -445,7 +445,7 @@ mod tests {
                 default: None,
             }],
         );
-        let out = replay(&flow, &HashMap::new()).unwrap();
+        let out = run(&flow, &HashMap::new()).unwrap();
         assert!(out.contains("{{account}}"));
     }
 
@@ -465,13 +465,13 @@ mod tests {
                 default: Some("west".into()),
             }],
         );
-        let out = replay(&flow, &HashMap::new()).unwrap();
+        let out = run(&flow, &HashMap::new()).unwrap();
         assert!(out.contains("\"west\""), "{out}");
         assert!(!out.contains("{{account}}"), "{out}");
 
         // An explicit --var still wins over the declared default.
         let vars = HashMap::from([("account".to_string(), "east".to_string())]);
-        let out = replay(&flow, &vars).unwrap();
+        let out = run(&flow, &vars).unwrap();
         assert!(out.contains("\"east\""), "{out}");
         assert!(!out.contains("west"), "{out}");
     }
@@ -504,7 +504,7 @@ mod tests {
             }],
             vec![],
         );
-        let out = replay(&flow, &HashMap::new()).unwrap();
+        let out = run(&flow, &HashMap::new()).unwrap();
         assert!(out.contains("# Step 1: decide"), "{out}");
         // Sub-steps are numbered from 1 and indented two spaces per depth.
         assert!(out.contains("  # Step 1: then first"), "{out}");
@@ -529,7 +529,7 @@ mod tests {
         );
         let mut vars = HashMap::new();
         vars.insert("user_code".into(), "XYZ-999".into());
-        let out = replay(&flow, &vars).unwrap();
+        let out = run(&flow, &vars).unwrap();
         assert!(out.contains("https://example.com/auth?code=XYZ-999"));
     }
 
@@ -549,7 +549,7 @@ mod tests {
             }],
             vec![],
         );
-        let out = replay(&flow, &HashMap::new()).unwrap();
+        let out = run(&flow, &HashMap::new()).unwrap();
         assert!(out.contains("CONDITIONAL: if multiple accounts visible"));
         assert!(out.contains("THEN:"));
         assert!(out.contains("account matching primary"));
@@ -565,7 +565,7 @@ mod tests {
             vec![],
         );
         flow.success_signal = Some("page contains 'authorized'".into());
-        let out = replay(&flow, &HashMap::new()).unwrap();
+        let out = run(&flow, &HashMap::new()).unwrap();
         assert!(out.contains("Success signal: page contains 'authorized'"));
     }
 
@@ -599,7 +599,7 @@ mod tests {
             vec![],
         );
         let vars = HashMap::from([("who".to_string(), "alice".to_string())]);
-        let out = replay(&flow, &vars).unwrap();
+        let out = run(&flow, &vars).unwrap();
         assert!(
             out.contains("agent-browser --session comet select @eN \"FR\"   # @eN = combobox matching 'Country'"),
             "{out}"
@@ -632,7 +632,7 @@ mod tests {
             }],
             vec![],
         );
-        let out = replay(&then_only, &HashMap::new()).unwrap();
+        let out = run(&then_only, &HashMap::new()).unwrap();
         assert!(out.contains("# → THEN:"), "{out}");
         assert!(!out.contains("# → ELSE:"), "{out}");
 
@@ -648,7 +648,7 @@ mod tests {
             }],
             vec![],
         );
-        let out = replay(&else_only, &HashMap::new()).unwrap();
+        let out = run(&else_only, &HashMap::new()).unwrap();
         assert!(!out.contains("# → THEN:"), "{out}");
         assert!(out.contains("# → ELSE:"), "{out}");
     }

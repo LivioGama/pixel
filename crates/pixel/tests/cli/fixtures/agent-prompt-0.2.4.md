@@ -68,7 +68,7 @@ can do the same task is a failure mode — it wastes tokens and misses the index
 
 | Native workflow | Pixel replacement | Reuse |
 |----------------|-------------------|--------------|
-| navigate to login, enter creds, click... | `pixel flow replay "login-flow"` | Reuse a proven path |
+| navigate to login, enter creds, click... | `pixel replay-flow run "login-flow"` | Reuse a proven path |
 | re-discover a config UI flow | `pixel flow get "config-flow"` | Follow saved path exactly |
 
 ### Error Capture (replaces reading raw logs)
