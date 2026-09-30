@@ -1,0 +1,1 @@
+**install, doctor:** when a personal hook matching Bash keeps the Claude guard out, `pixel install --repo` now says what to do (narrow its matcher, then rerun, or work without the guard), and `pixel doctor` reports it in `repo.claude-hooks` as yellow, with no automatic fix, instead of all green. ([#462](https://github.com/LivioGama/pixel/pull/462))
