@@ -1003,6 +1003,23 @@ fn plan_lists_verification_gates_and_honors_no_gates() {
     let done = pixel(&dir, &["plan", "--done", "1"]);
     assert!(done.status.success(), "{done:?}");
 
+    // --done 1 marks gate 1 done; --status confirms the persistence and
+    // that other gates stay undone. Without this round-trip the test
+    // would pass on a no-op --done.
+    let after = pixel(&dir, &["plan", "--status"]);
+    let after_text = String::from_utf8(after.stdout).unwrap();
+    let gate_lines: Vec<&str> = after_text.lines().filter(|l| l.contains("Gate:")).collect();
+    assert!(
+        gate_lines
+            .iter()
+            .any(|l| l.starts_with("1. [x]") && l.contains("auth-gated code")),
+        "gate 1 must be done after --done 1: {after_text}"
+    );
+    assert!(
+        gate_lines.iter().filter(|l| l.contains("[x]")).count() == 1,
+        "exactly one gate is done: {after_text}"
+    );
+
     // --no-gates drops the block entirely.
     let none = pixel(&dir, &["plan", "--query", "dead-code", "--no-gates", "."]);
     assert!(none.status.success(), "{none:?}");

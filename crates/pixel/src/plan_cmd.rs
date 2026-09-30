@@ -250,7 +250,7 @@ fn gates_of(prereqs: &[Prereq], findings: &[PlanFinding]) -> Vec<PlanFinding> {
                 } else {
                     String::new()
                 };
-                format!("run one of: `pixel flow run `{shown}`{extra}")
+                format!("run one of: `pixel flow run {shown}`{extra}")
             }
         };
         gates.push(gate(
