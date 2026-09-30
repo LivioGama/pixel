@@ -26,6 +26,7 @@ macro_rules! eprintln {
 macro_rules! eprint {
     ($($arg:tt)*) => { crate::operation_metrics::print_error(format_args!($($arg)*)) };
 }
+mod ai_cli_readify;
 mod audit_cmd;
 mod call_guard;
 mod classify;
@@ -53,6 +54,8 @@ mod search_filter;
 mod serve_trace;
 mod sniper_cmd;
 mod task_runtime;
+mod ultraflow_cmd;
+
 mod update_notice;
 mod web_search;
 mod workspace_cmd;
@@ -358,6 +361,80 @@ enum Command {
         allow_dirty: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Probe provider readiness for Codex, Claude Code, Antigravity, and
+    /// Devin by sending one real `POST /chat/completions` ("Reply exactly
+    /// READY.", a 1024-token reservation, 20 s timeout) to Ollama Cloud. A
+    /// 200 that answers with the READY it asked for means the provider is
+    /// ready; a 200 whose body reaches no model carries its own failure
+    /// rather than counting as one. With
+    /// `--apply`, the provider that answered is written into
+    /// `~/.codex/config.toml` (`model`, `model_provider`,
+    /// `[model_providers.recording_cloud]`),
+    /// `~/.claude/settings.json` (`env.ANTHROPIC_BASE_URL` and the model
+    /// slots), and
+    /// `~/.gemini/antigravity-cli/settings.json`
+    /// (`AGY_LLM_GATEWAY_URL`); Devin is verified-only, never rewritten.
+    /// Claude's gateway credential and its `x-litellm-api-key` header are
+    /// left to the shell — a settings file expands neither, and would
+    /// replace the working value — so the report names both exports instead.
+    /// With `--approve`, the workspace named by `--workspace` has its
+    /// startup gate cleared as well.
+    AiCliReadify {
+        /// Also rewrite the agents' config files; without this flag the
+        /// command only probes and verifies (safe to re-run).
+        #[arg(long)]
+        apply: bool,
+        /// Probe timeout per provider, in seconds.
+        #[arg(long, default_value_t = 20)]
+        timeout: u64,
+        /// Verify only this subset of agents (repeatable). Default: all
+        /// four (codex, claude, antigravity, devin).
+        #[arg(long = "agent", value_enum)]
+        agents: Vec<ai_cli_readify::AgentFlag>,
+        /// Emit a machine-readable JSON report on stdout.
+        #[arg(long)]
+        json: bool,
+        /// Answer the startup prompts this command knows the key for, instead
+        /// of reporting them and stopping. Off by default: a trust dialog is
+        /// not this command's decision to take, and a prompt with no verified
+        /// answer is reported either way.
+        #[arg(long)]
+        answer_prompts: bool,
+        /// Clear each agent's own startup gate for `--workspace`: Codex's
+        /// workspace trust and its hooks' trust at their current hashes
+        /// (through Codex's own `config/batchWrite` RPC, never by editing
+        /// `config.toml`), and Claude's onboarding and trust dialog in
+        /// `~/.claude.json`. Off by default — a trust write outlives the run,
+        /// and it means "run this folder's hooks and code without asking
+        /// again". Antigravity and Devin have no approval path: their trust
+        /// state is only ever read. `~/.claude.json` belongs to Claude Code,
+        /// so close a running one first: the file is read, merged and
+        /// rewritten, and a write Claude Code makes in between is lost.
+        #[arg(long)]
+        approve: bool,
+        /// The folder `--approve` is about. Defaults to the working
+        /// directory. Exactly this path is written, never a parent: a trust
+        /// level granted to a directory covers everything below it, so a run
+        /// that walked up would grant more than it was asked to.
+        #[arg(long, default_value = ".")]
+        workspace: PathBuf,
+        /// Hand a Claude lane stuck on an auth wall to the installed
+        /// `claude-code-auth-flow`: spawn `claude auth login`, replay the
+        /// flow with the authorize URL it prints (which drives `agent-browser`
+        /// against the user's real browser profile), wait for the login to
+        /// exit, then re-probe the lane once. Off by default, and it fires
+        /// only for the two auth wordings — a quota, a rate limit, a
+        /// transport error or a model-not-found failure leaves the browser
+        /// untouched. A login that prints no authorize URL is refused rather
+        /// than opened at an empty one.
+        #[arg(long)]
+        authenticate: bool,
+        /// The account `--authenticate` should use: passed to
+        /// `claude auth login --email` and to the flow's own account
+        /// shortcut. Only consulted when the chain runs.
+        #[arg(long)]
+        account: Option<String>,
     },
     /// Look up symbols by name in the code graph.
     #[command(alias = "symbol")]
@@ -1283,11 +1360,22 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Save, retrieve, list, revise, and replay proven agent-browser paths
-    /// (auth flows, config flows) so the agent follows a deterministic
+    /// Drive a browser toward a goal with `pixel classify` one operation at
+    /// a time, save what worked as a `pixel flow`, and replay that saved
+    /// document later — its branch conditions decided by `pixel classify`
+    /// instead of matched text.
+    ///
+    /// `discover` is the jev-style loop: one question per cycle whose
+    /// options are the operation-target pairs the page currently offers.
+    /// `replay` follows the composed document, and re-decides a step whose
+    /// page moved on, recording the new branch with `--update`.
+    Ultraflow(ultraflow_cmd::UltraflowOptions),
+    /// Save, retrieve, list, revise, run, and replay proven agent-browser
+    /// paths (auth flows, config flows) so the agent follows a deterministic
     /// shortcut instead of re-discovering the UI from scratch every time.
-    #[command(alias = "flow")]
-    ReplayFlow {
+    /// For a classify-decided replay with repair, use `pixel ultraflow replay`.
+    #[command(alias = "replay-flow")]
+    Flow {
         #[command(subcommand)]
         cmd: FlowCmd,
     },
@@ -1439,11 +1527,27 @@ enum FlowCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Run a flow by driving agent-browser (the plain, deterministic
+    /// executor: refs resolved from fresh snapshots, conditions matched as
+    /// text). For a classify-decided replay with repair, use
+    /// `pixel ultraflow replay`.
+    Run {
+        name: String,
+        /// Variable substitution: `--var key=value`. Repeat per var.
+        #[arg(long = "var")]
+        vars: Vec<String>,
+        /// Shortcut for `--var google_account=<value>` (or `openai_account`
+        /// depending on the flow). Picks which account to use.
+        /// Accepts a full email address (e.g. user@example.com).
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Emit ready-to-run agent-browser commands with variable substitution.
     /// Pixel does NOT run agent-browser — it outputs the deterministic
-    /// command sequence for the agent to execute.
-    ///
-    /// Use `--execute` to actually run the commands via agent-browser.
+    /// command sequence for the agent to execute (or to hand to
+    /// `pixel flow run`).
     Replay {
         name: String,
         /// Variable substitution: `--var key=value`. Repeat per var.
@@ -1454,14 +1558,6 @@ enum FlowCmd {
         /// Accepts a full email address (e.g. user@example.com).
         #[arg(long)]
         account: Option<String>,
-        /// Actually execute the flow by running agent-browser commands.
-        /// Without this flag, replay only prints the command sequence.
-        #[arg(long, conflicts_with = "dry_run")]
-        execute: bool,
-        /// Print commands without marking as executed (default is still
-        /// print-only — pixel never runs agent-browser).
-        #[arg(long)]
-        dry_run: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1477,6 +1573,123 @@ enum FlowCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// The variables a flow verb carries: `--var key=value` pairs, plus the
+/// `--account` shortcut resolved to whichever account variable the flow
+/// declares (`openai_account` for Codex, `google_account` for the rest).
+fn flow_vars(
+    name: &str,
+    vars: &[String],
+    account: &Option<String>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let mut var_map = std::collections::HashMap::new();
+    for v in vars {
+        let (k, val) = v
+            .split_once('=')
+            .ok_or_else(|| format!("--var expects key=value, got '{v}'"))?;
+        var_map.insert(k.to_string(), val.to_string());
+    }
+    if let Some(acct) = account {
+        // Check which var the flow expects by loading it.
+        let var_name = pixel_flow::load(name)
+            .ok()
+            .and_then(|f| {
+                f.vars.iter().find_map(|v| {
+                    (v.name == "openai_account" || v.name == "google_account")
+                        .then(|| v.name.clone())
+                })
+            })
+            .unwrap_or_else(|| "google_account".to_string());
+        var_map.insert(var_name, acct.clone());
+    }
+    Ok(var_map)
+}
+
+#[cfg(test)]
+mod flow_vars_tests {
+    use super::*;
+
+    /// The `--account` shortcut picks the account variable the flow itself
+    /// declares, and a malformed `--var` is refused before anything opens.
+    #[test]
+    fn flow_vars_parses_the_pairs_and_uses_the_flows_account_var() {
+        let _guard = crate::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("pixel-flow-vars-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: ENV_LOCK serialises every test that touches process-wide
+        // variables, and PIXEL_FLOW_DIR is one of them.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", &dir);
+        }
+        let store = |name: &str, vars: &[(&str, &str)]| {
+            let vars: Vec<String> = vars
+                .iter()
+                .map(|(n, d)| {
+                    format!(r#"{{"name": "{n}", "description": "{d}", "required": false}}"#)
+                })
+                .collect();
+            std::fs::write(
+                dir.join(format!("{name}.json")),
+                format!(
+                    r#"{{"name": "{name}", "title": "t", "description": "",
+                        "vars": [{}], "steps": [{{"action": "snapshot"}}],
+                        "created_unix": 1, "revised_unix": 1, "revision": 1, "proven": false }}"#,
+                    vars.join(", ")
+                ),
+            )
+            .unwrap();
+        };
+        store(
+            "codex",
+            &[
+                ("openai_account", "the Codex account"),
+                ("env_name", "which env"),
+            ],
+        );
+        // A trailing variable after google_account must not win the lookup.
+        store(
+            "claude",
+            &[
+                ("google_account", "which account"),
+                ("env_name", "which env"),
+            ],
+        );
+
+        // `--account` lands on the variable the flow itself declares.
+        let vars = flow_vars(
+            "codex",
+            &["env=prod".to_string()],
+            &Some("bob@example.com".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            vars.get("openai_account").map(String::as_str),
+            Some("bob@example.com")
+        );
+        assert_eq!(vars.get("env").map(String::as_str), Some("prod"));
+        // A flow without an openai_account falls back to google_account.
+        let vars = flow_vars("claude", &[], &Some("carol@example.com".to_string())).unwrap();
+        assert_eq!(
+            vars.get("google_account").map(String::as_str),
+            Some("carol@example.com")
+        );
+
+        // The pairs are read in order and a malformed one is refused.
+        let vars = flow_vars("codex", &["a=1".to_string(), "b=2".to_string()], &None).unwrap();
+        assert_eq!(vars.get("a").map(String::as_str), Some("1"));
+        assert_eq!(vars.get("b").map(String::as_str), Some("2"));
+        assert_eq!(
+            flow_vars("codex", &["broken".to_string()], &None).unwrap_err(),
+            "--var expects key=value, got 'broken'"
+        );
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Parse a 1-based inclusive line range "a,b" for `provenance --lines`.
@@ -5037,18 +5250,35 @@ fn renamed_invocation(argv: &[String]) -> Option<(&str, &'static str)> {
 /// The arguments as the action log records them. An API key is a secret:
 /// the log is plain text under `.pixel/`, so every positional after
 /// `config remote-key <preset>` is masked.
+///
+/// The auth flow's URL variable is masked for the same reason: its
+/// `code`/`state` query is a bearer token for one login, and
+/// `ai-cli-readify --authenticate` is not the only writer — a `pixel flow
+/// replay` typed by hand would land here too. The name stays readable, the
+/// value never does.
 fn logged_args(args: &[String]) -> String {
     let secret_from = args
         .windows(2)
         .position(|pair| pair[0] == "config" && pair[1] == "remote-key")
         .map(|at| at + 3);
+    let url_name = ai_cli_readify::auth::AUTH_URL_VAR;
+    let url_var = format!("{url_name}=");
+    // Clap takes `--var auth_url=…` and `--var=auth_url=…` as the same
+    // option, so the one-token spelling carries the same one-time
+    // `code`/`state` payload and is masked the same way. Matching only the
+    // two-argument form left the other in the log in clear text.
+    let url_flag = format!("--var={url_var}");
     args.iter()
         .enumerate()
         .map(|(i, arg)| {
-            if secret_from.is_some_and(|from| i >= from) && !arg.starts_with("--") {
-                "<redacted>"
+            if arg.starts_with(&url_flag) {
+                format!("--var={url_name}=<redacted>")
+            } else if arg.starts_with(&url_var) {
+                format!("{url_name}=<redacted>")
+            } else if secret_from.is_some_and(|from| i >= from) && !arg.starts_with("--") {
+                "<redacted>".to_string()
             } else {
-                arg.as_str()
+                arg.clone()
             }
         })
         .collect::<Vec<_>>()
@@ -5851,6 +6081,39 @@ fn run_command(
             }
             println!("fix forward: keep current code and fix the bug in place");
             Ok(())
+        }
+        Command::AiCliReadify {
+            apply,
+            timeout,
+            agents,
+            json,
+            answer_prompts,
+            approve,
+            workspace,
+            authenticate,
+            account,
+        } => {
+            let opts = ai_cli_readify::Options {
+                apply,
+                timeout: Duration::from_secs(timeout),
+                agents: agents
+                    .into_iter()
+                    .map(ai_cli_readify::Agent::from)
+                    .collect(),
+                answer_prompts,
+                approve,
+                workspace,
+                authenticate,
+                account,
+            };
+            let report = ai_cli_readify::run(&opts)?;
+            if json {
+                let value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
+                print_data(&value, true)
+            } else {
+                ai_cli_readify::print_report(&report);
+                Ok(())
+            }
         }
         Command::FindSymbol { name, path, json } => {
             let data = execute(&path, Request::Symbol { name }, false)?;
@@ -7513,7 +7776,8 @@ fn run_command(
                 json,
             })
         }
-        Command::ReplayFlow { cmd } => {
+        Command::Ultraflow(options) => ultraflow_cmd::run(options),
+        Command::Flow { cmd } => {
             use pixel_flow::FlowAction;
             let json = match &cmd {
                 FlowCmd::Save { json, .. }
@@ -7521,6 +7785,7 @@ fn run_command(
                 | FlowCmd::List { json, .. }
                 | FlowCmd::Revise { json, .. }
                 | FlowCmd::Replay { json, .. }
+                | FlowCmd::Run { json, .. }
                 | FlowCmd::Delete { json, .. }
                 | FlowCmd::Show { json, .. } => *json,
             };
@@ -7559,51 +7824,23 @@ fn run_command(
                     name,
                     vars,
                     account,
-                    execute,
-                    dry_run,
                     json: _,
                 } => {
-                    let mut var_map = std::collections::HashMap::new();
-                    for v in &vars {
-                        let (k, val) = v
-                            .split_once('=')
-                            .ok_or_else(|| format!("--var expects key=value, got '{v}'"))?;
-                        var_map.insert(k.to_string(), val.to_string());
+                    let vars = flow_vars(&name, &vars, &account)?;
+                    FlowAction::Replay {
+                        name,
+                        vars,
+                        dry_run: false,
                     }
-                    // --account shortcut: resolve alias to full email and
-                    // inject into the flow's account var. Try openai_account
-                    // first (Codex), then google_account (Claude/others).
-                    if let Some(acct) = account {
-                        let resolved = acct.clone();
-                        // Check which var the flow expects by loading it.
-                        let var_name = pixel_flow::load(&name)
-                            .ok()
-                            .and_then(|f| {
-                                f.vars.iter().find_map(|v| {
-                                    if v.name == "openai_account" {
-                                        Some("openai_account")
-                                    } else if v.name == "google_account" {
-                                        Some("google_account")
-                                    } else {
-                                        None
-                                    }
-                                })
-                            })
-                            .unwrap_or("google_account");
-                        var_map.insert(var_name.to_string(), resolved);
-                    }
-                    if execute {
-                        FlowAction::Execute {
-                            name,
-                            vars: var_map,
-                        }
-                    } else {
-                        FlowAction::Replay {
-                            name,
-                            vars: var_map,
-                            dry_run,
-                        }
-                    }
+                }
+                FlowCmd::Run {
+                    name,
+                    vars,
+                    account,
+                    json: _,
+                } => {
+                    let vars = flow_vars(&name, &vars, &account)?;
+                    FlowAction::Execute { name, vars }
                 }
                 FlowCmd::Delete { name, json: _ } => FlowAction::Delete { name },
                 FlowCmd::Show { name, json: _ } => FlowAction::Show { name },
@@ -9386,6 +9623,64 @@ mod renamed_command_tests {
             logged_args(&args(&["search-content", "config", "src"])),
             "search-content config src",
             "other commands are logged verbatim"
+        );
+    }
+
+    #[test]
+    fn only_the_remote_key_command_starts_the_mask() {
+        // The mask starts at the pair `config remote-key`, not at either
+        // word on its own: `config metrics off .` names no key at all, and
+        // a search for the words `remote-key` is a query rather than a
+        // credential. Either half of that pair being enough on its own
+        // would redact the tail of both commands, and the log would stop
+        // being readable exactly where it is asked to be.
+        assert_eq!(
+            logged_args(&argv(&["config", "metrics", "off", "--global", "."])),
+            "config metrics off --global .",
+            "a `config` command that is not `remote-key` carries no secret"
+        );
+        assert_eq!(
+            logged_args(&argv(&["search-content", "remote-key", "src", "crates"])),
+            "search-content remote-key src crates",
+            "the word `remote-key` in someone else's argument is a search term"
+        );
+    }
+
+    #[test]
+    fn an_auth_url_never_reaches_the_action_log() {
+        // The URL the auth flow is replayed with carries a one-time
+        // `code`/`state` payload: the log is plain text under `.pixel/`, so
+        // the value is masked and the variable's name stays readable.
+        assert_eq!(
+            logged_args(&argv(&[
+                "flow",
+                "replay",
+                "claude-code-auth-flow",
+                "--execute",
+                "--account",
+                "someone@example.com",
+                "--var",
+                "auth_url=https://platform.claude.com/oauth/authorize?code=secret&state=8f2a",
+            ])),
+            "flow replay claude-code-auth-flow --execute --account someone@example.com --var auth_url=<redacted>"
+        );
+        // The one-token spelling is the same option to clap and the same
+        // secret to the log, so it is masked with the name kept.
+        assert_eq!(
+            logged_args(&argv(&[
+                "flow",
+                "replay",
+                "claude-code-auth-flow",
+                "--execute",
+                "--var=auth_url=https://platform.claude.com/oauth/authorize?code=secret&state=8f2a",
+            ])),
+            "flow replay claude-code-auth-flow --execute --var=auth_url=<redacted>"
+        );
+        // A plain `--var token=…` is somebody else's variable and stays as it
+        // was: only the URL this repository's own chain writes is masked.
+        assert_eq!(
+            logged_args(&argv(&["flow", "replay", "x", "--var", "token=kept"])),
+            "flow replay x --var token=kept"
         );
     }
 

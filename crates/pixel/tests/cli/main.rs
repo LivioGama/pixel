@@ -2,6 +2,7 @@
 //! `tests/<name>.rs` is a module here, so cargo links one executable
 //! instead of one per file (linking dominated `cargo test -p pixel-cli`).
 
+mod ai_cli_readify_cli;
 mod ask_contract;
 mod audit_cli;
 mod classify_cli;
@@ -29,6 +30,7 @@ mod scope_task_precision;
 mod search_compat_cli;
 mod support;
 mod targets_cli;
+mod ultraflow_cli;
 mod uninstall_cli;
 #[cfg(unix)]
 mod update_notice_cli;
