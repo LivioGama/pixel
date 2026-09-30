@@ -175,7 +175,7 @@ fn fit_prompt(prompt: &str, limit: usize, location: &str) -> String {
             .map(|h| h.trim_start_matches("## "))
             .collect();
         format!(
-            "{}\n\nLeft out to fit Claude Code's {limit}-character hook context: {}. Read {location} \
+            "{}\n\nLeft out to fit Claude Code's hook context limit: {}. Read {location} \
              when a task needs them.",
             kept.concat().trim_end(),
             names.join("; ")
@@ -7000,9 +7000,14 @@ mod tests {
             !one.contains("## Classify") && one.contains("## Recall"),
             "{one}"
         );
+        // The line names the sections and the file, not the budget left
+        // after the freshness reservation, which is no limit the user has.
         assert!(
-            one.contains("Left out to fit Claude Code's")
-                && one.ends_with("Read /p when a task needs them.")
+            one.ends_with(
+                "\n\nLeft out to fit Claude Code's hook context limit: Classify. Read /p when a \
+                 task needs them."
+            ),
+            "{one}"
         );
         let two = fit_prompt(&prompt, utf16_len(&prompt) - 300, "/p");
         assert!(
