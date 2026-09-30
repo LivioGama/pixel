@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 //! pixel-install — M5/M6 rollout: idempotent `pixel install`, `pixel doctor`,
 //! and the clean-cut deprecation of the usable-git/gitpixel/sniper MCP
 //! entries. pixel is a CLI + lifecycle integration tool, not an MCP server —
