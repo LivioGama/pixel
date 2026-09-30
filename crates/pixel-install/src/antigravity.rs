@@ -789,6 +789,26 @@ mod tests {
         path.to_path_buf()
     }
 
+    /// Run `probe` again while it fails with ETXTBSY: a script this test just
+    /// wrote is "busy" as long as a child another test thread forked in the
+    /// meantime still holds a copy of the write descriptor, until that child
+    /// execs. A fresh path does not avoid it; a short retry does (#455).
+    /// Bounded, so a real error still surfaces within a second.
+    #[cfg(unix)]
+    fn unless_busy<T>(mut probe: impl FnMut() -> Result<T>) -> Result<T> {
+        for _ in 0..50 {
+            match probe() {
+                Err(crate::InstallError::Io(e))
+                    if e.kind() == std::io::ErrorKind::ExecutableFileBusy =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                outcome => return outcome,
+            }
+        }
+        probe()
+    }
+
     #[cfg(unix)]
     #[test]
     fn registration_probe_reads_imports_listings_and_missing_cli_as_unknown() {
@@ -808,7 +828,7 @@ mod tests {
             // can fail the next execve with ETXTBSY on some filesystems.
             let agy = fake_agy(&tmp.path().join(format!("agy-{index}")), listing);
             assert_eq!(
-                agy_pixel_registered_with(agy.as_os_str(), tmp.path()).unwrap(),
+                unless_busy(|| agy_pixel_registered_with(agy.as_os_str(), tmp.path())).unwrap(),
                 expected,
                 "{listing}"
             );
