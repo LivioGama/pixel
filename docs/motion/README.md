@@ -49,7 +49,7 @@ command, time and token count comes from a recording.
    independently checked invoice. The summary at the end shows the median of each metric over all runs, and
    its headline follows those medians rather than assuming a win.
 
-The archived demo (no longer embedded on the landing page) predates this protocol: Claude Sonnet 5, Pixel
+The source recording predates this protocol: Claude Sonnet 5, Pixel
 0.5.0 with its agent prompt appended instead of its hooks, in the source
 tree itself (`src/demo/meta.txt`). Three of its 22 runs read the demo's own
 files, which is why the script now works in a separate worktree. An Opus

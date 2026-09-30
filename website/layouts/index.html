@@ -34,7 +34,7 @@
       </p>
       {{/* The title names the pain and the mechanism, and the lede carries one figure only: the kept files' median saving (partials/kept-rates.html), the number the wall beside it illustrates and the Tokens meter rounds. Agent timings are discussed separately in Proof; the headline is a file/outline volume comparison. */}}
       <h1 class="hero__title hero__title--long"><span>Your agent reads whole files.</span> <span class="glow">Pixel hands it the map.</span></h1>
-      <p class="hero__lede"><strong>Every session starts cold, so your coding agent opens file after file to find its way.</strong> Pixel is a local code index it asks instead: {{ lang.FormatNumber 1 $r.median }}% less read volume at the median across {{ $r.count }} pinned large files (whole file versus signatures, Pixel 0.5.0), and nothing leaves your machine.</p>
+      <p class="hero__lede"><strong>Every session starts cold, so your coding agent opens file after file to find its way.</strong> Pixel is a local code index it asks instead: {{ lang.FormatNumber 1 $r.median }}% less read volume at the median across {{ $r.count }} pinned large files (whole file versus signatures), and nothing leaves your machine.</p>
       <div class="hero__cta">
         <div class="cmd">
           <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
@@ -55,7 +55,7 @@
           <p class="wall__state" aria-hidden="true"><span data-wall-state>Without Pixel</span></p>
           <p class="wall__label" data-wall-label aria-hidden="true">Your agent reading {{ $big.owner }} {{ path.Base $big.path }}, all {{ lang.FormatNumberCustom 0 $big.lines }} lines</p>
           <p class="wall__count" aria-hidden="true"><span data-wall-count>{{ lang.FormatNumberCustom 0 $big.full }}</span> estimated tokens <span class="wall__delta">&minus;{{ math.Floor $big.saved }}%</span></p>
-          <p class="sr-only" aria-live="polite" data-wall-announce>Your agent reading {{ $big.owner }} {{ path.Base $big.path }}, all {{ lang.FormatNumberCustom 0 $big.lines }} lines: {{ lang.FormatNumberCustom 0 $big.full }} estimated tokens. Signatures through Pixel: {{ lang.FormatNumberCustom 0 $big.pixel }} estimated tokens. UTF-8 bytes divided by four, Pixel 0.5.0.</p>
+          <p class="sr-only" aria-live="polite" data-wall-announce>Your agent reading {{ $big.owner }} {{ path.Base $big.path }}, all {{ lang.FormatNumberCustom 0 $big.lines }} lines: {{ lang.FormatNumberCustom 0 $big.full }} estimated tokens. Signatures through Pixel: {{ lang.FormatNumberCustom 0 $big.pixel }} estimated tokens. UTF-8 bytes divided by four.</p>
         </div>
         <div class="wall__grid" aria-hidden="true"></div>
         <figcaption class="wall__caption">
@@ -158,9 +158,9 @@
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Proof</span></p>
       <header class="section__head" data-reveal>
         <h2 id="tasks-title">Less to read. <span class="glow">Task outcomes vary.</span></h2>
-        <p>Our main evidence compares a whole file with its signatures on eight pinned large files, using Pixel 0.5.0. The volume is measured in bytes; token counts are estimates from bytes divided by four. An outline helps locate code; edits still need the relevant bodies.</p>
+        <p>Our main evidence compares a whole file with its signatures on eight pinned large files. The volume is measured in bytes; token counts are estimates from bytes divided by four. An outline helps locate code; edits still need the relevant bodies.</p>
       </header>
-      <p class="ledger__fine" data-reveal>A newer Opus medium trial with the install hooks reported median times of 42.9&nbsp;s without Pixel and 47.6&nbsp;s with it on one scoping task: no speed gain there. Its raw runs are not archived here. The older Sonnet demo used an appended prompt without hooks and included runs that read its own traces. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">Both protocols, results and limits</a></p>
+      <p class="ledger__fine" data-reveal>On one scoping task, an Opus medium trial with install hooks reported median times of 42.9&nbsp;s without Pixel and 47.6&nbsp;s with it: no speed gain on that task. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">Method and limits</a></p>
       {{/* Real users' words, from data/voices.toml: nothing renders until it holds an entry, and the file says what an entry needs. */}}
       {{ with hugo.Data.voices.voice }}
       <ul class="voices" data-reveal="stagger" aria-label="What people who run Pixel say">
@@ -181,7 +181,7 @@
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Verify</span></p>
       <header class="section__head" data-reveal>
         <h2 id="yours-title">Don't trust our numbers. <span class="glow">Get yours.</span></h2>
-        <p>Run inside a repository of yours, the first command prints what a the estimated token volume of its largest files versus their signatures. No session, no account, and nothing leaves your machine.</p>
+        <p>Run inside a repository of yours, the first command prints the estimated token volume of its largest files versus their signatures. No session, no account, and nothing leaves your machine.</p>
       </header>
       <ol class="yours" data-reveal="stagger">
         <li class="yours__step">
@@ -191,7 +191,7 @@
             <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel audit</code>
             <button class="cmd__copy" type="button" data-copy="pixel audit">Copy</button>
           </div>
-          <p>On Requests with Pixel 0.5.1, estimated as bytes ÷ 4: <strong class="yours__waste">95,693 tokens</strong> for the twenty files whole against <strong class="yours__kept">11,447</strong> for their outlines: &minus;88%.</p>
+          <p>On Requests, estimated as bytes ÷ 4: <strong class="yours__waste">95,693 tokens</strong> for the twenty files whole against <strong class="yours__kept">11,447</strong> for their outlines: &minus;88%.</p>
         </li>
         <li class="yours__step">
           <span class="yours__n" aria-hidden="true">2</span>

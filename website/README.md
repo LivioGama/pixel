@@ -78,13 +78,14 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   visitor: `pixel audit`, `pixel list-signatures` and `pixel token-savings`,
   each beside the figure it printed (the first two restate "Measure it on
   your own code" in `content/benchmarks.md`). The band compares whole files with signatures, not agent sessions.
-  Proof reports the newer Opus-with-hooks summary (no gain on its task) and
-  links the archived prompt-only Sonnet demo with its contamination caveat. The optional
+  Proof reports the Opus-with-hooks summary (no gain on its task) and
+  links its method and limits. Measurement versions belong in the benchmark
+  protocols, not repeated on the home page. The optional
   `pixel classify` has a dedicated Decisions section on the home and its
   fuller accuracy-and-latency comparison on `/benchmarks/`; it remains an
   optional add-on, separate from the local index. The scope board
   draws one pad per indexed file and routes a trace from each P0 pad to its
-  file name. The job tabs load each video only when opened, while the historical agent replay is no longer embedded on the home page. Videos never autoplay under reduced motion: the poster shows the
+  file name. The job tabs load each video only when opened, with captions that identify them as workflow illustrations. Videos never autoplay under reduced motion: the poster shows the
   finished state and the controls are there.
 - Under the four "How it works" cards, the cold start figure: the time
   from nothing to a full index of a large repository, beside a track of
@@ -219,7 +220,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   together). Nothing is sent or stored: the share link carries the values in
   its fragment (`#d=10&s=4&r=5&t=10000&p=3&w=21`, the inputs' `key`s, so
   never rename one), and the README badge is a static shields.io URL built
-  from the median. No historical agent gain calibrates the calculation. It assumes each counted
+  from the median. The calculation uses the kept-file volume ratios. It assumes each counted
   full read is replaced by signatures. Dollars value hypothetical input reduction
   at the chosen uncached price, not invoice savings; the observed range is not a
   confidence interval. The page links the agent trials' limitations instead. The page is labelled an estimate

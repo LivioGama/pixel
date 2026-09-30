@@ -24,7 +24,7 @@
 question = "Will my agent actually use it?"
 answer = [
   '''Not every time. Agents are trained on <code>grep</code> and fall back to it. Pixel does not wait for the agent to discover a tool: <code>pixel install</code> puts its protocol into every session, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files. The guard advises and never blocks.''',
-  '''In the archived prompt-only demo, the agent called Pixel in every run. That demo used no install hooks and included reads of its own traces, so it does not establish adoption or gains with the current install. The newer Opus trial with hooks found no speed gain on that task. <a class="link" href="{bench}#on-whole-agent-tasks">The runs</a>''',
+  '''Use <code>pixel action-log</code> to check what your agent actually ran. Tool use is not a time or cost measurement: an Opus trial with install hooks found no speed gain on its scoping task. <a class="link" href="{bench}#on-whole-agent-tasks">Method and limits</a>''',
 ]
 
 [[objection]]

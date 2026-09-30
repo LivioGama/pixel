@@ -5,7 +5,7 @@ description: "Every number on the home page, with its method, its sample size an
 
 <!-- Figures come from docs/bench/; every section links its source. crates/pixel/tests/cli/docs_drift.rs reads this page, so every `pixel <command>` quoted here must exist. -->
 
-Figures below link to their available evidence and protocols. The newer Opus trial is a documented summary without archived raw runs; losses sit next to wins.
+Figures below link to their available evidence and protocols. The Opus trial is a documented summary without archived raw runs; losses sit next to wins.
 
 <!-- Each command in this box was run on a fresh clone of a third-party repository (psf/requests) before it was written here: `pixel audit` and `pixel list-signatures` at requests 611c616 with pixel 0.5.1, the others with pixel 0.5.0. Re-run them when an output or a prerequisite changes. -->
 <aside class="measure" aria-labelledby="measure-it-on-your-own-code">
@@ -99,37 +99,15 @@ Recall is a tie at this sample size: Pixel finds every caller in Rust and TypeSc
 
 ## On whole agent tasks
 
-These are historical or limited trials, not estimates for the current installation. Read volume, estimated tokens, elapsed duration and provider-reported cost are different quantities.
+An Opus medium trial with install hooks on one scoping task reported these medians:
 
-### Newer trial with install hooks: no gain on this task
-
-[The motion protocol note](https://github.com/LivioGama/pixel/blob/main/docs/motion/README.md#the-agent-demo) reports an Opus medium re-recording with the hooks: **42.9 s without Pixel, 47.6 s with it**, medians on the same scoping task. It found no speed gain on that task. The raw runs are held outside the repository; their date, exact model and Pixel versions, sample size and cost are not archived here. This summary cannot establish a general slowdown or speedup, nor a token or cost result. Changing both model and wiring prevents attributing the difference to hooks alone.
-
-### Archived Sonnet demo, prompt only
-
-Recorded 2026-09-23 (repository `e585b69`, binary commit `aaa1a3b`): Claude Sonnet 5, Pixel 0.5.0, one scoping task ("retry a leased push when the remote branch moved: list the files to change"), 11 runs per side, each pair started together, the same bare setup on both sides except Pixel's appended agent prompt, **without the install hooks**. The motion note documents that three of the 22 runs read the demo's own files. This contamination and the obsolete wiring rule out using the gains as current-install marketing evidence.
-
-| Median over 11 runs | Without Pixel | With Pixel |
+| Duration | Without Pixel | With Pixel |
 | --- | --- | --- |
-| Wall time | 86.5 s | **60.7 s** (−30%) |
-| Tool-result volume, estimated tokens | 17,268 | **10,655** (−38%) |
-| Claude-reported API cost | $0.394 | **$0.274** (−30%) |
+| Wall time | 42.9 s | 47.6 s |
 
-`trace.ts` sums each tool result's UTF-8 bytes divided by four (rounded per result); it does not count model context or all input tokens. Cost is Claude Code's `total_cost_usd`, not a verified invoice. `runs.json` reproduces these medians; `meta.txt` records versions, task and prompt hash. The rendered replay is retained as an [historical asset](https://github.com/LivioGama/pixel/blob/main/docs/examples/pixel-agent-demo.mp4), with this context, rather than embedded on the home page.
+No speed gain on this task. This does not establish a general slowdown or speedup, or a token or cost result. The raw runs are held outside the repository; their date, exact model and Pixel versions, sample size and cost are not archived here. [Available protocol note](https://github.com/LivioGama/pixel/blob/main/docs/motion/README.md#the-agent-demo)
 
-Both sides named `push.rs` among their first two files in every run, and the Pixel side called Pixel in every run, 6 to 17 times. The spread is wide on both sides: 57 to 148 s without Pixel, 33 to 207 s with it. [Every run, its trace and the recording scripts](https://github.com/LivioGama/pixel/tree/main/docs/motion)
-
-### August A/B runs, earlier binary and doctrine
-
-The 2026-08-30 runs start at commit `865facf` and include subsequent fixes documented in the session log:
-
-- **About 30% faster** to scope a multi-file task. Two independent A/B designs agree: 31% and 29%.
-- **About 1.5 seconds slower** on a single lookup in the isolated run: the cost of reading Pixel's guidance before a one-shot answer, since the task never ran a Pixel command.
-- **Still slower** at recovering deleted code from history. Open work.
-
-Three runs per cell; the August tables use means for the clean-baseline and isolated runs (the first, impure-baseline table uses medians). They do not validate the current install or a general gain. The agents of that release also called Pixel less than its protocol asks: given the protocol alone, with no hooks, the agent barely ran a Pixel command and still scoped tasks 29% faster, so part of the gain is the protocol's guidance rather than its answers.
-
-[Agent A/B runs and their caveats](https://github.com/LivioGama/pixel/blob/main/docs/bench/measured-performance.md)
+Read volume, estimated tokens, elapsed duration and provider-reported cost are different quantities. Adoption rates with the current install hooks are not quantified here; inspect `pixel action-log` on your own sessions.
 
 ## Where a specialist wins
 
