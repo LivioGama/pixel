@@ -938,9 +938,9 @@ fn plan_renders_daemon_findings_as_json_and_compact() {
 /// `pixel plan` turns the daemon's `prereqs` evidence into blocking gates:
 /// an env read names the variable, an auth-gated file names the saved
 /// `auth`-tagged replay flow, gates render above the numbered list, and
-/// `--no-prereqs` omits them.
+/// `--no-gates` omits them.
 #[test]
-fn plan_lists_verification_gates_and_honors_no_prereqs() {
+fn plan_lists_verification_gates_and_honors_no_gates() {
     let dir = fixture("plan-prereqs");
     std::fs::write(
         dir.join("src/secrets.rs"),
@@ -1003,8 +1003,8 @@ fn plan_lists_verification_gates_and_honors_no_prereqs() {
     let done = pixel(&dir, &["plan", "--done", "1"]);
     assert!(done.status.success(), "{done:?}");
 
-    // --no-prereqs drops the block entirely.
-    let none = pixel(&dir, &["plan", "--query", "dead-code", "--no-prereqs", "."]);
+    // --no-gates drops the block entirely.
+    let none = pixel(&dir, &["plan", "--query", "dead-code", "--no-gates", "."]);
     assert!(none.status.success(), "{none:?}");
     let text = String::from_utf8(none.stdout).unwrap();
     assert!(!text.contains("Prerequisites"), "{text}");

@@ -46,7 +46,7 @@ mark it `--done`.
 `Prereqs` is **not** a `PlanQuery` variant. It runs after
 `run_plan_queries` over the file set the findings produced, so every plan —
 classified or explicit `--query` — gains preconditions without a new spelling.
-Opt-out: `--no-prereqs` (symmetric to `--no-verify`).
+Opt-out: `--no-gates` (symmetric to `--no-verify`).
 
 Scan scope, in order:
 
@@ -140,7 +140,7 @@ not "none needed"; the spec text and item wording both say so.
 | `crates/pixel-graph/src/store.rs` | `resolved_file_id` on `ImportRow`, `imports_from(file_id)` |
 | `crates/pixel-daemon/src/api.rs` | `op_plan` runs the post-pass, adds `"prereqs"` to the answer |
 | `crates/pixel/src/plan_cmd.rs` | `prereqs_of`, `auth_flow_names`, `gates_of`, render block, `gates` JSON field |
-| `crates/pixel/src/main.rs` | `--no-prereqs` plumbing + conflicts |
+| `crates/pixel/src/main.rs` | `--no-gates` plumbing + conflicts |
 | `crates/pixel-install/assets/pixel-agent-prompt.md` | gate semantics in Hard rules |
 | `ARCHITECTURE.md` | `pixel plan` row mentions the gates |
 | `changelog.d/plan-prereqs.added.md` | `**cli:** …` fragment |
@@ -167,5 +167,5 @@ not "none needed"; the spec text and item wording both say so.
 3. **Flow tags**: gate matching accepts `auth` and `login`; `auth` is the
    canonical tag the agent prompt documents.
 4. **Wire contract**: detection always runs daemon-side (≤50 files ×
-   ≤256 KiB reads only when a plan produced findings); `--no-prereqs` is a
+   ≤256 KiB reads only when a plan produced findings); `--no-gates` is a
    client-side render opt-out like `--no-verify`.
