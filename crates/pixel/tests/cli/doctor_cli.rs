@@ -150,8 +150,9 @@ fn doctor_list_should_name_every_check_with_its_fix() {
 
 /// After an upgrade the prompts `pixel install` deployed are the old
 /// release's, and agents keep reading them: every ordinary command names
-/// them in one stderr line, while `doctor`, which reports them itself, and a
-/// home where nothing was ever deployed stay quiet.
+/// them in one stderr line, while `doctor`, which reports them itself, a
+/// home where nothing was ever deployed, and the `pixel-dev` side build stay
+/// quiet.
 #[test]
 fn a_stale_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
     let (home, repo) = fixture("stale-prompt");
@@ -188,6 +189,26 @@ fn a_stale_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
         "{}",
         notes[0]
     );
+
+    // The same binary installed as the `pixel-dev` side build: the deployed
+    // prompts are the managed pixel's, and the `pixel install` the note
+    // names would move every repository's hooks onto this build.
+    let bin = home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let side_build = bin.join("pixel-dev");
+    std::fs::hard_link(env!("CARGO_BIN_EXE_pixel"), &side_build)
+        .or_else(|_| std::fs::copy(env!("CARGO_BIN_EXE_pixel"), &side_build).map(drop))
+        .unwrap();
+    let quiet = std::process::Command::new(&side_build)
+        .args(["action-log", "--limit", "1"])
+        .env("PIXEL_DAEMON_AUTO_START", "0")
+        .env("HOME", &*home)
+        .current_dir(crate::support::neutral_cwd())
+        .output()
+        .unwrap();
+    assert!(quiet.status.success(), "{quiet:?}");
+    let stderr = String::from_utf8_lossy(&quiet.stderr).into_owned();
+    assert!(!stderr.contains("pixel install"), "{stderr}");
 
     let report = doctor(&home, &repo, &["--only", "install.agent-prompt"]);
     let stderr = String::from_utf8_lossy(&report.stderr).into_owned();

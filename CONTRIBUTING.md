@@ -325,6 +325,11 @@ shadows the managed one. A binary that mise or Homebrew installed is
 refused (overwriting it leaves the manager listing a version that is gone):
 `pixel self-update --dev` installs the build as `~/.local/bin/pixel-dev`
 instead, and `--install-path <path>` overwrites a managed binary on purpose.
+The home install (Claude hooks, deployed prompts, Codex and pi config) stays
+the managed binary's: a side build runs `pixel-dev install --repo .` and
+`pixel-dev doctor . --fix --fail-on yellow --skip 'install.*'`, and touches
+the home install only for a change to what it writes, handing it back with
+`pixel install` afterwards (AGENTS.md, "Side build").
 
 ```bash
 pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-cli"
