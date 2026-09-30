@@ -1,0 +1,1 @@
+**release:** the Homebrew formula now carries Linux bottles (`arm64_linux`, `x86_64_linux`), the release's static binary as a keg, so `brew install LivioGama/tap/pixel` on Linux pours it without a C compiler instead of refusing with "No developer tools installed". macOS is unchanged. ([#PR](https://github.com/LivioGama/pixel/pull/PR))

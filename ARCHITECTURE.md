@@ -538,7 +538,8 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
     the checkout's `.pixel/actions.jsonl` alone, the `scripts/test-*.py`
     contract scripts (installer, gate runner, mutation pre-push, release
-    prepare, nightly mutants, mutants config, action pins, clean), the
+    prepare, Homebrew formula and Linux bottles, nightly mutants, mutants
+    config, action pins, clean), the
     pixel-retro lead-time contract (`.agents/skills/pixel-retro/test_lead_time.py`)
     and the Bun Pi-policy contract (`scripts/test-pi-policy.mjs`);
   - **Lint**: `cargo clippy --all-targets` with warnings denied, then
@@ -548,7 +549,9 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     **Dependency policy** (`cargo deny`).
 - Other workflows: `mutants.yml` (the `Mutants in diff` gate on every pull
   request touching `crates/`, sharded), `mutants-nightly.yml` (a whole-tree
-  rotation), `cross-build.yml` (the three release lanes), `release.yml`,
+  rotation), `cross-build.yml` (the three release lanes), `release.yml`
+  (which writes the formula and the Linux bottles with
+  `scripts/homebrew-formula.py`),
   `release-prepare-scope.yml` and `pages.yml` (the website).
 - Local agent validation uses targeted checks during editing and the full
   gates once a reviewable unit is ready (CONTRIBUTING.md, "Agent validation
