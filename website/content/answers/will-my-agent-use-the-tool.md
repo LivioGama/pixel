@@ -14,7 +14,7 @@ An agent is trained on the tools every repository has: search, read, the shell. 
 
 Pixel does not wait for the agent to discover it. `pixel install` puts its protocol into every session of the agents it supports, and on Claude Code it does so through lifecycle hooks, so the guidance is there on the first turn of every session. `pixel install --repo` adds a guard to one repository that flags untargeted reads of large files; it advises and never blocks.
 
-The difference shows between releases: the one behind the recorded demo was called in every run, where an earlier release, given its protocol alone, was barely called.
+The archived demo was called in every run with its prompt appended and no hooks; an earlier doctrine-only trial was barely called. These different historical protocols do not measure adoption with the current install hooks.
 
 ## Check it on your machine
 

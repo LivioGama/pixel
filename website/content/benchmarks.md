@@ -5,7 +5,7 @@ description: "Every number on the home page, with its method, its sample size an
 
 <!-- Figures come from docs/bench/; every section links its source. crates/pixel/tests/cli/docs_drift.rs reads this page, so every `pixel <command>` quoted here must exist. -->
 
-Every number below links to its method and raw data in the repository, with the scripts to re-run it on your own code. Losses sit next to wins.
+Figures below link to their available evidence and protocols. The newer Opus trial is a documented summary without archived raw runs; losses sit next to wins.
 
 <!-- Each command in this box was run on a fresh clone of a third-party repository (psf/requests) before it was written here: `pixel audit` and `pixel list-signatures` at requests 611c616 with pixel 0.5.1, the others with pixel 0.5.0. Re-run them when an output or a prerequisite changes. -->
 <aside class="measure" aria-labelledby="measure-it-on-your-own-code">
@@ -30,7 +30,7 @@ pixel list-signatures path/to/a/large/file.py
 
 On Requests' `src/requests/models.py` (1,184 lines) the report's last row read `full read 10365 tok, pixel answer 641 tok (-94%)`, in well under a second: the same two counts as that file's row in `pixel audit`. The two counts are `wc -c` of the file and of the outline, divided by four; the report itself is left out of them.
 
-**Your agent's sessions, after a few days.** `pixel token-savings` reads the local action log (`.pixel/actions.jsonl`) and reports what Pixel's answers spared, each part labelled `measured` or `estimated`:
+**Your agent's local operations, after a few days.** `pixel token-savings` reads `.pixel/actions.jsonl`: measured output volumes and versioned token/workflow estimates, each labelled. It does not observe all agent reads, provider usage, billed cost or end-to-end agent time:
 
 ```bash
 pixel token-savings
@@ -49,7 +49,7 @@ To turn the rate into a monthly figure for your team, the [savings estimate](../
 
 ## Reading code
 
-What reaches the agent's context when it needs to know what a file contains, measured on Pixel's own repository (138K lines of Rust), counting UTF-8 bytes divided by four. No second model reads the files instead.
+Historical read-volume comparison on Pixel's own repository (138K lines of Rust), first published at commit `632b3685` (exact binary version not recorded there). Counts are estimated tokens: UTF-8 bytes divided by four, not tokenizer or provider usage. No second model reads the files instead.
 
 | Scenario | Lines | Full reads | With Pixel | Saved |
 | --- | --- | --- | --- | --- |
@@ -58,15 +58,15 @@ What reaches the agent's context when it needs to know what a file contains, mea
 | Source and test pair | 5,289 | 48,978 tok | 1,890 tok | 96.1% |
 | Code-write context | 5,289 | 48,978 tok | 1,910 tok | 96.1% |
 
-This counts what the agent reads, not your invoice. `pixel token-savings` reports the same ratio from your own sessions: 41 to 83% across 798 operations on the maintainer's machine. The scenarios replay the shape of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark, which reaches a similar ratio by rerouting reads through a paid second model. [Method and figures, as first published](https://github.com/LivioGama/pixel/blob/632b3685a97e941476cb42aa75333b79f0ed8955/README.md#-token-savings--measured-no-second-model)
+These are file/answer volumes, not an invoice or an end-to-end task comparison. The historical maintainer log reported 41 to 83% across 798 operations; its snippet-versus-candidate-pool ratio is a different baseline, not a measured reduction in session tokens or cost. The scenarios replay the shape of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark, which reaches a similar ratio by rerouting reads through a paid second model. [Method and figures, as first published](https://github.com/LivioGama/pixel/blob/632b3685a97e941476cb42aa75333b79f0ed8955/README.md#-token-savings--measured-no-second-model)
 
 ### Well-known files
 
-The same measurement on large files of popular projects, each pinned to a commit: the whole file against `pixel list-signatures` on it, with pixel 0.5.0 in September 2026. The home page's token wall shows the Transformers row: read whole, that one file takes {{% read-savings "window" %}}, before the agent has written anything. The agent reads {{% read-savings "summary" %}}; the files with the most signatures per line (VS Code's text model, CPython's `typing.py`) save the least.
+The same measurement on large files of popular projects, each pinned to a commit: the whole file against `pixel list-signatures` on it, with pixel 0.5.0 in September 2026. The home page's token wall shows the Transformers row: read whole, that one file takes {{% read-savings "window" %}}, before the agent has written anything. The signatures output is {{% read-savings "summary" %}} in estimated tokens (UTF-8 bytes ÷ 4, rounded down); the files with the most signatures per line (VS Code's text model, CPython's `typing.py`) save the least.
 
 {{% read-savings %}}
 
-React's work loop is left out of the range: it is written in Flow, and the JavaScript grammar lists 20 of its 125 top-level functions, so its 99.4% measures a parse failure, not a saving. The Signatures column is the check for that on every row: each kept file lists its module- and class-level definitions (Transformers: 90 for 89 `def` and `class` lines). Re-run it with `scripts/bench-read-savings.sh`. [Method and raw output](https://github.com/LivioGama/pixel/blob/main/docs/bench/read-savings.md)
+React's work loop is left out of the range: it is written in Flow, and the JavaScript grammar lists 20 of its 125 top-level functions, so its 99.4% measures a parse failure, not a saving. The Signatures column is the check for that on every row: signature counts provide a coarse coverage check, not proof of complete parsing; the Python counts are compared with module- and class-level definitions (Transformers: 90 for 89 `def` and `class` lines). Re-run it with `scripts/bench-read-savings.sh`. [Method and raw output](https://github.com/LivioGama/pixel/blob/main/docs/bench/read-savings.md)
 
 ## Cold start on a large repository
 
@@ -88,7 +88,7 @@ The jobs both tools do: 29 blast-radius cases on four repositories in Rust, Type
 | Callers found (recall, 29 cases) | 0.86 | 0.84 |
 | Median time per answer | **153 ms** | 432 ms |
 | Mean answer size | **4.5 KB** | 11.0 KB |
-| Context cost on every turn | **~4,160 tokens** | ~19,700 tokens |
+| Context cost on every turn | **~4,160 estimated tokens** | ~19,700 tokens |
 | Cold index of Pixel's repository | **9.3 s, 8.6 MB** | 28.7 s, 184 MB |
 | Git history and Git operations | **Yes** | No |
 | Cypher queries, taint analysis, API route maps | No | **Yes** |
@@ -99,25 +99,35 @@ Recall is a tie at this sample size: Pixel finds every caller in Rust and TypeSc
 
 ## On whole agent tasks
 
-Claude Code on real tasks in this repository, with Pixel and without, against a vanilla agent with no rules or hooks.
+These are historical or limited trials, not estimates for the current installation. Read volume, estimated tokens, elapsed duration and provider-reported cost are different quantities.
 
-The home page's demo, September 2026: Claude Sonnet 5, Pixel 0.5.0, one scoping task ("retry a leased push when the remote branch moved: list the files to change"), 11 runs per side, each pair started together, the same bare setup on both sides except Pixel's agent prompt.
+### Newer trial with install hooks: no gain on this task
+
+[The motion protocol note](https://github.com/LivioGama/pixel/blob/main/docs/motion/README.md#the-agent-demo) reports an Opus medium re-recording with the hooks: **42.9 s without Pixel, 47.6 s with it**, medians on the same scoping task. It found no speed gain on that task. The raw runs are held outside the repository; their date, exact model and Pixel versions, sample size and cost are not archived here. This summary cannot establish a general slowdown or speedup, nor a token or cost result. Changing both model and wiring prevents attributing the difference to hooks alone.
+
+### Archived Sonnet demo, prompt only
+
+Recorded 2026-09-23 (repository `e585b69`, binary commit `aaa1a3b`): Claude Sonnet 5, Pixel 0.5.0, one scoping task ("retry a leased push when the remote branch moved: list the files to change"), 11 runs per side, each pair started together, the same bare setup on both sides except Pixel's appended agent prompt, **without the install hooks**. The motion note documents that three of the 22 runs read the demo's own files. This contamination and the obsolete wiring rule out using the gains as current-install marketing evidence.
 
 | Median over 11 runs | Without Pixel | With Pixel |
 | --- | --- | --- |
 | Wall time | 86.5 s | **60.7 s** (−30%) |
-| Tokens read into context | 17,268 | **10,655** (−38%) |
-| API cost | $0.394 | **$0.274** (−30%) |
+| Tool-result volume, estimated tokens | 17,268 | **10,655** (−38%) |
+| Claude-reported API cost | $0.394 | **$0.274** (−30%) |
+
+`trace.ts` sums each tool result's UTF-8 bytes divided by four (rounded per result); it does not count model context or all input tokens. Cost is Claude Code's `total_cost_usd`, not a verified invoice. `runs.json` reproduces these medians; `meta.txt` records versions, task and prompt hash. The rendered replay is retained as an [historical asset](https://github.com/LivioGama/pixel/blob/main/docs/examples/pixel-agent-demo.mp4), with this context, rather than embedded on the home page.
 
 Both sides named `push.rs` among their first two files in every run, and the Pixel side called Pixel in every run, 6 to 17 times. The spread is wide on both sides: 57 to 148 s without Pixel, 33 to 207 s with it. [Every run, its trace and the recording scripts](https://github.com/LivioGama/pixel/tree/main/docs/motion)
 
-The August A/B runs, on an earlier release:
+### August A/B runs, earlier binary and doctrine
+
+The 2026-08-30 runs start at commit `865facf` and include subsequent fixes documented in the session log:
 
 - **About 30% faster** to scope a multi-file task. Two independent A/B designs agree: 31% and 29%.
 - **About 1.5 seconds slower** on a single lookup in the isolated run: the cost of reading Pixel's guidance before a one-shot answer, since the task never ran a Pixel command.
 - **Still slower** at recovering deleted code from history. Open work.
 
-Three runs per cell, so these are directions, not decimals. The agents of that release also called Pixel less than its protocol asks: given the protocol alone, with no hooks, the agent barely ran a Pixel command and still scoped tasks 29% faster, so part of the gain is the protocol's guidance rather than its answers.
+Three runs per cell; the August tables use means for the clean-baseline and isolated runs (the first, impure-baseline table uses medians). They do not validate the current install or a general gain. The agents of that release also called Pixel less than its protocol asks: given the protocol alone, with no hooks, the agent barely ran a Pixel command and still scoped tasks 29% faster, so part of the gain is the protocol's guidance rather than its answers.
 
 [Agent A/B runs and their caveats](https://github.com/LivioGama/pixel/blob/main/docs/bench/measured-performance.md)
 

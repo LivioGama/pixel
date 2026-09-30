@@ -46,8 +46,8 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   count of the rest, from `data/agents.toml`, which the Compatibility grid
   also draws, each mark linking to its `/for/<slug>/` page), then a title
   that names the pain and the mechanism and a lede with one figure only,
-  the kept files' median saving: the task-level figures wait for the
-  numbers band, so the fold never shows three numbers for one idea. Under the call to action (the brew command, and beside it the
+  the kept files' median byte-volume reduction (tokens estimated as bytes ÷ 4).
+  The numbers band uses only that file/outline comparison. Under the call to action (the brew command, and beside it the
   root README's "Let your agent install it" prompt, `$agentPrompt`, which
   the Install terminal's "Your agent" tab copies too: keep the two texts in
   step; no star button, the nav links GitHub) a quiet line states what a
@@ -77,20 +77,14 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   choice. Verify (`#your-number`) hands the proof to the
   visitor: `pixel audit`, `pixel list-signatures` and `pixel token-savings`,
   each beside the figure it printed (the first two restate "Measure it on
-  your own code" in `content/benchmarks.md`). Every figure in the band is measured against the same agent
-  without Pixel, the only baseline a first-time visitor can read; the
-  head-to-head with GitNexus stays in Alternatives. Proof pairs the time
-  saved with the answer both sides reached (the same file in all 22 runs),
-  and keeps the losses to one line that links their runs, the wider spread
-  of the Pixel runs included. Its title says "a real agent task", not
-  "whole agent tasks": the measured run is one scoping task. The optional
+  your own code" in `content/benchmarks.md`). The band compares whole files with signatures, not agent sessions.
+  Proof reports the newer Opus-with-hooks summary (no gain on its task) and
+  links the archived prompt-only Sonnet demo with its contamination caveat. The optional
   `pixel classify` has a dedicated Decisions section on the home and its
   fuller accuracy-and-latency comparison on `/benchmarks/`; it remains an
   optional add-on, separate from the local index. The scope board
   draws one pad per indexed file and routes a trace from each P0 pad to its
-  file name. The job tabs load each video only when opened, and the agent
-  demo in "Measured on a real agent task" plays once when it scrolls into
-  view. Videos never autoplay under reduced motion: the poster shows the
+  file name. The job tabs load each video only when opened, while the historical agent replay is no longer embedded on the home page. Videos never autoplay under reduced motion: the poster shows the
   finished state and the controls are there.
 - Under the four "How it works" cards, the cold start figure: the time
   from nothing to a full index of a large repository, beside a track of
@@ -115,7 +109,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   missing Handjet leaves the titles static. The hero title keeps its own
   `materialize` animation, which follows the splash.
 - The "Alternatives" and "Teams" chapters restate `content/benchmarks.md`
-  (GitNexus, the well-known files, the demo runs). Alternatives keeps, in
+  (GitNexus, the well-known files, agent-trial limits). Alternatives keeps, in
   the matrix, the row where each other tool wins; Teams gives each role (developer, lead,
   harness engineer, CTO) three proofs, each a number or a command that
   exists. Change a figure on the benchmarks page first, then in
@@ -225,9 +219,10 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   together). Nothing is sent or stored: the share link carries the values in
   its fragment (`#d=10&s=4&r=5&t=10000&p=3&w=21`, the inputs' `key`s, so
   never rename one), and the README badge is a static shields.io URL built
-  from the median. The whole-task figures beside the result (−30% API cost,
-  −38% tokens) restate the "On whole agent tasks" table of `benchmarks.md`:
-  change them there first, then here. The page is labelled an estimate
+  from the median. No historical agent gain calibrates the calculation. It assumes each counted
+  full read is replaced by signatures. Dollars value hypothetical input reduction
+  at the chosen uncached price, not invoice savings; the observed range is not a
+  confidence interval. The page links the agent trials' limitations instead. The page is labelled an estimate
   everywhere, including `static/llms.txt`; it is linked from the home's
   CTO card, `/benchmarks/`'s "Measure it on your own code" box and the
   footer, not from the nav.

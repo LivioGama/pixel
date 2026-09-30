@@ -19,12 +19,16 @@ renders.
 
 The six `Pixel*` compositions render `ComparisonScene` (`src/ComparisonScene.tsx`)
 with one spec from `src/PixelComparison.tsx`, at 1600×1000, 30 fps, 8 s.
+They illustrate workflows, not timed comparisons. The accounting diagram's
+"measured" label refers to local volumes; tokens and avoided-round-trip times
+are estimates, not billed savings. The website captions state that distinction.
 
 ## The agent demo
 
 `AgentDemo` replays two recorded Claude Code runs side by side on one clock:
-the same task, the same model and effort, the same bare setup, one side with
-the hooks `pixel install` writes. Nothing in it is written by hand: every
+the same task and model in the archived Sonnet recording, with an appended
+Pixel prompt on one side, without the install hooks. The script now uses
+the hooks `pixel install` writes; that is a different protocol. Nothing in it is written by hand: every
 command, time and token count comes from a recording.
 
 1. `scripts/record-demo.sh <dir> [reps] [model]` (Opus at medium effort by
@@ -40,18 +44,23 @@ command, time and token count comes from a recording.
    best) as `src/demo/{vanilla,pixel}.json`, writes every run to
    `src/demo/runs.json` and copies the recording's `meta.txt` (commit,
    model, CLI and Pixel versions, prompt hash, task).
-3. The summary at the end shows the median of each metric over all runs, and
+3. Tool-result tokens are estimates (each result's UTF-8 bytes ÷ 4, rounded),
+   not total model context. Cost is Claude Code's `total_cost_usd`, not an
+   independently checked invoice. The summary at the end shows the median of each metric over all runs, and
    its headline follows those medians rather than assuming a win.
 
-The demo published today predates this protocol: Claude Sonnet 5, Pixel
+The archived demo (no longer embedded on the landing page) predates this protocol: Claude Sonnet 5, Pixel
 0.5.0 with its agent prompt appended instead of its hooks, in the source
 tree itself (`src/demo/meta.txt`). Three of its 22 runs read the demo's own
 files, which is why the script now works in a separate worktree. An Opus
 medium re-recording with the hooks gave no gain on this task (median 42.9 s
 without Pixel, 47.6 s with it), and is kept outside the repository with the
-earlier raw runs, pending a task where search dominates.
+earlier raw runs, as a limited summary, not replaced by a task selected for a favourable result.
+The exact versions, date and sample size of that newer trial are not archived
+here. It establishes neither a general slowdown nor a speedup.
 
-Re-record after a release that changes the agent prompt or the commands it
+Any future re-recording should keep the task and report all outcomes, not select
+a task for a favourable result. Re-record after a release that changes the agent prompt or the commands it
 names, with that release installed and `REF` set to its tag, and update
 `recorded` and `modelName` in `src/Root.tsx`.
 

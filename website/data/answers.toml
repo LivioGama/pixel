@@ -37,11 +37,11 @@
 [[answer]]
 slug = "why-agents-read-whole-files"
 gist = "its read tool returns files, not answers; an index answers what a file contains in a fraction of the tokens."
-short = '''Because its read tool returns files, not answers: to learn what a file contains, the agent opens all of it. On {big.owner} {big.lines}-line {big.file} that read costs {big.full} tokens, and <code>pixel list-signatures</code> answers the same question in {big.pixel}. Across {kept.count} well-known files the agent reads {kept.range} less, median {kept.median}.'''
+short = '''Because its read tool returns files, not answers: to learn what a file contains, the agent opens all of it. On {big.owner} {big.lines}-line {big.file} the whole file is {big.full} estimated tokens versus {big.pixel} for <code>pixel list-signatures</code> (UTF-8 bytes divided by four, Pixel 0.5.0). Across {kept.count} well-known files the agent reads {kept.range} less, median {kept.median}.'''
 bench = ["well-known-files", "reading-code"]
 limits = '''The figure counts what reaches the agent's context, not your invoice. The files with the most signatures per line save the least, the low end of the range: VS Code's text model and CPython's <code>typing.py</code>. A file the graph cannot parse lists too few signatures and overstates the saving, which is why React's work loop, written in Flow, is left out of the range. When the agent edits, it still reads the lines it changes.'''
 related = ["vs/grep/", "vs/shunt/", "savings/"]
-checked = 2026-09-25
+checked = 2026-09-30
 
   [[answer.row]]
   label = "Full read of {big.file}"
@@ -90,41 +90,29 @@ checked = 2026-09-25
 
 [[answer]]
 slug = "reduce-claude-code-tokens"
-gist = "cut the whole-file reads: on one scoping task, 11 runs per side, Claude Code read 38% fewer tokens with Pixel."
-short = '''Cut the reads that bring whole files into context: let the agent ask an index what a file contains, who calls a function and which files a task touches. On one scoping task, 11 runs per side, Claude Code with Pixel read 38% fewer tokens (median 10,655 against 17,268) and cost 30% less. <code>pixel token-savings</code> then reports what it spared on your own sessions.'''
-bench = ["on-whole-agent-tasks", "reading-code"]
-limits = '''One task in one repository, so read it as a direction: the spread is wide on both sides, 57 to 148 s without Pixel and 33 to 207 s with it. In the August runs Pixel was about 1.5 seconds slower on a single lookup, the cost of reading its guidance, and it is still slower at recovering deleted code from history. Other levers (a shorter <code>CLAUDE.md</code>, fewer MCP servers, compacting sooner) are not measured here.'''
+gist = "compare whole-file reads with signatures; read-volume estimates do not establish session cost savings."
+short = '''Ask for an outline before reading a whole file. On {kept.count} pinned large files with Pixel 0.5.0, signatures were {kept.range} smaller than full reads, median {kept.median}, with tokens estimated from UTF-8 bytes divided by four. This does not measure total session tokens or billed cost.'''
+bench = ["well-known-files", "on-whole-agent-tasks"]
+limits = '''Edits still need code bodies. The newer Opus medium trial with hooks found no speed gain on its scoping task; raw runs are outside the repository. The archived Sonnet demo used an appended prompt without hooks and included reads of its own traces. Neither validates current-install token or cost savings.'''
 related = ["for/claude-code/", "savings/", "vs/shunt/"]
-checked = 2026-09-25
+checked = 2026-09-30
 
   [[answer.row]]
-  label = "Tokens read into context, median"
-  value = "17,268 without Pixel, 10,655 with it (−38%)"
+  label = "File versus signatures, estimated tokens"
+  value = "{kept.range} less, median {kept.median}"
 
   [[answer.row]]
-  label = "API cost, median"
-  value = "$0.394 without, $0.274 with (−30%)"
-
-  [[answer.row]]
-  label = "Wall time, median"
-  value = "86.5&nbsp;s without, 60.7&nbsp;s with (−30%)"
-
-  [[answer.row]]
-  label = "Sample"
-  value = "11 runs per side, Claude Sonnet 5, Pixel 0.5.0"
-
-  [[answer.row]]
-  label = "<code>pixel token-savings</code> on the maintainer's sessions"
-  value = "41 to 83% across 798 operations"
+  label = "Newer Opus medium trial, median duration"
+  value = "42.9 s without Pixel, 47.6 s with hooks"
 
 [[answer]]
 slug = "grep-or-code-index"
 gist = "grep finds the line; the whole-file read after it is the cost an index removes."
-short = '''Both, for different steps. Grep finds the line with nothing to build; the cost is the whole-file read that follows, which an index replaces with the file's signatures: {big.full} tokens against {big.pixel} on {big.owner} {big.file}. For "who calls this", grep's matches are the ground truth our blast-radius benchmark scores against, and it returns every line that names the function, callers or not.'''
+short = '''Both, for different steps. Grep finds the line with nothing to build; the cost is the whole-file read that follows, which an index replaces with the file's signatures: {big.full} estimated tokens against {big.pixel} on {big.owner} {big.file} (UTF-8 bytes divided by four, Pixel 0.5.0). For "who calls this", grep's matches are the ground truth our blast-radius benchmark scores against, and it returns every line that names the function, callers or not.'''
 bench = ["well-known-files", "against-gitnexus", "on-whole-agent-tasks"]
 limits = '''Grep needs no index and runs on any file the moment it exists; Pixel builds one in <code>.pixel/</code> first. On a single lookup the August runs found Pixel about 1.5 seconds slower. Pixel's graph misses callers grep sees: 0.86 of them overall, 0.56 on one Ruby repository. For a question in plain English, neither is the best tool: semble is.'''
 related = ["vs/grep/", "vs/semble/", "vs/language-server/"]
-checked = 2026-09-25
+checked = 2026-09-30
 
   [[answer.row]]
   label = "Finds the matching line"
@@ -144,12 +132,12 @@ checked = 2026-09-25
 
 [[answer]]
 slug = "will-my-agent-use-the-tool"
-gist = "only if the tool is in every session: with Pixel 0.5.0, Claude Code called it in 11 runs out of 11, 6 to 17 times each."
-short = '''Only if the tool is in front of it every session: agents are trained on grep and fall back to it. With Pixel 0.5.0 wired by <code>pixel install</code>, Claude Code called Pixel in 11 runs out of 11, 6 to 17 times each. An earlier release, given its protocol alone with no hooks, was barely called at all.'''
+gist = "the archived prompt-only demo called Pixel in 11 runs out of 11; current-hook adoption is not quantified here."
+short = '''Only if the tool is in front of it every session: agents are trained on grep and fall back to it. In the archived Pixel 0.5.0 demo with its prompt appended without hooks, Claude Code called Pixel in 11 runs out of 11, 6 to 17 times each. An earlier release, given its protocol alone with no hooks, was barely called at all.'''
 bench = ["on-whole-agent-tasks"]
-limits = '''One agent, Claude Code, on one task: how often another agent calls Pixel is not measured. The per-repository guard advises and never blocks, so an agent can still read a whole file. Part of the gain is the protocol's guidance rather than its answers: the earlier release that was barely called still scoped tasks 29% faster.'''
+limits = '''An archived prompt-only demo on one task, including reads of its own traces: adoption with current hooks or another agent is not measured. The per-repository guard advises and never blocks, so an agent can still read a whole file. Part of the gain is the protocol's guidance rather than its answers: the earlier release that was barely called still scoped tasks 29% faster.'''
 related = ["for/", "for/claude-code/"]
-checked = 2026-09-25
+checked = 2026-09-30
 
   [[answer.row]]
   label = "Runs in which the agent called Pixel"

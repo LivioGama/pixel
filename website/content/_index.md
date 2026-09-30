@@ -1,4 +1,4 @@
 ---
 title: "Pixel"
-description: "A local control layer that helps coding agents spend less time on simple repository work."
+description: "A local code index for coding agents: query signatures, callers, task scope and Git history. File/outline volume comparisons and agent-trial limits are documented."
 ---

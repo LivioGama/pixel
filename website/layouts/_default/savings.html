@@ -20,7 +20,7 @@
   {{ range .Params.inputs }}{{ $hash = printf "%s%s%s=%v" $hash (cond (eq $hash "") "#" "&") .key .default }}{{ end }}
   {{ $link := printf "%s%s" .Permalink $hash }}
   {{ $tokMid := partial "savings-format.html" (dict "kind" "tok" "v" $mid) }}
-  {{ $badgeMsg := printf "%s tokens a month not read" $tokMid }}
+  {{ $badgeMsg := printf "%s estimated tokens a month omitted" $tokMid }}
   {{ $badge := printf "[![Pixel estimate: %s](https://img.shields.io/badge/Pixel%%20estimate-%s-22c55e)](%s)" $badgeMsg (replace (replace $badgeMsg " " "%20") "," "%2C") $link }}
   {{ $fmtFull := dict "fullMin" (lang.FormatNumberCustom 0 $r.fullMin) "fullMax" (lang.FormatNumberCustom 0 $r.fullMax) }}
   {{ $bench := "benchmarks/" | relURL }}
@@ -48,9 +48,9 @@
       <section class="est__result" aria-labelledby="est-result-title">
         <p class="est__tag" id="est-result-title">{{ partial "icon.html" (dict "name" "chart" "size" 12) }}Estimate, per month</p>
         <div class="est__figures" aria-live="polite" aria-atomic="true">
-          <p class="est__big"><strong data-out="usd-mid">{{ partial "savings-format.html" (dict "kind" "usd" "v" $usd.mid) }}</strong> <span>of input tokens not billed</span></p>
+          <p class="est__big"><strong data-out="usd-mid">{{ partial "savings-format.html" (dict "kind" "usd" "v" $usd.mid) }}</strong> <span>modelled input value, not invoice savings</span></p>
           <p class="est__range">range <span data-out="usd-lo">{{ partial "savings-format.html" (dict "kind" "usd" "v" $usd.lo) }}</span> to <span data-out="usd-hi">{{ partial "savings-format.html" (dict "kind" "usd" "v" $usd.hi) }}</span></p>
-          <p class="est__big est__big--tok"><strong data-out="tok-mid">{{ $tokMid }}</strong> <span>tokens your agents do not read</span></p>
+          <p class="est__big est__big--tok"><strong data-out="tok-mid">{{ $tokMid }}</strong> <span>estimated tokens omitted if outlines replace full reads</span></p>
           <p class="est__range">range <span data-out="tok-lo">{{ partial "savings-format.html" (dict "kind" "tok" "v" $lo) }}</span> to <span data-out="tok-hi">{{ partial "savings-format.html" (dict "kind" "tok" "v" $hi) }}</span></p>
         </div>
         {{/* Coral: what whole-file reads cost; green: what Pixel returns instead, at the median rate. The ratio is the rate, so only the labels follow the inputs. */}}
@@ -59,8 +59,7 @@
           <div class="est__bar est__bar--px" style="--w: {{ sub 100 $r.median }}%"><i></i><span>Through Pixel: <b data-out="tok-px">{{ partial "savings-format.html" (dict "kind" "tok" "v" (sub $full $mid)) }}</b></span></div>
         </div>
         <p class="est__rate">At the {{ $r.count }} well-known files' rate: <strong>{{ lang.FormatNumber 1 $r.median }}%</strong> median, {{ $r.min }} to {{ $r.max }}% (<a class="link" href="{{ $bench }}#well-known-files">the files</a>).</p>
-        {{/* The trap: the rate is per large-file read, never per session. The whole-task figures are the "On whole agent tasks" table of content/benchmarks.md: change them there first. */}}
-        <p class="est__scope">This rate is for reading one large file, not for a whole session, which also spends tokens on prompts, edits, tests and answers. On a whole agent task we measured <strong>&minus;30% API cost</strong> and &minus;38% tokens read, the median of 11 runs per side (<a class="link" href="{{ $bench }}#on-whole-agent-tasks">the runs</a>).</p>
+        <p class="est__scope">This scenario applies the archived Pixel 0.5.0 file/outline byte-volume ratios, converted to estimated tokens, to your inputs. It assumes every counted full read is replaced by signatures. Subsequent body reads, prompts, edits, tests and answers are outside the calculation. Dollars value that hypothetical input reduction at your chosen uncached price; they are not measured billed savings. Min and max are the observed files' range, not a confidence interval. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">Agent trials and their limits</a></p>
 
         <details class="est__math">
           <summary>Show the math</summary>
@@ -183,7 +182,7 @@
 
         var hash = fragment(v);
         var link = data.page + hash;
-        var msg = fmtTok(saved.mid) + ' tokens a month not read';
+        var msg = fmtTok(saved.mid) + ' estimated tokens a month omitted';
         var shield = function (s) { return encodeURIComponent(s.replace(/-/g, '--').replace(/_/g, '__')); };
         var badge = '[![Pixel estimate: ' + msg + '](https://img.shields.io/badge/' + shield('Pixel estimate') + '-' + shield(msg) + '-22c55e)](' + link + ')';
         put('link', link); copyText('link', link);

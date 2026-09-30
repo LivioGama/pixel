@@ -12,10 +12,10 @@ Before Claude Code edits anything, it finds out where to work: it searches, open
 
 ## What changes with an index
 
-With Pixel wired in, the agent asks instead of opening: `pixel scope-task` for the files a task touches, `pixel list-signatures` for what a file contains, `pixel who-calls` for the callers of a function. Each answer is fitted to a budget and says whether it is complete. On the demo's scoping task both sides named the file to change among their first two in every run, so the saving did not come from missing it.
+With Pixel wired in, the agent asks instead of opening: `pixel scope-task` for the files a task touches, `pixel list-signatures` for what a file contains, `pixel who-calls` for the callers of a function. Each answer is fitted to a budget and says whether it is complete. An outline locates definitions; an edit still needs their bodies. The archived demo does not validate token or cost savings for the current hooks.
 
 `pixel install` wires it into Claude Code (lifecycle hooks in `~/.claude/settings.json`), and `pixel install --repo` adds a guard in the repository that flags untargeted reads of large files. The [Claude Code page](../../for/claude-code/) lists every file it writes and how to remove it.
 
 ## Measure it on your sessions
 
-`pixel token-savings` reads the local action log and reports what Pixel's answers spared, each part labelled `measured` or `estimated`. Run it after a few days of normal work; it tells you more about your code than any benchmark of ours.
+`pixel token-savings` reads the local action log and reports measured Pixel output volumes and versioned workflow estimates. It does not observe all agent reads, model context or billed cost. Run it after a few days of normal work; it tells you more about your code than any benchmark of ours.

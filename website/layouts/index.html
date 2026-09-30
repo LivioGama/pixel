@@ -32,9 +32,9 @@
         {{ $rest := sub (len $agents) (len $named) }}
         <span>For {{ range $i, $a := $named }}{{ if $i }}, {{ end }}{{ $a.name }}{{ end }} and <a class="link" href="#agents" aria-label="{{ $rest }} more coding agents">{{ $rest }} more</a></span>
       </p>
-      {{/* The title names the pain and the mechanism, and the lede carries one figure only: the kept files' median saving (partials/kept-rates.html), the number the wall beside it illustrates and the Tokens meter rounds. The task-level figures (−30% time and cost) wait for the numbers band and the Proof chapter, so the fold does not show three numbers for one idea. */}}
+      {{/* The title names the pain and the mechanism, and the lede carries one figure only: the kept files' median saving (partials/kept-rates.html), the number the wall beside it illustrates and the Tokens meter rounds. Agent timings are discussed separately in Proof; the headline is a file/outline volume comparison. */}}
       <h1 class="hero__title hero__title--long"><span>Your agent reads whole files.</span> <span class="glow">Pixel hands it the map.</span></h1>
-      <p class="hero__lede"><strong>Every session starts cold, so your coding agent opens file after file to find its way.</strong> Pixel is a local code index it asks instead: a median {{ lang.FormatNumber 1 $r.median }}% fewer tokens to learn what a large file holds, and nothing leaves your machine.</p>
+      <p class="hero__lede"><strong>Every session starts cold, so your coding agent opens file after file to find its way.</strong> Pixel is a local code index it asks instead: {{ lang.FormatNumber 1 $r.median }}% less read volume at the median across {{ $r.count }} pinned large files (whole file versus signatures, Pixel 0.5.0), and nothing leaves your machine.</p>
       <div class="hero__cta">
         <div class="cmd">
           <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
@@ -54,15 +54,15 @@
         <div class="wall__meter">
           <p class="wall__state" aria-hidden="true"><span data-wall-state>Without Pixel</span></p>
           <p class="wall__label" data-wall-label aria-hidden="true">Your agent reading {{ $big.owner }} {{ path.Base $big.path }}, all {{ lang.FormatNumberCustom 0 $big.lines }} lines</p>
-          <p class="wall__count" aria-hidden="true"><span data-wall-count>{{ lang.FormatNumberCustom 0 $big.full }}</span> tokens <span class="wall__delta">&minus;{{ math.Floor $big.saved }}%</span></p>
-          <p class="sr-only" aria-live="polite" data-wall-announce>Your agent reading {{ $big.owner }} {{ path.Base $big.path }}, all {{ lang.FormatNumberCustom 0 $big.lines }} lines: {{ lang.FormatNumberCustom 0 $big.full }} tokens. The same question through Pixel: {{ lang.FormatNumberCustom 0 $big.pixel }} tokens.</p>
+          <p class="wall__count" aria-hidden="true"><span data-wall-count>{{ lang.FormatNumberCustom 0 $big.full }}</span> estimated tokens <span class="wall__delta">&minus;{{ math.Floor $big.saved }}%</span></p>
+          <p class="sr-only" aria-live="polite" data-wall-announce>Your agent reading {{ $big.owner }} {{ path.Base $big.path }}, all {{ lang.FormatNumberCustom 0 $big.lines }} lines: {{ lang.FormatNumberCustom 0 $big.full }} estimated tokens. Signatures through Pixel: {{ lang.FormatNumberCustom 0 $big.pixel }} estimated tokens. UTF-8 bytes divided by four, Pixel 0.5.0.</p>
         </div>
         <div class="wall__grid" aria-hidden="true"></div>
         <figcaption class="wall__caption">
-          <span class="key key--waste">{{ lang.FormatNumberCustom 0 $big.full }} tokens reading the file</span>
-          <span class="key key--kept">{{ lang.FormatNumberCustom 0 $big.pixel }} tokens asking Pixel</span>
+          <span class="key key--waste">{{ lang.FormatNumberCustom 0 $big.full }} estimated tokens, whole file</span>
+          <span class="key key--kept">{{ lang.FormatNumberCustom 0 $big.pixel }} estimated tokens, signatures</span>
           {{/* One file is an example, so the caption gives the spread over every kept file, with the link to the table and the excluded one. */}}
-          <span class="wall__unit">One square is 25 tokens. Across <a class="link" href="{{ $bench }}#well-known-files">{{ $r.count }} well-known files</a>, the agent reads {{ lang.FormatNumber 1 ($r.min) }} to {{ lang.FormatNumber 1 ($r.max) }}% less (median {{ lang.FormatNumber 1 $r.median }}%).</span>
+          <span class="wall__unit">One square is 25 estimated tokens (UTF-8 bytes ÷ 4), not billed tokens. Across <a class="link" href="{{ $bench }}#well-known-files">{{ $r.count }} well-known files</a>, the outline is {{ lang.FormatNumber 1 ($r.min) }} to {{ lang.FormatNumber 1 ($r.max) }}% less (median {{ lang.FormatNumber 1 $r.median }}%).</span>
           <button class="wall__replay" type="button" data-wall-replay hidden>Replay</button>
         </figcaption>
       </figure>
@@ -131,12 +131,9 @@
 
     {{/* ---------- numbers ---------- */}}
     <section class="numbers wrap" id="results" aria-label="Measured results">
-      {{/* Each meter draws the ratio its number states on a 20-square row: the baseline filled in dim cells, Pixel's in green. Every baseline is the same agent without Pixel, the one comparison a first-time visitor can read; the head-to-head with GitNexus lives in the Alternatives chapter. The outcome leads, as in the hero's lede, and the mechanism (Tokens, one large file) closes the row. Agent time, Context and API cost, kept together since the last two refer to the first one's task, are the "On whole agent tasks" table of content/benchmarks.md (60.7 s against 86.5 s, 10,655 against 17,268 tokens, $0.274 against $0.394): change them there first. */}}
+      {{/* File/outline volume only; rates come from the archived kept rows. */}}
       {{ $stats := slice
-        (dict "tag" "Agent time" "value" "&minus;30%" "text" "for an agent to scope a multi-file task" "base" "no Pixel" "before" 20 "after" 14)
-        (dict "tag" "Context" "value" "&minus;38%" "text" "tokens read into context on that same task" "base" "no Pixel" "before" 20 "after" 12)
-        (dict "tag" "API cost" "value" "&minus;30%" "text" "billed for the same task, same model" "base" "no Pixel" "before" 20 "after" 14)
-        (dict "tag" "Tokens" "value" "&minus;95%" "text" "to learn what a large file contains" "base" "full read" "before" 20 "after" 1)
+        (dict "tag" "Read volume" "value" (printf "&minus;%.1f%%" $r.median) "text" "median reduction: whole file versus signatures, eight pinned files" "base" "full read" "before" 20 "after" 1)
       }}
       <ul class="numbers__list" data-reveal="stagger" data-count-up>
         {{ range $stats }}
@@ -160,25 +157,10 @@
     <section class="section wrap" id="tasks" aria-labelledby="tasks-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Proof</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="tasks-title">Measured on <span class="glow">a real agent task.</span></h2>
-        <p>Fast answers do not make a fast agent on their own. So we timed Claude Code scoping a real multi-file change in this repository, with Pixel and against a vanilla agent with no rules or hooks.</p>
+        <h2 id="tasks-title">Less to read. <span class="glow">Task outcomes vary.</span></h2>
+        <p>Our main evidence compares a whole file with its signatures on eight pinned large files, using Pixel 0.5.0. The volume is measured in bytes; token counts are estimates from bytes divided by four. An outline helps locate code; edits still need the relevant bodies.</p>
       </header>
-      <figure class="demo" data-reveal>
-        {{/* Never starts on its own: the poster is the recording's first frame (both clocks at 0:00) and the button starts it. */}}
-        <div class="demo__frame">
-          <video class="demo__video" data-demo width="1600" height="1000" muted playsinline preload="none"
-            poster="{{ "examples/pixel-agent-demo-start.jpg" | relURL }}" src="{{ "examples/pixel-agent-demo.mp4" | relURL }}"
-            aria-describedby="demo-caption"></video>
-          <button class="demo__play" type="button" data-demo-play>{{ partial "icon.html" (dict "name" "play" "size" 18) }}<span>Play video</span></button>
-        </div>
-        <figcaption id="demo-caption" class="demo__caption">Claude Code on the same task, eleven times with Pixel 0.5.0 and eleven times without. The replay shows each side's median-time run on one clock at 6&times; speed; every command, time and token count comes from the recording. <a class="link" href="{{ site.Params.github_url }}/tree/main/docs/motion/src/demo" target="_blank" rel="noopener">The traces</a></figcaption>
-      </figure>
-      {{/* Faster is worth nothing if the answer gets worse, so the second entry is the result both sides reached. The losses stay one line here, in full on /benchmarks/. All from content/benchmarks.md, "On whole agent tasks". */}}
-      <ul class="ledger" data-reveal="stagger">
-        <li class="ledger__win"><strong>&minus;30%</strong><span>Scoping a multi-file task: the median of 11 runs per side above, with 38% fewer tokens read. Two earlier designs agree: &minus;31% and &minus;29%.</span></li>
-        <li class="ledger__win"><strong>Same answer</strong><span>Both sides named <code>push.rs</code>, the file the change starts in, among their first two in every one of the 22 runs. Pixel gets there sooner, not differently.</span></li>
-      </ul>
-      <p class="ledger__fine" data-reveal>Where Pixel loses: a one-shot lookup runs about 1.5&nbsp;s slower, and recovering deleted code from history is still slower. The runs spread wider with Pixel too: 33 to 207&nbsp;s, against 57 to 148&nbsp;s without, so the slowest run of the 22 was a Pixel run. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">The runs and their caveats</a></p>
+      <p class="ledger__fine" data-reveal>A newer Opus medium trial with the install hooks reported median times of 42.9&nbsp;s without Pixel and 47.6&nbsp;s with it on one scoping task: no speed gain there. Its raw runs are not archived here. The older Sonnet demo used an appended prompt without hooks and included runs that read its own traces. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">Both protocols, results and limits</a></p>
       {{/* Real users' words, from data/voices.toml: nothing renders until it holds an entry, and the file says what an entry needs. */}}
       {{ with hugo.Data.voices.voice }}
       <ul class="voices" data-reveal="stagger" aria-label="What people who run Pixel say">
@@ -199,7 +181,7 @@
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Verify</span></p>
       <header class="section__head" data-reveal>
         <h2 id="yours-title">Don't trust our numbers. <span class="glow">Get yours.</span></h2>
-        <p>Run inside a repository of yours, the first command prints what a full read of its largest files costs your agent and what the same answers cost through Pixel. No session, no account, and nothing leaves your machine.</p>
+        <p>Run inside a repository of yours, the first command prints what a the estimated token volume of its largest files versus their signatures. No session, no account, and nothing leaves your machine.</p>
       </header>
       <ol class="yours" data-reveal="stagger">
         <li class="yours__step">
@@ -209,7 +191,7 @@
             <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel audit</code>
             <button class="cmd__copy" type="button" data-copy="pixel audit">Copy</button>
           </div>
-          <p>On Requests, a first run on a fresh clone read <strong class="yours__waste">95,693 tokens</strong> for the twenty files whole against <strong class="yours__kept">11,447</strong> for their outlines: &minus;88%.</p>
+          <p>On Requests with Pixel 0.5.1, estimated as bytes ÷ 4: <strong class="yours__waste">95,693 tokens</strong> for the twenty files whole against <strong class="yours__kept">11,447</strong> for their outlines: &minus;88%.</p>
         </li>
         <li class="yours__step">
           <span class="yours__n" aria-hidden="true">2</span>
@@ -222,12 +204,12 @@
         </li>
         <li class="yours__step">
           <span class="yours__n" aria-hidden="true">3</span>
-          <h3>What it spared your agent</h3>
+          <h3>Your local volumes and estimates</h3>
           <div class="cmd">
             <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel token-savings</code>
             <button class="cmd__copy" type="button" data-copy="pixel token-savings">Copy</button>
           </div>
-          <p>After a few sessions. On the maintainer's machine: 41 to 83% of what the agent would have read, across 798 operations.</p>
+          <p>After a few sessions, inspect measured Pixel output volumes and versioned workflow estimates. These do not measure all agent reads or billed cost.</p>
         </li>
       </ol>
       <p class="numbers__more" data-reveal>Not installed yet? <a class="link" href="#install">Two commands</a>. The method behind the count: <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">measure it on your own code</a>.</p>
@@ -289,8 +271,9 @@
         <div><dt>Account</dt><dd>None</dd></div>
         <div><dt>Telemetry</dt><dd>None</dd></div>
       </dl>
-      {{/* The six jobs an agent runs every day on that index, each a recording of the same task without Pixel and with it: data/jobs.toml. No latency in the heading: commit-and-push waits on the remote, so a millisecond claim would not hold for all six. They live under How it works so the page has one chapter for what Pixel does, not two. */}}
+      {{/* The six jobs an agent runs every day on that index, each a workflow illustration without Pixel and with it: data/jobs.toml. No latency in the heading: commit-and-push waits on the remote, so a millisecond claim would not hold for all six. They live under How it works so the page has one chapter for what Pixel does, not two. */}}
       <h3 class="vs__kicker" id="jobs" data-reveal>Six jobs your agent runs every day</h3>
+      <p class="ledger__fine">Workflow illustrations, not timed agent trials. The accounting animation combines measured local output volumes with token and time estimates; it does not measure billed savings.</p>
       <div class="jobs" data-jobs data-reveal>
         <div class="jobs__tabs" role="tablist" aria-label="Jobs">
           {{ range $i, $j := hugo.Data.jobs.job }}
@@ -305,7 +288,7 @@
           <p class="jobs__text">{{ $j.text }}</p>
           {{ $src := printf "examples/%s.mp4" $j.media | relURL }}
           <video class="jobs__video" width="1600" height="1000" muted loop playsinline preload="none"
-            poster="{{ printf "examples/%s.jpg" $j.media | relURL }}" aria-label="{{ $j.name }}: the same task without Pixel and with it"
+            poster="{{ printf "examples/%s.jpg" $j.media | relURL }}" aria-label="{{ $j.name }}: workflow illustration without Pixel and with it"
             {{ if eq $i 0 }}src="{{ $src }}"{{ else }}data-src="{{ $src }}"{{ end }}></video>
         </div>
         {{ end }}
@@ -427,9 +410,9 @@
         </li>
         <li class="roles__card">
           <p class="roles__who">{{ partial "icon.html" (dict "name" "shield" "size" 16) }}CTOs</p>
-          <h3>Cheaper agent runs, no new vendor, no telemetry.</h3>
+          <h3>Local read-volume estimates, no new vendor, no telemetry.</h3>
           <ul>
-            <li><strong>&minus;30% API cost</strong> on the measured scoping task, the median of 11 runs per side.</li>
+            <li>Estimate large-file read volume at your own input price; <a class="link" href="{{ "savings/" | relURL }}">see the assumptions</a>.</li>
             <li>No second model on the bill, no account, no telemetry: the index stays in <code>.pixel/</code>. The network sees only what you run: Git remotes, the optional <code>pixel classify</code> and <code>pixel web-search</code>, and a one-time embedding model download.</li>
             <li>MIT licensed, and the same index serves {{ len $agents }} agents, so switching agents does not mean switching tools.</li>
           </ul>
@@ -611,7 +594,7 @@
     {{/* ---------- closing ---------- */}}
     <section class="closing wrap" aria-labelledby="closing-title">
       <h2 id="closing-title" class="closing__title" data-reveal>Give your agent <span class="glow">a map.</span></h2>
-      <p class="closing__lede" data-reveal>Give the next session a map before it opens its first file, then check what it spared with <code>pixel token-savings</code>.</p>
+      <p class="closing__lede" data-reveal>Give the next session a map before it opens its first file, then inspect local volumes and estimates with <code>pixel token-savings</code>.</p>
       <div class="cmd closing__cmd" data-reveal>
         <code><span class="cmd__prompt" aria-hidden="true">$</span> {{ $brew }} && pixel install</code>
         <button class="cmd__copy" type="button" data-copy="{{ $brew }} && pixel install">Copy</button>
