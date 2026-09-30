@@ -1,6 +1,6 @@
-//! pixel-flow — deterministic browser flow replay for LLM agents.
+//! pixel-flow — deterministic browser flow runtime for LLM agents.
 //!
-//! Saves, retrieves, lists, revises, and replays proven agent-browser paths
+//! Saves, retrieves, lists, revises, and runs proven agent-browser paths
 //! (auth flows, config flows) so the agent follows a deterministic shortcut
 //! instead of re-discovering the UI from scratch every time.
 //!
@@ -8,7 +8,7 @@
 //! — no SQLite, no daemon. Simple, inspectable, human-editable.
 
 pub mod execute;
-pub mod replay;
+pub mod run;
 pub mod store;
 pub mod types;
 
@@ -48,7 +48,7 @@ pub enum FlowAction {
         from_file: Option<PathBuf>,
     },
     /// Emit ready-to-run agent-browser commands with variable substitution.
-    Replay {
+    Run {
         name: String,
         vars: HashMap<String, String>,
         dry_run: bool,
@@ -83,11 +83,11 @@ pub fn flow(action: &FlowAction) -> Result<Value, String> {
             description,
             from_file,
         } => revise_flow(name, title, description, from_file),
-        FlowAction::Replay {
+        FlowAction::Run {
             name,
             vars,
             dry_run,
-        } => replay_flow(name, vars, *dry_run),
+        } => run_flow(name, vars, *dry_run),
         FlowAction::Execute { name, vars } => execute_flow(name, vars),
         FlowAction::Delete { name } => delete_flow(name),
         FlowAction::Show { name } => show_flow(name),
@@ -306,9 +306,9 @@ fn revise_flow(
     }))
 }
 
-fn replay_flow(name: &str, vars: &HashMap<String, String>, dry_run: bool) -> Result<Value, String> {
+fn run_flow(name: &str, vars: &HashMap<String, String>, dry_run: bool) -> Result<Value, String> {
     let flow = load(name)?;
-    let output = replay::replay(&flow, vars)?;
+    let output = run::run(&flow, vars)?;
     Ok(json!({
         "name": flow.name,
         "dry_run": dry_run,
@@ -465,6 +465,90 @@ mod tests {
         );
         assert!(names(list_flows(&Some("none".into())).unwrap()).is_empty());
         // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+    }
+
+    /// `flow()` dispatches to the real action handlers: a mutant that
+    /// replaces the body with `Ok(Default::default())` short-circuits every
+    /// action to a JSON null and silently drops the field the caller
+    /// asked for. Pin each action shape with at least one field the
+    /// action fills in.
+    #[test]
+    fn flow_dispatch_returns_action_specific_fields_not_a_null_default() {
+        let _guard = store::ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
+        }
+        let steps = tmp.path().join("steps.json");
+        std::fs::write(&steps, r#"[{"action":"snapshot"}]"#).unwrap();
+        let from_file = Some(steps);
+        let saved = flow(&FlowAction::Save {
+            name: "audit".into(),
+            title: "Audit".into(),
+            description: String::new(),
+            tags: vec![],
+            url: None,
+            from_file,
+        })
+        .unwrap();
+        assert_eq!(saved["saved"], true, "{saved}");
+        assert_eq!(saved["steps"], 1, "{saved}");
+
+        let listed = flow(&FlowAction::List { tag: None }).unwrap();
+        assert!(!listed.as_array().unwrap().is_empty(), "{listed}");
+
+        let fetched = flow(&FlowAction::Get {
+            name: "audit".into(),
+        })
+        .unwrap();
+        assert_eq!(fetched["title"], "Audit", "{fetched}");
+
+        let rendered = flow(&FlowAction::Run {
+            name: "audit".into(),
+            vars: HashMap::new(),
+            dry_run: true,
+        })
+        .unwrap();
+        assert_eq!(rendered["dry_run"], true, "{rendered}");
+        assert!(rendered["output"].is_string(), "{rendered}");
+
+        let shown = flow(&FlowAction::Show {
+            name: "audit".into(),
+        })
+        .unwrap();
+        assert!(shown["name"].is_string(), "{shown}");
+
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+    }
+
+    /// `run_flow` resolves the flow, runs the engine, and returns the
+    /// rendered output. A mutant that returns `Ok(Default::default())`
+    /// returns a JSON null and skips the entire pipeline.
+    #[test]
+    fn run_flow_returns_the_engine_output_not_a_null_default() {
+        let _guard = store::ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: as above.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
+        }
+        let steps = tmp.path().join("steps.json");
+        std::fs::write(&steps, r#"[{"action":"snapshot"}]"#).unwrap();
+        let from_file = Some(steps);
+        save_flow("audit", "Audit", "", &[], &None, &from_file).unwrap();
+        let value = run_flow("audit", &HashMap::new(), true).unwrap();
+        assert!(value["name"].is_string(), "{value}");
+        assert_eq!(value["dry_run"], true, "{value}");
+        assert!(value["output"].is_string(), "{value}");
+        // SAFETY: serialised by ENV_MUTEX; restores the env so the next
+        // test starts clean.
         unsafe {
             std::env::remove_var("PIXEL_FLOW_DIR");
         }

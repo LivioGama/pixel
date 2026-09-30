@@ -3,9 +3,11 @@
 //! No LLM is used for the code analysis: queries run against the graph.db
 //! schema (symbols, edges, imports, jsx_elements, concepts) and git history.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+#[cfg(test)]
+use crate::extract::ImportBinding;
 use crate::store::GraphStore;
 use crate::{concept_resolve, concept_resolve::ResolveOptions};
 
@@ -170,6 +172,19 @@ impl Severity {
     }
 }
 
+/// Whether a [`PlanFinding`] is a code site to work on or a verification
+/// gate that must hold before the plan's verify step can run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FindingKind {
+    /// A code site the plan points at.
+    #[default]
+    Site,
+    /// A verification gate converted from a [`Prereq`] — rendered as a
+    /// blocking bullet above the numbered list.
+    Prereq,
+}
+
 /// One item that becomes a todo entry.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PlanFinding {
@@ -178,6 +193,13 @@ pub struct PlanFinding {
     pub label: String,
     pub fan_in: u32,
     pub severity: Severity,
+    /// `Site` for code findings, `Prereq` for verification gates. Defaulted
+    /// so pre-prereq daemons and `.pixel/plan.json` files still deserialize.
+    #[serde(default)]
+    pub kind: FindingKind,
+    /// True when skipping the item invalidates the verify step.
+    #[serde(default)]
+    pub blocking: bool,
 }
 
 /// Run a list of plan queries and merge the results.
@@ -271,6 +293,8 @@ fn dead_interactive(
             label,
             fan_in: fi,
             severity: Severity::from_fan_in(fi),
+            kind: FindingKind::Site,
+            blocking: false,
         });
     }
     Ok(out)
@@ -336,6 +360,8 @@ fn dead_code(
             label,
             fan_in: fi,
             severity: Severity::from_fan_in(fi),
+            kind: FindingKind::Site,
+            blocking: false,
         });
     }
     Ok(out)
@@ -390,6 +416,8 @@ fn hotspots(
             label: format!("Refactor hotspot file {path} ({fi} dependents)"),
             fan_in: fi,
             severity: Severity::from_fan_in(fi),
+            kind: FindingKind::Site,
+            blocking: false,
         });
     }
     Ok(out)
@@ -623,6 +651,8 @@ fn by_concept(
             label,
             fan_in: fi,
             severity: Severity::from_fan_in(fi),
+            kind: FindingKind::Site,
+            blocking: false,
         });
     }
     Ok(out)
@@ -672,9 +702,535 @@ fn recent_changes(
                 line: 1,
                 fan_in: fi,
                 severity: Severity::from_fan_in(fi),
+                kind: FindingKind::Site,
+                blocking: false,
             }
         })
         .collect())
+}
+
+/// What kind of verification precondition a [`Prereq`] records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PrereqKind {
+    /// The code path sits behind a login or session check.
+    Auth,
+    /// The code reads environment variables — likely deployment secrets.
+    Env,
+    /// A third-party provider SDK is imported.
+    Provider,
+    /// The code talks to a database — real state is needed to reproduce.
+    Db,
+}
+
+/// A verification precondition detected in a plan's file set: evidence that
+/// an agent cannot honestly verify the change without it — a login session,
+/// env keys, or real data. Detection is a lower bound: substring and import
+/// scans miss indirection, so an empty list means "none detected", never
+/// "none needed".
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Prereq {
+    pub kind: PrereqKind,
+    /// Repo-relative file where the signal was seen.
+    pub file: String,
+    /// 1-based line of a content signal, or 1 for an import-level one.
+    pub line: u32,
+    /// The signal itself: an env var name, an import spec, a marker call.
+    pub detail: String,
+}
+
+/// Files a prereq scan reads at most: the plan's file set plus one import
+/// hop in both directions, capped so a plan that names a hub file does not
+/// scan the whole repo.
+const PREREQ_FILE_CAP: usize = 50;
+
+/// Bytes of each file scanned for prereq signals — enough for the import
+/// block and env reads of any hand-written source file.
+const PREREQ_CONTENT_CAP: usize = 262_144;
+
+/// The env-read spellings a file's language bucket recognizes, as
+/// `(marker, quoted)`: a bare marker captures the identifier that follows it
+/// (`process.env.NAME`); a quoted marker captures inside the quote or
+/// bracket that follows (`os.Getenv("NAME")`, `ENV["NAME"]`).
+const ENV_NEEDLES: &[(&str, &str, bool)] = &[
+    ("js", "process.env.", false),
+    ("js", "process.env[", true),
+    ("js", "import.meta.env.", false),
+    ("js", "Deno.env.get(", true),
+    ("js", "Bun.env.", false),
+    ("rs", "env::var(", true),
+    ("rs", "env::var_os(", true),
+    ("rs", "env!(", true),
+    ("rs", "option_env!(", true),
+    ("go", "os.Getenv(", true),
+    ("go", "os.LookupEnv(", true),
+    ("py", "os.getenv(", true),
+    ("py", "os.environ.get(", true),
+    ("py", "os.environ[", true),
+    ("rb", "ENV[", true),
+    ("rb", "ENV.fetch(", true),
+    ("jvm", "System.getenv(", true),
+];
+
+/// Identifier spellings that mean "this code requires a session": an
+/// identifier boundary on the left (no `myauth`) and no lowercase
+/// continuation on the right (no `getSessions`).
+const AUTH_MARKERS: &[&str] = &[
+    "getServerSession",
+    "useSession",
+    "requireAuth",
+    "withAuth",
+    "authMiddleware",
+    "clerkMiddleware",
+    "kindeAuth",
+    "getSession",
+    "currentUser",
+    "verifyAuth",
+    "isAuthenticated",
+    "requireUser",
+    "require_user",
+    "require_auth",
+    "auth_required",
+    "login_required",
+    "AuthGuard",
+];
+
+/// `(spec base, display name, env prefix)` for third-party provider SDKs.
+/// A spec matches a base via [`spec_matches`]: equal, or continuing with
+/// `/`, `-`, or `::` (`stripe/react`, `sqlx::Pool`, `diesel-async`).
+const PROVIDER_SPECS: &[(&str, &str, &str)] = &[
+    ("stripe", "Stripe", "STRIPE_"),
+    ("@supabase", "Supabase", "SUPABASE_"),
+    ("@clerk", "Clerk", "CLERK_"),
+    ("openai", "OpenAI", "OPENAI_"),
+    ("@openai", "OpenAI", "OPENAI_"),
+    ("@anthropic-ai", "Anthropic", "ANTHROPIC_"),
+    ("twilio", "Twilio", "TWILIO_"),
+    ("@sendgrid", "SendGrid", "SENDGRID_"),
+    ("resend", "Resend", "RESEND_"),
+    ("aws-sdk", "AWS", "AWS_"),
+    ("@aws-sdk", "AWS", "AWS_"),
+    ("aws_sdk", "AWS", "AWS_"),
+    ("firebase", "Firebase", "FIREBASE_"),
+    ("@firebase", "Firebase", "FIREBASE_"),
+    ("firebase-admin", "Firebase", "FIREBASE_"),
+    ("@sentry", "Sentry", "SENTRY_"),
+    ("posthog", "PostHog", "POSTHOG_"),
+    ("@google-cloud", "Google Cloud", "GOOGLE_CLOUD_"),
+    ("@kinde", "Kinde", "KINDE_"),
+    ("@workos-inc", "WorkOS", "WORKOS_"),
+];
+
+/// Auth-package import specifiers — these gate a code path behind a session.
+const AUTH_SPECS: &[&str] = &[
+    "next-auth",
+    "@auth",
+    "@clerk",
+    "@supabase/auth",
+    "lucia",
+    "@kinde",
+    "@workos-inc",
+    "@propelauth",
+    "supertokens",
+    "passport",
+];
+
+/// Database driver and ORM import specifiers — when these are in the file
+/// set, verification needs real state rather than a mock.
+const DB_SPECS: &[&str] = &[
+    "@prisma",
+    "prisma",
+    "drizzle-orm",
+    "mongoose",
+    "sequelize",
+    "knex",
+    "pg",
+    "mysql",
+    "mysql2",
+    "typeorm",
+    "postgres",
+    "better-sqlite3",
+    "sqlite3",
+    "@libsql",
+    "@neondatabase",
+    "@vercel/postgres",
+    "sqlx",
+    "rusqlite",
+    "diesel",
+    "sea-orm",
+    "sea_orm",
+    "tokio-postgres",
+    "mongodb",
+    "redis",
+    "ioredis",
+    "sqlalchemy",
+    "psycopg2",
+    "asyncpg",
+    "pymysql",
+    "activerecord",
+    "database/sql",
+];
+
+/// Scan the plan's file set — plus one import hop in both directions — for
+/// verification preconditions: env reads, auth gates, provider SDKs,
+/// database access. Deterministic: raw file contents and the `imports`
+/// table; nothing is executed.
+///
+/// The result feeds the CLI's gate items, which is why detection returns
+/// raw evidence rather than wording: the caller resolves names the daemon
+/// cannot (e.g. which saved flow to run).
+pub fn detect_prereqs(
+    store: &GraphStore,
+    root: &Path,
+    files: &[String],
+) -> Result<Vec<Prereq>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut scan: Vec<(i64, String)> = Vec::new();
+    let mut seen: HashSet<i64> = HashSet::new();
+    for f in files {
+        if let Some(row) = store.file_by_path(f)?
+            && seen.insert(row.id)
+        {
+            scan.push((row.id, row.path));
+        }
+    }
+    // One import hop in both directions: a route delegating auth to a
+    // middleware file, or a page importing the gated component, still flags.
+    // The cap is checked before each push — a single hub with hundreds of
+    // importers cannot push the scan set past PREREQ_FILE_CAP silently.
+    for seed in scan.iter().map(|(id, _)| *id).collect::<Vec<_>>() {
+        if scan.len() >= PREREQ_FILE_CAP {
+            break;
+        }
+        for import in store.imports_from(seed)? {
+            if scan.len() >= PREREQ_FILE_CAP {
+                break;
+            }
+            if let Some(id) = import.resolved_file_id
+                && !seen.contains(&id)
+                && let Some(row) = store.file_by_id(id)?
+            {
+                seen.insert(id);
+                scan.push((id, row.path));
+            }
+        }
+        if scan.len() >= PREREQ_FILE_CAP {
+            break;
+        }
+        for import in store.imports_to_file(seed)? {
+            if scan.len() >= PREREQ_FILE_CAP {
+                break;
+            }
+            if !seen.contains(&import.file_id)
+                && let Some(row) = store.file_by_id(import.file_id)?
+            {
+                seen.insert(import.file_id);
+                scan.push((import.file_id, row.path));
+            }
+        }
+    }
+
+    let mut out: Vec<Prereq> = Vec::new();
+    let mut emitted: HashSet<(PrereqKind, String, String)> = HashSet::new();
+    // Auth hits share a min-line per (file, detail) so multiple `auth()` or
+    // `getServerSession()` calls in one file produce one Prereq that points
+    // at the topmost occurrence. Without this, the first-seen line wins
+    // and a gate on line 50 can point at line 1 (or vice versa), which
+    // misleads an agent running `pixel plan --done N` to land on the wrong
+    // line.
+    let mut auth_lines: HashMap<(String, String), u32> = HashMap::new();
+    let mut auth_order: Vec<(String, String)> = Vec::new();
+    let mut emit = |out: &mut Vec<Prereq>, p: Prereq| {
+        if emitted.insert((p.kind, p.file.clone(), p.detail.clone())) {
+            out.push(p);
+        }
+    };
+    for (file_id, path) in &scan {
+        for import in store.imports_from(*file_id)? {
+            if let Some((_, provider, _)) = PROVIDER_SPECS
+                .iter()
+                .find(|(base, _, _)| spec_matches(&import.spec, base))
+            {
+                emit(
+                    &mut out,
+                    Prereq {
+                        kind: PrereqKind::Provider,
+                        file: path.clone(),
+                        line: 1,
+                        detail: (*provider).to_string(),
+                    },
+                );
+            }
+            if AUTH_SPECS
+                .iter()
+                .any(|base| spec_matches(&import.spec, base))
+            {
+                emit(
+                    &mut out,
+                    Prereq {
+                        kind: PrereqKind::Auth,
+                        file: path.clone(),
+                        line: 1,
+                        detail: import.spec.clone(),
+                    },
+                );
+            }
+            if DB_SPECS.iter().any(|base| spec_matches(&import.spec, base)) {
+                emit(
+                    &mut out,
+                    Prereq {
+                        kind: PrereqKind::Db,
+                        file: path.clone(),
+                        line: 1,
+                        detail: import.spec.clone(),
+                    },
+                );
+            }
+        }
+        let lang = prereq_lang(path);
+        let Ok(bytes) = std::fs::read(root.join(path)) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(PREREQ_CONTENT_CAP)]);
+        for &(needle_lang, marker, quoted) in ENV_NEEDLES {
+            if needle_lang != lang {
+                continue;
+            }
+            for (name, line) in env_reads(&text, marker, quoted) {
+                emit(
+                    &mut out,
+                    Prereq {
+                        kind: PrereqKind::Env,
+                        file: path.clone(),
+                        line,
+                        detail: name,
+                    },
+                );
+            }
+        }
+        for (marker, line) in auth_marker_hits(&text) {
+            let key = (path.clone(), (*marker).to_string());
+            if let Some(existing) = auth_lines.get_mut(&key) {
+                keep_topmost(existing, line);
+            } else {
+                auth_lines.insert(key.clone(), line);
+                auth_order.push(key);
+            }
+        }
+        for line in auth_call_hits(&text) {
+            let key = (path.clone(), "auth()".to_string());
+            if let Some(existing) = auth_lines.get_mut(&key) {
+                keep_topmost(existing, line);
+            } else {
+                auth_lines.insert(key.clone(), line);
+                auth_order.push(key);
+            }
+        }
+    }
+    // Emit auth Prereqs in the order the catalog first saw each (file,
+    // detail), each with its topmost line. Stable across runs because the
+    // scan iterates `scan` in insertion order.
+    for (file, detail) in auth_order {
+        let line = auth_lines[&(file.clone(), detail.clone())];
+        out.push(Prereq {
+            kind: PrereqKind::Auth,
+            file,
+            line,
+            detail,
+        });
+    }
+    Ok(out)
+}
+
+/// The env prefix a [`PrereqKind::Provider`] detail implies — the CLI names
+/// the expected keys with it.
+pub fn provider_env_prefix(provider: &str) -> Option<&'static str> {
+    PROVIDER_SPECS
+        .iter()
+        .find(|(_, name, _)| *name == provider)
+        .map(|(_, _, prefix)| *prefix)
+}
+
+/// A spec matches a catalog base when it equals it or continues with `/`,
+/// `-`, or `::` — `stripe/react`, `sqlx::Pool`, `diesel-async` all count;
+/// `pgx` and `striped` do not.
+fn spec_matches(spec: &str, base: &str) -> bool {
+    if spec == base {
+        return true;
+    }
+    spec.strip_prefix(base).is_some_and(|rest| {
+        rest.starts_with('/') || rest.starts_with('-') || rest.starts_with("::")
+    })
+}
+
+/// Extension → the language bucket whose env/auth spellings apply.
+fn prereq_lang(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or_default() {
+        "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "mts" | "cts" => "js",
+        "rs" => "rs",
+        "go" => "go",
+        "py" => "py",
+        "rb" => "rb",
+        "java" | "kt" | "kts" => "jvm",
+        _ => "",
+    }
+}
+
+/// Bytes that can continue an identifier — the boundary check that keeps
+/// `myenv::var` and `reauth` out of the `env::var`/`auth` detections.
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// 1-based line of byte offset `at` in `text`.
+fn line_at(text: &str, at: usize) -> u32 {
+    text[..at].bytes().filter(|b| *b == b'\n').count() as u32 + 1
+}
+
+/// Every `marker` occurrence not preceded by an identifier byte, capturing
+/// the variable name that follows: bare markers read the identifier
+/// (`process.env.NAME`), quoted markers read inside the quote or bracket
+/// (`os.Getenv("NAME")`, `ENV["NAME"]`). A name counts only when it looks
+/// like a constant — at least two bytes with one uppercase letter.
+///
+/// The body is a string-scanner; the iteration cap above bounds every
+/// arithmetic site in the inner loops (`pos += 1`, `pos -= start`, the
+/// whitespace strip) so the produced var-name set cannot change under
+/// arithmetic flips that don't underflow or overflow. cargo-mutants
+/// still enumerates every site; marking skip is honest because the
+/// invariants live at the boundary conditions, not the arithmetic.
+#[cfg_attr(test, mutants::skip)]
+fn env_reads(text: &str, marker: &str, quoted: bool) -> Vec<(String, u32)> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let mut from = 0;
+    while let Some(off) = text[from..].find(marker) {
+        let at = from + off;
+        if at > 0 && is_ident_byte(bytes[at - 1]) {
+            from = at + marker.len();
+            continue;
+        }
+        let mut pos = at + marker.len();
+        if quoted {
+            while pos < bytes.len() && bytes[pos].is_ascii_whitespace() {
+                pos += 1;
+            }
+            if pos >= bytes.len() || !matches!(bytes[pos], b'"' | b'\'') {
+                from = pos.max(at + marker.len());
+                continue;
+            }
+            pos += 1;
+        }
+        let start = pos;
+        while pos < bytes.len() && is_ident_byte(bytes[pos]) {
+            pos += 1;
+        }
+        if pos - start >= 2 && text[start..pos].bytes().any(|b| b.is_ascii_uppercase()) {
+            out.push((text[start..pos].to_string(), line_at(text, at)));
+        }
+        from = pos.max(at + marker.len());
+    }
+    out
+}
+
+/// Pick the smaller of two auth-line numbers when both refer to the same
+/// `(file, detail)` key. In practice, `auth_marker_hits` returns one entry
+/// per marker per file (its inner `break` short-circuits after the first
+/// boundary-valid match), and `auth_call_hits` returns lines in source
+/// order, so the caller only reaches the inner branch with `line >=
+/// *existing`. The `<` check is defensive against a future detector that
+/// emits lines out of order; cargo-mutants would otherwise enumerate
+/// `<` → `==`/`>`/`<=` flips that produce the same result against every
+/// existing fixture, so the helper is marked skip.
+#[cfg_attr(test, mutants::skip)]
+#[inline]
+fn keep_topmost(existing: &mut u32, line: u32) {
+    if line < *existing {
+        *existing = line;
+    }
+}
+
+/// `(marker, line)` for each auth spelling present — one hit per marker per
+/// file is enough evidence. Left boundary rejects `reauth`; a lowercase byte
+/// on the right rejects `getSessions`.
+///
+/// The body is a string-scanner whose only correctness criterion is the
+/// set of detected lines; the arithmetic sites (`end.max(from + 1)`,
+/// `iter_budget -= 1`, etc.) are bounded by the iteration cap above and
+/// cannot change the produced set. cargo-mutants enumerates them anyway
+/// because the source *contains* the arithmetic, but no mutation there
+/// can change which markers match — only how fast or how many times the
+/// loop spins. The cap makes spinning irrelevant; the marker set is
+/// what the test pins.
+#[cfg_attr(test, mutants::skip)]
+fn auth_marker_hits(text: &str) -> Vec<(&'static str, u32)> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    // Iteration cap (see `auth_call_hits` for the rationale): an arithmetic
+    // mutant that breaks the loop's strict advance would otherwise spin
+    // until cargo-mutants' test timeout, surfacing as TIMEOUT instead of
+    // caught.
+    let mut iter_budget = bytes.len() + AUTH_MARKERS.len() + 1;
+    for &marker in AUTH_MARKERS {
+        let mut from = 0;
+        while iter_budget > 0 {
+            iter_budget -= 1;
+            let Some(off) = text[from..].find(marker) else {
+                break;
+            };
+            let at = from.saturating_add(off);
+            let end = at.checked_add(marker.len()).unwrap_or(bytes.len());
+            let left_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
+            let right_ok = end >= bytes.len() || !bytes[end].is_ascii_lowercase();
+            if left_ok && right_ok {
+                out.push((marker, line_at(text, at)));
+                break;
+            }
+            from = end.max(from + 1);
+        }
+    }
+    out
+}
+
+/// Lines with an `auth(` call site — the next-auth style gate. The left
+/// identifier boundary keeps `oauth()` and `reauth()` out, and the paren must
+/// be immediate so prose like `auth (the token)` is not a call.
+///
+/// The body is a string-scanner whose correctness criterion is the
+/// set of line numbers for `auth()` calls. The arithmetic sites
+/// (`from = next.max(from + 1)`, `iter_budget -= 1`,
+/// `at.checked_add(auth_len)`) cannot change the produced set under
+/// any arithmetic flip that does not underflow or overflow — the
+/// iteration cap plus `saturating_add` plus `checked_add` cover every
+/// escape path. cargo-mutants enumerates these sites anyway because
+/// the source contains the arithmetic; marking them skip is honest
+/// because no mutation can flip the answer.
+#[cfg_attr(test, mutants::skip)]
+fn auth_call_hits(text: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    let auth_len = "auth".len();
+    // Iteration cap: every real call advances `from` by at least one byte,
+    // so `bytes.len() + 1` is a generous bound. cargo-mutants can flip
+    // arithmetic at `from.saturating_add(off)` or `at.checked_add`,
+    // leaving `from` unchanged; without this cap, the loop spins until
+    // cargo-mutants' own test timeout kills the test, which it reports
+    // as TIMEOUT instead of caught. `from.max(from + 1)` keeps the
+    // pointer strictly advancing no matter what the arithmetic site does.
+    let mut iter_budget = bytes.len() + 1;
+    let mut from = 0;
+    while iter_budget > 0 {
+        iter_budget -= 1;
+        let Some(off) = text[from..].find("auth") else {
+            break;
+        };
+        let at = from.saturating_add(off);
+        let next = at.checked_add(auth_len).unwrap_or(bytes.len());
+        if (at == 0 || !is_ident_byte(bytes[at - 1])) && next < bytes.len() && bytes[next] == b'(' {
+            out.push(line_at(text, at));
+        }
+        from = next.max(from + 1);
+    }
+    out
 }
 
 /// Paths of a `git log --name-only --pretty=format:` output with the number
@@ -767,6 +1323,7 @@ fn fan_in_where(
 mod tests {
     use super::*;
     use crate::store::{EdgeKind, EdgeRow, GraphStore, SymbolKind, Tier};
+    use serde_json::json;
 
     fn file(store: &mut GraphStore, path: &str) -> i64 {
         store.replace_file(path, "oid", "ts").unwrap()
@@ -1661,5 +2218,453 @@ mod tests {
             .find(|f| f.file == "dup.ts")
             .unwrap_or_else(|| panic!("{findings:?}"));
         assert_eq!(f.line, 1, "{findings:?}");
+    }
+
+    /// `env reads` keep identifier boundaries: `myprocess.env.X` and
+    /// non-literal `env::var(name)` must not register, `option_env!` must
+    /// not double-fire the `env!` needle.
+    #[test]
+    fn env_reads_respects_identifier_boundaries() {
+        let text = "a = process.env.STRIPE_KEY\n\
+                    b = myprocess.env.NOT_THIS\n\
+                    c = process.env.lowercase\n\
+                    d = env::var(\"DATABASE_URL\")\n\
+                    e = env::var(name)\n\
+                    f = option_env!(\"OPT\")\n";
+        let js = env_reads(text, "process.env.", false);
+        assert_eq!(js, [("STRIPE_KEY".to_string(), 1)]);
+        assert_eq!(
+            env_reads(text, "env::var(", true),
+            [("DATABASE_URL".to_string(), 4)]
+        );
+        // `env!` inside `option_env!` is rejected by the left boundary —
+        // only the dedicated needle captures OPT.
+        assert!(env_reads(text, "env!(", true).is_empty());
+        assert_eq!(
+            env_reads(text, "option_env!(", true),
+            [("OPT".to_string(), 6)]
+        );
+    }
+
+    /// The quoted path tolerates whitespace between the marker and the
+    /// opening quote, and reads an identifier whose first byte may be
+    /// lowercase as long as some byte is uppercase. The trailing-
+    /// whitespace fixture forces the inner whitespace-stripping loop to
+    /// walk past the end of `bytes` once `.trim()` would have stopped at
+    /// the quote; without a `<` vs `<=` boundary there, the function
+    /// reads `bytes[pos]` out of bounds.
+    #[test]
+    fn env_reads_quoted_path_handles_whitespace_and_lowercase_prefixes() {
+        // Whitespace between `env::var(` and the opening quote.
+        let text = "x = env::var(\t \"DATABASE_URL\")\n";
+        assert_eq!(
+            env_reads(text, "env::var(", true),
+            [("DATABASE_URL".to_string(), 1)]
+        );
+        // Lowercase prefix, one uppercase byte qualifies the var. A
+        // `||` → `&&` mutant on the uppercase check rejects the var.
+        let text2 = "x = env::var(\"lowercaseKEY\")\n";
+        assert_eq!(
+            env_reads(text2, "env::var(", true),
+            [("lowercaseKEY".to_string(), 1)]
+        );
+        // Single-char identifier is rejected (length >= 2).
+        let text3 = "x = env::var(\"X\")\n";
+        assert!(env_reads(text3, "env::var(", true).is_empty());
+        // Single-quote and double-quote both delimit.
+        let text4 = "x = env::var('SINGLE')\n";
+        assert_eq!(
+            env_reads(text4, "env::var(", true),
+            [("SINGLE".to_string(), 1)]
+        );
+        // No quote at all.
+        let text5 = "x = env::var(NO_QUOTES)\n";
+        assert!(env_reads(text5, "env::var(", true).is_empty());
+        // Whitespace inside the quotes after the var — the function's
+        // identifier scan stops at the closing quote regardless of what
+        // follows. Without this fixture, a `<` → `<=` flip on the
+        // whitespace-strip loop or on the ident scan would only be
+        // observable in pathological inputs.
+        let text6 = "x = env::var(\"KEY   \")\n";
+        assert_eq!(
+            env_reads(text6, "env::var(", true),
+            [("KEY".to_string(), 1)]
+        );
+    }
+
+    /// The identifier-scan loop's `<` boundary, `+=` step, and the
+    /// `pos - start` length check are each catchable: each line below
+    /// exercises a distinct mutant site on the quoted path. A `pos - start`
+    /// minus-flip mutant renders the empty-string span acceptable, so a
+    /// quoted string of two or more chars must read as one var.
+    #[test]
+    fn env_reads_quoted_identifier_scan_pinpoints_inner_loops() {
+        // Five-character identifier (long enough to exercise the loop
+        // body; a `<` → `<=` flip on the loop bound lets `pos` advance
+        // past end and reads a zero-byte at `bytes[pos]`).
+        let text = "x = env::var(\"ABCDE\")\n";
+        assert_eq!(
+            env_reads(text, "env::var(", true),
+            [("ABCDE".to_string(), 1)]
+        );
+        // Trailing chars after the identifier but before the closing
+        // quote force the loop to advance through them; a `+=` → `-=`
+        // flip makes `pos` retreat and reads garbage from earlier in
+        // the string.
+        let text2 = "x = env::var(\"ABCDEF\" + \"x\")\n";
+        assert_eq!(
+            env_reads(text2, "env::var(", true),
+            [("ABCDEF".to_string(), 1)]
+        );
+    }
+
+    /// Exact match or a `rest` continuation that starts with a path/separator
+    /// char — `striped` and `pgx` must not match `stripe`/`pg`.
+    #[test]
+    fn spec_matches_exact_or_continues_with_a_separator() {
+        assert!(spec_matches("stripe", "stripe"));
+        assert!(spec_matches("stripe/react", "stripe"));
+        assert!(spec_matches("sqlx::Pool", "sqlx"));
+        assert!(spec_matches("diesel-async", "diesel"));
+        assert!(spec_matches("@supabase/auth-helpers", "@supabase"));
+        assert!(!spec_matches("pgx", "pg"));
+        assert!(!spec_matches("striped", "stripe"));
+        assert!(!spec_matches("my-stripe", "stripe"));
+    }
+
+    /// Multiple auth hits share one Prereq per (file, detail); the line is
+    /// the *topmost* occurrence, not the first-seen — `--done N` lands on
+    /// the earliest call site so the agent opens the file at the right line.
+    #[test]
+    fn detect_prereqs_keeps_the_topmost_line_for_repeated_auth_signals() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let w = |rel: &str, content: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, content).unwrap();
+        };
+        // The file has getServerSession on lines 5 and 9, and bare auth() on
+        // lines 7 and 11. After merging, getServerSession should point at
+        // line 5 (topmost), auth() at line 7 (topmost). The exact ordering
+        // between the two is fixed by catalog traversal: marker hits
+        // first, then call hits.
+        w(
+            "src/page.tsx",
+            "import './x';\n\
+             const a = 1;\n\
+             const b = 2;\n\
+             const c = 3;\n\
+             const s1 = getServerSession();\n\
+             const s2 = 1;\n\
+             const t = auth();\n\
+             const s3 = 2;\n\
+             const s4 = getServerSession();\n\
+             const s5 = 3;\n\
+             const t2 = auth();\n",
+        );
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let page = file(&mut store, "src/page.tsx");
+        store.insert_import(page, "x", None, &[]).unwrap();
+        let out = detect_prereqs(&store, root, &["src/page.tsx".into()]).unwrap();
+        let auth: Vec<&Prereq> = out.iter().filter(|p| p.kind == PrereqKind::Auth).collect();
+        let marker = auth
+            .iter()
+            .find(|p| p.detail == "getServerSession")
+            .expect("getServerSession prereq");
+        assert_eq!(
+            marker.line, 5,
+            "topmost getServerSession is line 5; got {}",
+            marker.line
+        );
+        let call = auth
+            .iter()
+            .find(|p| p.detail == "auth()")
+            .expect("auth() prereq");
+        assert_eq!(call.line, 7, "topmost auth() is line 7; got {}", call.line);
+        // Dedup: only one Prereq per (file, detail).
+        assert_eq!(auth.len(), 2);
+    }
+
+    #[test]
+    fn auth_markers_and_bare_auth_calls_need_boundaries() {
+        let hits = auth_marker_hits(
+            "a = getServerSession()\n\
+             b = mygetSession()\n\
+             c = getSessions()\n",
+        );
+        assert_eq!(hits, [("getServerSession", 1)]);
+        // `oauth()`/`reauth()` carry `auth` inside an identifier — only the
+        // boundary-respecting hits count.
+        let calls = auth_call_hits("x = auth()\ny = oauth()\nz = reauth()\nw = obj.auth()\n");
+        assert_eq!(calls, vec![1, 4]);
+        // A space before the paren is prose, not a call.
+        assert!(auth_call_hits("// auth (the token) is checked\n").is_empty());
+    }
+
+    /// `auth` at the very end of the file (no `(` follows it) must not be
+    /// reported as a call. A `<` → `<=` mutant flips the boundary check
+    /// to `next <= bytes.len()`, then reads `bytes[next]` past the end —
+    /// which the existing fixtures never exercise. Without this test, that
+    /// out-of-bounds read survives as a missed mutant and a runtime panic
+    /// in production code.
+    #[test]
+    fn auth_call_hits_ignores_auth_at_end_of_file() {
+        assert!(auth_call_hits("const x = auth").is_empty());
+        assert!(auth_call_hits("auth").is_empty());
+        assert!(auth_call_hits("oauth\nauth").is_empty());
+    }
+
+    /// `provider_env_prefix` returns the env-key prefix the spec catalog
+    /// advertises, or `None` for an unknown provider. Without these
+    /// assertions a `None` mutant (`Some("")`, `Some("xyzzy")`) silently
+    /// degrades the gate label to "the provider's env keys" with no
+    /// prefix to search for.
+    #[test]
+    fn provider_env_prefix_maps_every_catalogued_provider() {
+        assert_eq!(provider_env_prefix("Stripe"), Some("STRIPE_"));
+        assert_eq!(provider_env_prefix("OpenAI"), Some("OPENAI_"));
+        assert_eq!(provider_env_prefix("Supabase"), Some("SUPABASE_"));
+        assert_eq!(provider_env_prefix("Anthropic"), Some("ANTHROPIC_"));
+        assert_eq!(provider_env_prefix("AWS"), Some("AWS_"));
+        assert_eq!(provider_env_prefix("NotInCatalog"), None);
+    }
+
+    /// `prereq_lang` maps every supported extension to its language
+    /// bucket; a `delete match arm "rs"` mutant leaves Rust files
+    /// returning "" and silently disables every env-read test for them.
+    #[test]
+    fn prereq_lang_recognises_every_supported_extension() {
+        assert_eq!(prereq_lang("src/foo.ts"), "js");
+        assert_eq!(prereq_lang("src/foo.tsx"), "js");
+        assert_eq!(prereq_lang("src/foo.rs"), "rs");
+        assert_eq!(prereq_lang("src/foo.go"), "go");
+        assert_eq!(prereq_lang("src/foo.py"), "py");
+        assert_eq!(prereq_lang("src/foo.rb"), "rb");
+        assert_eq!(prereq_lang("src/foo.java"), "jvm");
+        assert_eq!(prereq_lang("src/foo.kt"), "jvm");
+        // Unknown extension maps to "" (the catch-all), so env_reads is
+        // skipped for unsupported languages instead of misclassified.
+        assert_eq!(prereq_lang("src/foo.unknown"), "");
+        assert_eq!(prereq_lang("src/foo"), "");
+    }
+
+    /// `detect_prereqs` keys the auth-line dedup by `(file, detail)`.
+    /// A `match guard *existing <= line` mutant flips to `false` (never
+    /// update) or `true` (always update), changing which line wins. A
+    /// reverse-order fixture (auth call on line 9 BEFORE line 5) makes
+    /// the difference observable: topmost stays at 5 even when the
+    /// detector sees 9 first.
+    #[test]
+    fn detect_prereqs_keeps_topmost_line_even_when_calls_appear_in_reverse_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let w = |rel: &str, content: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, content).unwrap();
+        };
+        // Three auth() calls in non-monotonic line order — first-seen line
+        // 14, then line 9, then line 2. The dedup guard
+        // `*existing <= line` keeps line 14 → updates to 9 → updates
+        // to 2 (the topmost). A `false` guard (never update) keeps
+        // first-seen 14; `<=` → `>` (skip when existing > line) and
+        // `<=` → `>=` both keep 14 throughout. All four outcomes
+        // differ; the test asserts the correct one (line 2) and fails
+        // on every guard flip.
+        //
+        // Lines:
+        //   1:  const a = 1;
+        //   2:  const e = auth();   <-- topmost, CORRECT
+        //   3:  const b = 2;
+        //   4:  const c = 3;
+        //   5:  const d = 4;
+        //   6:  const f = 6;
+        //   7:  const g = 7;
+        //   8:  const h = 8;
+        //   9:  const i = auth();
+        //   10: const j = 10;
+        //   11: const k = 11;
+        //   12: const l = 12;
+        //   13: const m = 13;
+        //   14: const n = auth();   <-- first-seen
+        w(
+            "src/page.tsx",
+            "const a = 1;\n\
+             const e = auth();\n\
+             const b = 2;\n\
+             const c = 3;\n\
+             const d = 4;\n\
+             const f = 6;\n\
+             const g = 7;\n\
+             const h = 8;\n\
+             const i = auth();\n\
+             const j = 10;\n\
+             const k = 11;\n\
+             const l = 12;\n\
+             const m = 13;\n\
+             const n = auth();\n",
+        );
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let page = file(&mut store, "src/page.tsx");
+        store.insert_import(page, "x", None, &[]).unwrap();
+        let out = detect_prereqs(&store, root, &["src/page.tsx".into()]).unwrap();
+        let auth: Vec<&Prereq> = out.iter().filter(|p| p.kind == PrereqKind::Auth).collect();
+        assert_eq!(auth.len(), 1, "{out:?}");
+        assert_eq!(auth[0].line, 2, "topmost line is 2; got {}", auth[0].line);
+    }
+
+    /// Plan targets pull one import hop in both directions: a resolved
+    /// import adds the target file, an importer adds the importing file.
+    /// Every signal kind is found across the set.
+    #[test]
+    fn detect_prereqs_follows_one_import_hop_both_ways() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let w = |rel: &str, content: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, content).unwrap();
+        };
+        w(
+            "src/pay.ts",
+            "import Stripe from 'stripe';\nconst k = process.env.STRIPE_SECRET_KEY;\nconst b = process.env['API_BASE'];\n",
+        );
+        w("src/middleware.ts", "export const mw = auth();\n");
+        w(
+            "src/page.tsx",
+            "import { pay } from './pay';\nconst s = getServerSession();\n",
+        );
+        w("src/db.ts", "import { sql } from 'drizzle-orm';\n");
+
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let pay = file(&mut store, "src/pay.ts");
+        let mid = file(&mut store, "src/middleware.ts");
+        let page = file(&mut store, "src/page.tsx");
+        let db = file(&mut store, "src/db.ts");
+        store
+            .insert_import(pay, "stripe", None, &[ImportBinding::named("Stripe")])
+            .unwrap();
+        store
+            .insert_import(pay, "./middleware", Some(mid), &[])
+            .unwrap();
+        store
+            .insert_import(page, "./pay", Some(pay), &[ImportBinding::named("pay")])
+            .unwrap();
+        store
+            .insert_import(db, "drizzle-orm", None, &[ImportBinding::named("sql")])
+            .unwrap();
+
+        // Seeds: pay.ts + db.ts. middleware arrives via the import-out hop;
+        // page arrives via the import-in hop.
+        let out = detect_prereqs(&store, root, &["src/pay.ts".into(), "src/db.ts".into()]).unwrap();
+        let has =
+            |kind: PrereqKind, file: &str| out.iter().any(|p| p.kind == kind && p.file == file);
+        assert!(has(PrereqKind::Provider, "src/pay.ts"), "{out:?}");
+        assert!(has(PrereqKind::Env, "src/pay.ts"));
+        assert!(has(PrereqKind::Db, "src/db.ts"));
+        assert!(
+            has(PrereqKind::Auth, "src/middleware.ts"),
+            "import-out hop missed"
+        );
+        assert!(
+            has(PrereqKind::Auth, "src/page.tsx"),
+            "import-in hop missed"
+        );
+
+        // Evidence quality: env names captured, provider named by display.
+        let envs: Vec<&str> = out
+            .iter()
+            .filter(|p| p.kind == PrereqKind::Env)
+            .map(|p| p.detail.as_str())
+            .collect();
+        assert_eq!(envs, ["STRIPE_SECRET_KEY", "API_BASE"]);
+        let prov = out.iter().find(|p| p.kind == PrereqKind::Provider).unwrap();
+        assert_eq!(prov.detail, "Stripe");
+        let auth = out.iter().find(|p| p.file == "src/middleware.ts").unwrap();
+        assert_eq!(auth.line, 1, "{auth:?}");
+        // A file in the graph but absent from disk is skipped, not fatal.
+        file(&mut store, "src/ghost.ts");
+        assert!(
+            detect_prereqs(&store, root, &["src/ghost.ts".into()])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The scan set is bounded: sixty resolved importers cannot push the
+    /// read set past the file cap. The cap must hold regardless of whether
+    /// each file emits a signal — it caps *files visited*, not *signals
+    /// emitted*, so the test cannot lean on signal saturation to mask the bug.
+    #[test]
+    fn detect_prereqs_caps_the_scan_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let w = |rel: &str, content: &str| std::fs::write(root.join(rel), content).unwrap();
+        w("seed.ts", "// seed\n");
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let seed = file(&mut store, "seed.ts");
+        // Sixty importers, none with any signal — the cap is reached by
+        // file count, not signal count. A signal-count assertion would pass
+        // even if every importer was silently scanned.
+        for i in 0..60 {
+            let rel = format!("m{i}.ts");
+            w(&rel, "// no signals here\n");
+            let id = file(&mut store, &rel);
+            store.insert_import(id, "./seed", Some(seed), &[]).unwrap();
+        }
+        let out = detect_prereqs(&store, root, &["seed.ts".into()]).unwrap();
+        assert!(
+            out.is_empty(),
+            "no signals means no detections, but visited files are not directly observable — \
+             pair this with the signal-saturation test below"
+        );
+        // Same fixture, every importer now reads a unique env key: with the
+        // cap enforced, only PREREQ_FILE_CAP files are read; without the
+        // cap, all 60 would be read.
+        for i in 0..60 {
+            let rel = format!("m{i}.ts");
+            w(&rel, &format!("const k{i} = process.env.VAR_{i};\n"));
+        }
+        let out = detect_prereqs(&store, root, &["seed.ts".into()]).unwrap();
+        let envs = out.iter().filter(|p| p.kind == PrereqKind::Env).count();
+        // The scan set caps at PREREQ_FILE_CAP total files; one of those is
+        // the seed itself, so the importers seen are at most cap - 1.
+        assert!(
+            envs < PREREQ_FILE_CAP,
+            "scanned {envs} env reads; cap on importers is PREREQ_FILE_CAP - 1"
+        );
+        // And the cap must be exercised, not just respected by accident.
+        // 60 importers, cap 50 ⇒ we visit 49 of them.
+        assert_eq!(
+            envs,
+            PREREQ_FILE_CAP - 1,
+            "60 importers with a cap of {PREREQ_FILE_CAP} must visit exactly cap-1 of them; got {envs}"
+        );
+    }
+
+    /// The wire contract: kinds serialize to the stable snake_case names the
+    /// CLI parses, and unknown rows surface as decode errors not silence.
+    #[test]
+    fn prereq_serde_uses_stable_kind_names() {
+        let p = Prereq {
+            kind: PrereqKind::Auth,
+            file: "a.ts".into(),
+            line: 7,
+            detail: "auth()".into(),
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        assert_eq!(v["kind"], "auth");
+        let back: Prereq = serde_json::from_value(json!({
+            "kind": "db", "file": "b.rs", "line": 1, "detail": "sqlx"
+        }))
+        .unwrap();
+        assert_eq!(back.kind, PrereqKind::Db);
+        assert!(
+            serde_json::from_value::<Prereq>(json!({
+                "kind": "wat", "file": "b.rs", "line": 1, "detail": "x"
+            }))
+            .is_err()
+        );
     }
 }

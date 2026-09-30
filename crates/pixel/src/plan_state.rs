@@ -154,6 +154,8 @@ mod tests {
             label: label.to_string(),
             fan_in: 1,
             severity: Severity::Low,
+            kind: pixel_graph::plan::FindingKind::Site,
+            blocking: false,
         }
     }
 

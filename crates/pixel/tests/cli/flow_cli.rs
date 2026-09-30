@@ -180,3 +180,22 @@ fn flow_execute_prints_a_summary_line_and_the_log_on_stderr() {
         "{stderr}"
     );
 }
+
+/// `pixel flow show <name>` prints the flow document to stdout (a JSON
+/// document, not the rendered command sequence). A mutant that deletes the
+/// `Show` arm in `run_command` routes `show` through the wrong path; this
+/// test pins the stdout shape.
+#[test]
+fn flow_show_prints_the_flow_document_to_stdout() {
+    let fixture = Fixture::new("print");
+    let show = fixture.run(&["flow", "show", "audit"], false);
+    assert!(show.status.success(), "{show:?}");
+    let show_stdout = String::from_utf8_lossy(&show.stdout);
+    let show_json: serde_json::Value =
+        serde_json::from_slice(&show.stdout).expect("show must emit valid JSON");
+    assert_eq!(show_json["title"], "Audit", "{show_stdout:?}");
+    assert_eq!(
+        show_json["name"], "audit",
+        "show must round-trip the flow name: {show_stdout:?}"
+    );
+}
