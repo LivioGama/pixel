@@ -1565,15 +1565,18 @@ fn bounded_output(
     // The child exited; give each reader the rest of the deadline. A
     // descendant can keep a pipe open, so a reader that misses it yields no
     // bytes rather than blocking the check.
+    // `Result` here is this crate's alias `Result<T, InstallError>`; the
+    // reader threads send `std::io::Result<Vec<u8>>`, so `.ok()` must name
+    // the io error type or the function pointer does not type-check on MSRV.
     let stdout = out_rx
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .ok()
-        .and_then(Result::ok)
+        .and_then(std::result::Result::<Vec<u8>, std::io::Error>::ok)
         .unwrap_or_default();
     let stderr = err_rx
         .recv_timeout(deadline.saturating_duration_since(Instant::now()))
         .ok()
-        .and_then(Result::ok)
+        .and_then(std::result::Result::<Vec<u8>, std::io::Error>::ok)
         .unwrap_or_default();
     Ok(std::process::Output {
         status,
@@ -2939,8 +2942,7 @@ mod tests {
     /// production holds the shell to five seconds.
     #[test]
     fn shell_path_check_reports_a_shell_that_does_not_answer_in_time() {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-doctor-timeout-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("pixel-doctor-timeout-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let shell = dir.join("slow-zsh");

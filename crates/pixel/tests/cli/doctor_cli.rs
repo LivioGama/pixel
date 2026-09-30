@@ -533,7 +533,12 @@ fn shell_path_should_use_the_fish_lookup_for_a_fish_shell() {
 #[test]
 fn shell_path_should_flag_a_shell_that_cannot_resolve_pixel() {
     let (_, repo) = fixture("shell-path-yellow");
-    let shell = fake_shell("shell-path-yellow", "fake-zsh", "command -v pixel", "exit 1");
+    let shell = fake_shell(
+        "shell-path-yellow",
+        "fake-zsh",
+        "command -v pixel",
+        "exit 1",
+    );
     let out = shell_path_doctor(shell.join("fake-zsh").as_path(), &repo);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
