@@ -113,6 +113,106 @@ pub fn session_start_output(pixel_block: &Value, provider: Option<Provider>) -> 
     session_start_envelope(pixel_block, deployed_agent_prompt().as_deref(), provider)
 }
 
+/// The longest SessionStart `additionalContext` Claude Code passes to the
+/// model inline, in UTF-16 units as a JavaScript string counts them. Past it
+/// the model gets `<persisted-output>`, a 2 KB preview and a file path, not
+/// the text: measured on Claude Code 2.1.285 with the `docker-setup-smoke`
+/// fake model (10 000 inline, 10 001 persisted, multi-byte characters
+/// counted once), while the deployed prompt was 12 487 characters (#443).
+const CLAUDE_INLINE_CONTEXT_LIMIT: usize = 10_000;
+
+/// Agent-prompt sections a Claude session can do without at its start, in
+/// the order they are left out when the prompt has to fit: each is needed
+/// only by a task that names it, and the pointer line says where it is.
+const DEFERRABLE_SECTIONS: &[&str] = &[
+    "## Classify",
+    "## User configuration",
+    "## Recall",
+    "## Reading Pixel output",
+    "## LIVE OPERATION METRICS",
+];
+
+/// Length as Claude Code measures a hook's output string.
+fn utf16_len(text: &str) -> usize {
+    text.encode_utf16().count()
+}
+
+/// Where the full prompt is, for the pointer line: absolute when `HOME` is
+/// known, so a Read tool can open it as written.
+fn agent_prompt_location() -> String {
+    std::env::var_os("HOME").map_or_else(
+        || format!("~/{AGENT_PROMPT_REL}"),
+        |home| {
+            PathBuf::from(home)
+                .join(AGENT_PROMPT_REL)
+                .display()
+                .to_string()
+        },
+    )
+}
+
+/// `prompt` fitted within `limit` UTF-16 units: unchanged when it already
+/// fits; otherwise the [`DEFERRABLE_SECTIONS`] come out one by one, in order,
+/// until what is left plus a line naming them and `location` fits. A prompt
+/// that still does not fit loses its last sections, then is cut at a
+/// character boundary, so the result never exceeds `limit`.
+fn fit_prompt(prompt: &str, limit: usize, location: &str) -> String {
+    if utf16_len(prompt) <= limit {
+        return prompt.to_string();
+    }
+    let mut sections: Vec<&str> = Vec::new();
+    let mut start = 0;
+    for (index, _) in prompt.match_indices("\n## ") {
+        sections.push(&prompt[start..=index]);
+        start = index + 1;
+    }
+    sections.push(&prompt[start..]);
+    let heading = |section: &str| section.lines().next().unwrap_or("").to_string();
+    let mut left_out: Vec<String> = Vec::new();
+    let render = |kept: &[&str], left_out: &[String]| {
+        let names: Vec<&str> = left_out
+            .iter()
+            .map(|h| h.trim_start_matches("## "))
+            .collect();
+        format!(
+            "{}\n\nLeft out to fit Claude Code's hook context limit: {}. Read {location} \
+             when a task needs them.",
+            kept.concat().trim_end(),
+            names.join("; ")
+        )
+    };
+    for deferrable in DEFERRABLE_SECTIONS {
+        let Some(position) = sections
+            .iter()
+            .position(|section| section.starts_with(deferrable))
+        else {
+            continue;
+        };
+        left_out.push(heading(sections.remove(position)));
+        let fitted = render(&sections, &left_out);
+        if utf16_len(&fitted) <= limit {
+            return fitted;
+        }
+    }
+    while sections.len() > 1 {
+        let last = sections.pop().unwrap_or_default();
+        left_out.push(heading(last));
+        let fitted = render(&sections, &left_out);
+        if utf16_len(&fitted) <= limit {
+            return fitted;
+        }
+    }
+    let fitted = render(&sections, &left_out);
+    let mut cut = String::new();
+    for c in fitted.chars() {
+        if utf16_len(&cut) + c.len_utf16() > limit {
+            break;
+        }
+        cut.push(c);
+    }
+    cut
+}
+
 fn session_start_envelope(
     pixel_block: &Value,
     agent_prompt: Option<&str>,
@@ -120,8 +220,22 @@ fn session_start_envelope(
 ) -> Value {
     let context = match agent_prompt {
         Some(prompt) => {
-            let mut context = prompt.trim_end().to_string();
-            if let Some(line) = index_freshness_line(&pixel_block["pixel"]["repo"]) {
+            let freshness = index_freshness_line(&pixel_block["pixel"]["repo"]);
+            let prompt = prompt.trim_end();
+            // Claude Code (and a provider-less entry an older install
+            // wrote for it) truncates a long context; the freshness line is
+            // budgeted first so fitting never drops it.
+            let mut context = if matches!(provider, None | Some(Provider::Claude)) {
+                let reserved = freshness.as_deref().map_or(0, |line| utf16_len(line) + 2);
+                fit_prompt(
+                    prompt,
+                    CLAUDE_INLINE_CONTEXT_LIMIT.saturating_sub(reserved),
+                    &agent_prompt_location(),
+                )
+            } else {
+                prompt.to_string()
+            };
+            if let Some(line) = freshness {
                 context.push_str("\n\n");
                 context.push_str(&line);
             }
@@ -420,6 +534,21 @@ fn rewrite_json(provider: Provider, updated_input: Value) -> Value {
 }
 
 fn provider_rewrite(provider: Provider, payload: &Value) -> Option<Value> {
+    provider_rewrite_with(
+        provider,
+        payload,
+        crate::search_compat::native_configuration,
+    )
+}
+
+/// [`provider_rewrite`] with the check for the user's own rg/grep
+/// configuration passed in, so a test pins it instead of reading the
+/// developer's `RIPGREP_CONFIG_PATH` (#448).
+fn provider_rewrite_with(
+    provider: Provider,
+    payload: &Value,
+    native_configuration: impl Fn(crate::search_compat::SearchTool) -> bool,
+) -> Option<Value> {
     if !is_guard_event(
         payload,
         payload
@@ -472,10 +601,10 @@ fn provider_rewrite(provider: Provider, payload: &Value) -> Option<Value> {
         .map(|p| base.join(p))
         .unwrap_or(base);
     let rewritten = if matches!(provider, Provider::Devin | Provider::Zcode) {
-        crate::search_compat::rewrite_retrieval(&command, &cwd)
+        crate::search_compat::rewrite_retrieval_with(&command, &cwd, native_configuration)
             .or_else(|| reader_rewrite(&command, &cwd))?
     } else {
-        crate::search_compat::rewrite(&command, &cwd)?
+        crate::search_compat::rewrite_with(&command, &cwd, native_configuration)?
     };
     let rewritten_command = rewritten_command_value(original_command, rewritten)?;
     let mut updated = Value::Object(input.clone());
@@ -6786,6 +6915,157 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The prompt `pixel install` deploys, as the binary bundles it.
+    const DEPLOYED_PROMPT: &str = include_str!("../../pixel-install/assets/pixel-agent-prompt.md");
+
+    fn fresh_repo_block() -> Value {
+        serde_json::json!({"pixel": {
+            "capabilities": ["search-content"],
+            "usage": "u",
+            "repo": {"index_commit": "5855ef57b69f793bcdb4a2ce1e3499f9a0613253",
+                     "graph_present": true, "facts_fresh": true},
+        }})
+    }
+
+    fn context_of(out: &Value) -> &str {
+        out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+    }
+
+    /// Past 10 000 UTF-16 units Claude Code hands the model a 2 KB preview
+    /// of the context instead of the text, so the Claude session must get a
+    /// context within the limit that keeps the retrieval rules, says what
+    /// it left out and where it is, and keeps the index freshness line.
+    #[test]
+    fn claude_session_start_fits_the_deployed_prompt_in_the_inline_limit() {
+        assert!(
+            utf16_len(DEPLOYED_PROMPT) > CLAUDE_INLINE_CONTEXT_LIMIT,
+            "fixture: the deployed prompt exceeds the limit; if it no longer does, this test \
+             only checks that nothing is dropped"
+        );
+        for provider in [None, Some(Provider::Claude)] {
+            let out = session_start_envelope(&fresh_repo_block(), Some(DEPLOYED_PROMPT), provider);
+            let context = context_of(&out);
+            assert!(
+                utf16_len(context) <= CLAUDE_INLINE_CONTEXT_LIMIT,
+                "{provider:?}"
+            );
+            for kept in [
+                "# Pixel Retrieval Layer",
+                "## Choose the first retrieval command",
+                "## MANDATORY WORKFLOW",
+                "## REPLACEMENT MAP",
+                "## Hard rules",
+                "## FAIL-OPEN",
+                "## Environment",
+            ] {
+                assert!(context.contains(kept), "{provider:?} lost {kept}");
+            }
+            assert!(!context.contains("## Classify"), "{provider:?}");
+            assert!(
+                context.contains("Left out to fit Claude Code's") && context.contains("Classify"),
+                "{provider:?}: the pointer names what is missing"
+            );
+            assert!(
+                context.contains(AGENT_PROMPT_REL),
+                "{provider:?}: and where it is"
+            );
+            assert!(
+                context.ends_with(
+                    "Pixel index: commit 5855ef57b69f, code graph present, history index fresh."
+                ),
+                "{provider:?}: the freshness line survives"
+            );
+        }
+    }
+
+    /// Codex has its own context channel and no measured limit: its
+    /// SessionStart context stays the whole prompt.
+    #[test]
+    fn codex_session_start_keeps_the_whole_prompt() {
+        let out = session_start_envelope(
+            &fresh_repo_block(),
+            Some(DEPLOYED_PROMPT),
+            Some(Provider::Codex),
+        );
+        assert!(context_of(&out).starts_with(DEPLOYED_PROMPT.trim_end()));
+    }
+
+    /// The boundary is inclusive and counted in UTF-16 units: 🟩 counts two.
+    #[test]
+    fn fit_prompt_keeps_a_prompt_at_the_limit_and_counts_utf16_units() {
+        let at_limit = "a".repeat(8) + "🟩";
+        assert_eq!(fit_prompt(&at_limit, 10, "/p"), at_limit);
+        let over = "a".repeat(9) + "🟩";
+        assert!(utf16_len(&fit_prompt(&over, 10, "/p")) <= 10);
+    }
+
+    /// Deferrable sections go in their priority order, not their order in
+    /// the prompt; a section outside the list goes only once they are gone,
+    /// and the result never exceeds the limit.
+    #[test]
+    fn fit_prompt_leaves_out_deferrable_sections_first_then_trailing_ones() {
+        let body = "x".repeat(200);
+        let prompt = format!(
+            "# Title\n\n## Keep\n{body}\n## Recall\n{body}\n## Classify\n{body}\n## Tail\n{body}\n"
+        );
+        let one = fit_prompt(&prompt, utf16_len(&prompt) - 100, "/p");
+        assert!(
+            !one.contains("## Classify") && one.contains("## Recall"),
+            "{one}"
+        );
+        // The line names the sections and the file, not the budget left
+        // after the freshness reservation, which is no limit the user has.
+        assert!(
+            one.ends_with(
+                "\n\nLeft out to fit Claude Code's hook context limit: Classify. Read /p when a \
+                 task needs them."
+            ),
+            "{one}"
+        );
+        let two = fit_prompt(&prompt, utf16_len(&prompt) - 300, "/p");
+        assert!(
+            !two.contains("## Classify") && !two.contains("## Recall"),
+            "{two}"
+        );
+        assert!(
+            two.contains("## Tail") && two.contains("Classify; Recall"),
+            "{two}"
+        );
+        let tail = fit_prompt(&prompt, 400, "/p");
+        assert!(
+            !tail.contains("## Tail") && tail.contains("## Keep"),
+            "{tail}"
+        );
+        assert!(utf16_len(&tail) <= 400);
+        let cut = fit_prompt(&prompt, 40, "/p");
+        assert_eq!(utf16_len(&cut), 40, "the cut uses the whole budget: {cut}");
+        assert!(cut.starts_with("# Title"), "{cut}");
+    }
+
+    /// The freshness line and its blank line are reserved before fitting:
+    /// a prompt exactly that much under the limit is kept whole, and one
+    /// unit more is fitted, so prompt plus freshness never pass the limit.
+    #[test]
+    fn claude_session_start_reserves_the_freshness_line_exactly() {
+        let block = fresh_repo_block();
+        let freshness = index_freshness_line(&block["pixel"]["repo"]).unwrap();
+        let budget = CLAUDE_INLINE_CONTEXT_LIMIT - utf16_len(&freshness) - 2;
+        let exact = "a".repeat(budget);
+        let out = session_start_envelope(&block, Some(&exact), Some(Provider::Claude));
+        assert_eq!(context_of(&out), format!("{exact}\n\n{freshness}"));
+        let over = "a".repeat(budget + 1);
+        let out = session_start_envelope(&block, Some(&over), Some(Provider::Claude));
+        let context = context_of(&out);
+        assert!(
+            utf16_len(context) <= CLAUDE_INLINE_CONTEXT_LIMIT,
+            "{}",
+            utf16_len(context)
+        );
+        assert!(context.ends_with(&freshness));
+    }
+
     #[test]
     fn session_start_envelope_wraps_the_prompt_in_claude_contract() {
         let block = serde_json::json!({"pixel": {
@@ -7083,7 +7363,8 @@ mod tests {
             })
         };
         for tool in ["exec", "Bash"] {
-            let rewritten = provider_rewrite(Provider::Devin, &payload(tool)).expect(tool);
+            let rewritten =
+                provider_rewrite_with(Provider::Devin, &payload(tool), |_| false).expect(tool);
             assert_eq!(
                 rewritten["hookSpecificOutput"]["updatedInput"]["command"],
                 "pixel search-like-rg rg -- 'needle' 'src'",
@@ -7111,7 +7392,8 @@ mod tests {
             })
         };
         for tool in ["exec", "Bash"] {
-            let rewritten = provider_rewrite(Provider::Zcode, &payload(tool)).expect(tool);
+            let rewritten =
+                provider_rewrite_with(Provider::Zcode, &payload(tool), |_| false).expect(tool);
             assert_eq!(
                 rewritten["hookSpecificOutput"]["updatedInput"]["command"],
                 "pixel search-like-rg rg -- 'needle' 'src'",
@@ -7122,6 +7404,40 @@ mod tests {
             provider_rewrite(Provider::Zcode, &payload("WebSearch")),
             None
         );
+    }
+
+    /// A user's own rg configuration can change what `rg` prints, so the
+    /// rewrite declines for every provider when it is set; the check is the
+    /// injected one, not the developer's environment (#448).
+    #[test]
+    fn provider_rewrite_declines_a_search_the_users_rg_config_could_change() {
+        let repo = scratch_repo("rg-config-rewrite");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".pixel")).unwrap();
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rg needle src"},
+            "cwd": repo,
+        });
+        for provider in [
+            Provider::Claude,
+            Provider::Codex,
+            Provider::Devin,
+            Provider::Zcode,
+        ] {
+            assert_eq!(
+                provider_rewrite_with(provider, &payload, |tool| {
+                    tool == crate::search_compat::SearchTool::Rg
+                }),
+                None,
+                "{provider:?}"
+            );
+            assert!(
+                provider_rewrite_with(provider, &payload, |_| false).is_some(),
+                "{provider:?}"
+            );
+        }
     }
 
     /// The native fallback is the policy's deny path: with `enforce` on, a

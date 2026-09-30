@@ -182,6 +182,10 @@ switch (args[0]) {
     assert.equal(await why("cp src/main.rs /tmp/x"), "repository read: use pixel search-content or pixel pack-context <uid>");
     assert.equal(await why("rg error src"), "repository search: use pixel search-content");
     assert.equal(await why("grep error src"), "repository search: use pixel search-content");
+    // No path operand: the search runs over the cwd, the repository; the
+    // pattern must not be read as a path that does not exist.
+    assert.equal(await why("rg error"), "repository search: use pixel search-content");
+    assert.equal(await why("grep -rn error"), "repository search: use pixel search-content");
     assert.equal(await why("ls src"), "repository discovery: use pixel list-areas or find-code");
     assert.equal(await why("find src"), "repository discovery: use pixel find-code or list-areas");
     assert.equal(await why("git status"), "repository inspection: use pixel repo-state");

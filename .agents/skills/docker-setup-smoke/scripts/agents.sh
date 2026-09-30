@@ -37,6 +37,34 @@ serve() {
     exit 1
 }
 actions() { grep -c "\"command\":\"$1\"" .pixel/actions.jsonl || true; }
+hook_runs() { grep -c "\"args\":\"run-hook [a-z-]* --provider $1" .pixel/actions.jsonl || true; }
+# The last decision pi's project guard logged for a bash call.
+pi_decision() {
+    python3 - <<'PY'
+import json
+try:
+    rows = [json.loads(line) for line in open(".pixel/pi-policy.jsonl")]
+except OSError:
+    rows = []
+rows = [r for r in rows if r.get("tool") == "bash"]
+print(f"{rows[-1]['kind']}: {rows[-1]['reason']}" if rows else "no decision logged")
+PY
+}
+# One session whose model runs only the native grep: how the guard answers it.
+grep_session() {
+    agent=$1
+    shift
+    # A prefix assignment on a function call does not reliably reach its
+    # children in every sh, so the exported value is swapped around it.
+    saved=$FAKE_LLM_COMMANDS
+    FAKE_LLM_COMMANDS='grep -rn helper_1 src'
+    serve "$agent"
+    FAKE_LLM_COMMANDS=$saved
+    "$@" > "/evidence/$agent.out" 2> "/evidence/$agent.err" < /dev/null
+    kill "$server"
+    wait "$server" 2>/dev/null || true
+    grep -q FAKE_LLM_DONE "/evidence/$agent.out"
+}
 # Evidence for one finished session: prompt delivered, both tool results fed
 # back, the model's pixel call logged; the guard outcome is reported.
 verify() {
@@ -67,11 +95,14 @@ if "<persisted-output>" in first and "Pixel Retrieval Layer" in first:
     print(f"NOTE {agent} received the Pixel prompt as a persisted-output preview, not inline")
 PY
     test "$(actions search-content)" -gt "$searches_before"
-    compat=$(actions search-compat)
-    if [ "$compat" -gt "$compat_before" ]; then
-        echo "NOTE $agent guard routed the native grep through pixel"
-    else
-        echo "NOTE $agent guard left the native grep unchanged"
+    if [ "$agent" != pi ]; then
+        # pi's guard blocks instead of rerouting; pi_decision reports it.
+        compat=$(actions search-compat)
+        if [ "$compat" -gt "$compat_before" ]; then
+            echo "NOTE $agent guard routed the native grep through pixel"
+        else
+            echo "NOTE $agent guard left the native grep unchanged"
+        fi
     fi
     echo "PASS $agent session received the Pixel prompt and ran pixel from its shell"
 }
@@ -86,14 +117,26 @@ python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"])' /evi
 verify claude 'Pixel Retrieval Layer' "$before_searches" "$before_compat"
 before_searches=$(actions search-content)
 before_compat=$(actions search-compat)
+before_hooks=$(hook_runs codex)
 serve codex
 # The trust entry is what accepting Codex's project prompt writes.
-SMOKE_FAKE_KEY=fake timeout 120 codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \
-    -c model_provider=smoke \
-    -c "model_providers.smoke={name=\"smoke\",base_url=\"http://127.0.0.1:$port/v1\",env_key=\"SMOKE_FAKE_KEY\",wire_api=\"responses\"}" \
-    -c "projects.\"$project\".trust_level=\"trusted\"" -m smoke-fake-model \
-    'Where is helper_1 defined?' > /evidence/codex.out 2> /evidence/codex.err
+# shellcheck disable=SC2120 # extra flags come from the grep_session call below
+codex_exec() {
+    SMOKE_FAKE_KEY=fake timeout 120 codex exec --skip-git-repo-check --dangerously-bypass-approvals-and-sandbox \
+        -c model_provider=smoke \
+        -c "model_providers.smoke={name=\"smoke\",base_url=\"http://127.0.0.1:$port/v1\",env_key=\"SMOKE_FAKE_KEY\",wire_api=\"responses\"}" \
+        -c "projects.\"$project\".trust_level=\"trusted\"" -m smoke-fake-model "$@" 'Where is helper_1 defined?'
+}
+codex_exec > /evidence/codex.out 2> /evidence/codex.err
 verify codex 'pixel:managed:begin' "$before_searches" "$before_compat"
+echo "NOTE codex ran $(( $(hook_runs codex) - before_hooks )) Pixel hook(s)"
+# Codex runs a hook only once the user has reviewed it (`/hooks`); the bypass
+# stands in for that review, to tell an unreviewed hook from a broken one.
+before_hooks=$(hook_runs codex)
+before_compat=$(actions search-compat)
+grep_session codex-hooks-trusted codex_exec --dangerously-bypass-hook-trust
+echo "NOTE with hook review bypassed, codex ran $(( $(hook_runs codex) - before_hooks )) Pixel hook(s)" \
+    "and its guard routed $(( $(actions search-compat) - before_compat )) grep(s) through pixel"
 before_searches=$(actions search-content)
 before_compat=$(actions search-compat)
 serve pi
@@ -102,7 +145,15 @@ cat > "$HOME/.pi/agent/models.json" <<JSON
   "apiKey": "fake", "models": [{"id": "smoke-fake-model"}]}}}
 JSON
 # --approve is the one-shot form of trusting the project, which loads its guard.
-timeout 120 pi --print --approve --provider smoke --model smoke-fake-model \
-    'Where is helper_1 defined?' > /evidence/pi.out 2> /evidence/pi.err < /dev/null
+pi_print() {
+    timeout 120 pi --print --approve --provider smoke --model smoke-fake-model 'Where is helper_1 defined?'
+}
+pi_print > /evidence/pi.out 2> /evidence/pi.err < /dev/null
 verify pi 'pixel:managed:begin' "$before_searches" "$before_compat"
+echo "NOTE pi guard under the default policy: $(pi_decision)"
+pixel config policy enforce > /dev/null
+grep_session pi-enforce pi_print
+echo "NOTE pi guard under policy enforce: $(pi_decision)"
+pixel config policy advisory > /dev/null
 cp .pixel/actions.jsonl /evidence/agents-actions.jsonl
+cp .pixel/pi-policy.jsonl /evidence/pi-policy.jsonl 2>/dev/null || true
