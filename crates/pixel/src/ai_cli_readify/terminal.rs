@@ -331,6 +331,27 @@ impl Drop for ScriptTerminal {
 /// `Interrupted` or any other error on demand. The production path is
 /// unchanged: `pump` hands it the child's read end, its screen and its read
 /// buffer.
+/// Keep the last [`SCREEN_CAP_CHARS`] characters of `screen`, cutting on a
+/// character boundary.
+///
+/// The cap is a character count, so the cut has to be one.
+/// `screen.len() - SCREEN_CAP_CHARS` is a byte count: it lands inside a
+/// character as soon as the screen ends in a three-byte one, and `drain`
+/// panics off a boundary instead of trimming. Counting the characters to
+/// drop and taking the byte offset of the first one to keep gives a
+/// boundary by construction.
+///
+/// Written without a comparison on purpose: `if count > CAP { trim }`
+/// leaves the case `count == CAP` doing nothing under either operator, so
+/// the `>=` mutant is equivalent and no test can hold it. `drop` is zero
+/// when the screen is inside the cap, and a zero drop cuts at offset zero,
+/// which is no cut at all.
+fn trim_to_cap(screen: &mut String) {
+    let drop = screen.chars().count().saturating_sub(SCREEN_CAP_CHARS);
+    let at = screen.char_indices().nth(drop).map_or(0, |(at, _)| at);
+    screen.drain(..at);
+}
+
 fn drain_screen<R: Read>(reader: &mut R, screen: &mut String, buf: &mut [u8]) -> io::Result<()> {
     for _ in 0..PUMP_READS {
         match reader.read(buf) {
@@ -338,19 +359,7 @@ fn drain_screen<R: Read>(reader: &mut R, screen: &mut String, buf: &mut [u8]) ->
             Ok(n) => {
                 let chunk = String::from_utf8_lossy(&buf[..n]);
                 screen.push_str(&chunk);
-                if screen.chars().count() > SCREEN_CAP_CHARS {
-                    // The cap is a character count, so the cut has to be
-                    // one. `screen.len() - SCREEN_CAP_CHARS` is a byte
-                    // count: it lands inside a character as soon as the
-                    // screen ends in a three-byte one, and `drain` panics
-                    // off a boundary instead of trimming. Walking back
-                    // `SCREEN_CAP_CHARS` characters from the end gives the
-                    // offset of the first character to keep, which is a
-                    // boundary by construction.
-                    if let Some((at, _)) = screen.char_indices().rev().nth(SCREEN_CAP_CHARS - 1) {
-                        screen.drain(..at);
-                    }
-                }
+                trim_to_cap(screen);
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
             Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
