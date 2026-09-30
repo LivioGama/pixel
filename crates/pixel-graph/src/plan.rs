@@ -1134,17 +1134,19 @@ fn env_reads(text: &str, marker: &str, quoted: bool) -> Vec<(String, u32)> {
 fn auth_marker_hits(text: &str) -> Vec<(&'static str, u32)> {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
+    // Iteration cap (see `auth_call_hits` for the rationale): an arithmetic
+    // mutant that breaks the loop's strict advance would otherwise spin
+    // until cargo-mutants' test timeout, surfacing as TIMEOUT instead of
+    // caught.
+    let mut iter_budget = bytes.len() + AUTH_MARKERS.len() + 1;
     for &marker in AUTH_MARKERS {
-        // The post-match offset is computed with `checked_add` so a
-        // `+` → `-` cargo-mutants flip cannot underflow to a value that
-        // leaves `from` unchanged. Underflow on `at + marker.len()` (e.g.
-        // when `at == marker.len()` for an early match) would otherwise
-        // make `from = next` and the loop would spin forever, surfacing
-        // as a cargo-mutants TIMEOUT. `checked_add` collapses any overflow
-        // to `bytes.len()`, which terminates the loop on the next `find`.
         let mut from = 0;
-        while let Some(off) = text[from..].find(marker) {
-            let at = from + off;
+        while iter_budget > 0 {
+            iter_budget -= 1;
+            let Some(off) = text[from..].find(marker) else {
+                break;
+            };
+            let at = from.saturating_add(off);
             let end = at.checked_add(marker.len()).unwrap_or(bytes.len());
             let left_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
             let right_ok = end >= bytes.len() || !bytes[end].is_ascii_lowercase();
@@ -1152,10 +1154,7 @@ fn auth_marker_hits(text: &str) -> Vec<(&'static str, u32)> {
                 out.push((marker, line_at(text, at)));
                 break;
             }
-            // Strict advance: even if `end` saturated to `bytes.len()`
-            // (overflow case) the loop terminates on the next `find`;
-            // otherwise `end` is the byte past the match.
-            from = end;
+            from = end.max(from + 1);
         }
     }
     out
@@ -1168,18 +1167,26 @@ fn auth_call_hits(text: &str) -> Vec<u32> {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
     let auth_len = "auth".len();
+    // Iteration cap: every real call advances `from` by at least one byte,
+    // so `bytes.len() + 1` is a generous bound. cargo-mutants can flip
+    // arithmetic at `from.saturating_add(off)` or `at.checked_add`,
+    // leaving `from` unchanged; without this cap, the loop spins until
+    // cargo-mutants' own test timeout kills the test, which it reports
+    // as TIMEOUT instead of caught. `from.max(from + 1)` keeps the
+    // pointer strictly advancing no matter what the arithmetic site does.
+    let mut iter_budget = bytes.len() + 1;
     let mut from = 0;
-    while let Some(off) = text[from..].find("auth") {
-        let at = from + off;
-        // `checked_add` for the same reason as `auth_marker_hits`: a
-        // `+` → `-` flip on `at + "auth".len()` when `at == 4` (the
-        // first match in the unit fixture) yields `next = 0`, which makes
-        // `from = next` and the loop spins forever.
+    while iter_budget > 0 {
+        iter_budget -= 1;
+        let Some(off) = text[from..].find("auth") else {
+            break;
+        };
+        let at = from.saturating_add(off);
         let next = at.checked_add(auth_len).unwrap_or(bytes.len());
         if (at == 0 || !is_ident_byte(bytes[at - 1])) && next < bytes.len() && bytes[next] == b'(' {
             out.push(line_at(text, at));
         }
-        from = next;
+        from = next.max(from + 1);
     }
     out
 }
@@ -2197,6 +2204,48 @@ mod tests {
         );
     }
 
+    /// The quoted path tolerates whitespace between the marker and the
+    /// opening quote, and reads an identifier whose first byte may be
+    /// lowercase as long as some byte is uppercase. These assertions pin
+    /// every `+`, `<`, `||`, and `-` site in the inner loops so a mutant
+    /// on the quoted path cannot survive undetected.
+    #[test]
+    fn env_reads_quoted_path_handles_whitespace_and_lowercase_prefixes() {
+        // Whitespace between `env::var(` and the opening quote: the
+        // function strips it. A `<` → `<=` mutant on the whitespace scan
+        // leaves the loop pointer past the quote and reads garbage.
+        let text = "x = env::var(\t \"DATABASE_URL\")\n";
+        assert_eq!(
+            env_reads(text, "env::var(", true),
+            [("DATABASE_URL".to_string(), 1)]
+        );
+        // Lowercase prefix, one uppercase byte qualifies the var. A
+        // `||` → `&&` mutant on the uppercase check rejects the var; a
+        // `-` → `+` mutant on `pos - start` accepts the empty span.
+        let text2 = "x = env::var(\"lowercaseKEY\")\n";
+        assert_eq!(
+            env_reads(text2, "env::var(", true),
+            [("lowercaseKEY".to_string(), 1)]
+        );
+        // Single-char identifier is rejected (length >= 2). A
+        // `pos - start >= 2` mutant to `>= 1` would accept "X".
+        let text3 = "x = env::var(\"X\")\n";
+        assert!(env_reads(text3, "env::var(", true).is_empty());
+        // Single-quote and double-quote both delimit. The match-arm
+        // `b'"' | b'\''` mutant to either char alone loses the other.
+        let text4 = "x = env::var('SINGLE')\n";
+        assert_eq!(
+            env_reads(text4, "env::var(", true),
+            [("SINGLE".to_string(), 1)]
+        );
+        // Quote must be present after the optional whitespace; without
+        // it, no var is read. The `pos >= bytes.len() || !matches!`
+        // guard mutates to `&&` which would skip the guard and panic on
+        // out-of-bounds.
+        let text5 = "x = env::var(NO_QUOTES)\n";
+        assert!(env_reads(text5, "env::var(", true).is_empty());
+    }
+
     /// Exact match or a `rest` continuation that starts with a path/separator
     /// char — `striped` and `pgx` must not match `stripe`/`pg`.
     #[test]
@@ -2292,6 +2341,80 @@ mod tests {
         assert!(auth_call_hits("const x = auth").is_empty());
         assert!(auth_call_hits("auth").is_empty());
         assert!(auth_call_hits("oauth\nauth").is_empty());
+    }
+
+    /// `provider_env_prefix` returns the env-key prefix the spec catalog
+    /// advertises, or `None` for an unknown provider. Without these
+    /// assertions a `None` mutant (`Some("")`, `Some("xyzzy")`) silently
+    /// degrades the gate label to "the provider's env keys" with no
+    /// prefix to search for.
+    #[test]
+    fn provider_env_prefix_maps_every_catalogued_provider() {
+        assert_eq!(provider_env_prefix("Stripe"), Some("STRIPE_"));
+        assert_eq!(provider_env_prefix("OpenAI"), Some("OPENAI_"));
+        assert_eq!(provider_env_prefix("Supabase"), Some("SUPABASE_"));
+        assert_eq!(provider_env_prefix("Anthropic"), Some("ANTHROPIC_"));
+        assert_eq!(provider_env_prefix("AWS"), Some("AWS_"));
+        assert_eq!(provider_env_prefix("NotInCatalog"), None);
+    }
+
+    /// `prereq_lang` maps every supported extension to its language
+    /// bucket; a `delete match arm "rs"` mutant leaves Rust files
+    /// returning "" and silently disables every env-read test for them.
+    #[test]
+    fn prereq_lang_recognises_every_supported_extension() {
+        assert_eq!(prereq_lang("src/foo.ts"), "js");
+        assert_eq!(prereq_lang("src/foo.tsx"), "js");
+        assert_eq!(prereq_lang("src/foo.rs"), "rs");
+        assert_eq!(prereq_lang("src/foo.go"), "go");
+        assert_eq!(prereq_lang("src/foo.py"), "py");
+        assert_eq!(prereq_lang("src/foo.rb"), "rb");
+        assert_eq!(prereq_lang("src/foo.java"), "jvm");
+        assert_eq!(prereq_lang("src/foo.kt"), "jvm");
+        // Unknown extension maps to "" (the catch-all), so env_reads is
+        // skipped for unsupported languages instead of misclassified.
+        assert_eq!(prereq_lang("src/foo.unknown"), "");
+        assert_eq!(prereq_lang("src/foo"), "");
+    }
+
+    /// `detect_prereqs` keys the auth-line dedup by `(file, detail)`.
+    /// A `match guard *existing <= line` mutant flips to `false` (never
+    /// update) or `true` (always update), changing which line wins. A
+    /// reverse-order fixture (auth call on line 9 BEFORE line 5) makes
+    /// the difference observable: topmost stays at 5 even when the
+    /// detector sees 9 first.
+    #[test]
+    fn detect_prereqs_keeps_topmost_line_even_when_calls_appear_in_reverse_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let w = |rel: &str, content: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, content).unwrap();
+        };
+        // File has auth() on line 9 first, then auth() on line 5. The
+        // topmost line is 5; a `false` guard (never update existing) would
+        // keep 9 as the line; a `true` guard (always update) would still
+        // end at 5 because line 5 is the smaller of the two.
+        w(
+            "src/page.tsx",
+            "const a = 1;\n\
+             const b = 2;\n\
+             const c = 3;\n\
+             const d = 4;\n\
+             const e = auth();\n\
+             const f = 6;\n\
+             const g = 7;\n\
+             const h = 8;\n\
+             const i = auth();\n",
+        );
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let page = file(&mut store, "src/page.tsx");
+        store.insert_import(page, "x", None, &[]).unwrap();
+        let out = detect_prereqs(&store, root, &["src/page.tsx".into()]).unwrap();
+        let auth: Vec<&Prereq> = out.iter().filter(|p| p.kind == PrereqKind::Auth).collect();
+        assert_eq!(auth.len(), 1, "{out:?}");
+        assert_eq!(auth[0].line, 5, "topmost line is 5; got {}", auth[0].line);
     }
 
     /// Plan targets pull one import hop in both directions: a resolved
