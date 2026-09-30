@@ -1525,16 +1525,14 @@ fn a_host_that_imports_claude_config_never_starts_the_claude_handoff() {
         "a host that only imports Claude's config must not own a Claude task"
     );
 
-    // A real Claude Code session still hands the same prompt off.
+    // A real Claude Code session gets the same accept-and-continue treatment:
+    // the handoff was retired, so it rejects no prompt and starts no worker.
     let claude = submit(false);
-    assert_eq!(claude.status.code(), Some(2), "{claude:?}");
+    assert_eq!(claude.status.code(), Some(0), "{claude:?}");
+    assert!(claude.stderr.is_empty(), "{claude:?}");
     assert!(
-        String::from_utf8_lossy(&claude.stderr).contains("foreground prompt handed off"),
-        "{claude:?}"
-    );
-    assert!(
-        repo.join(".pixel/tasks").is_dir(),
-        "a Claude Code session records the accepted task"
+        !repo.join(".pixel/tasks").exists(),
+        "the retired handoff starts no Claude worker for any host"
     );
 }
 
