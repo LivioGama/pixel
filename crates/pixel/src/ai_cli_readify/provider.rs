@@ -711,6 +711,13 @@ mod tests {
     fn redact_keeps_ordinary_prose_intact() {
         let text = "no usable account credit (HTTP 402)";
         assert_eq!(redact(text), text);
+        // A URL is the other long thing a provider's error body carries, and
+        // it is not a key: its `:` and `/` sit outside the key alphabet, so
+        // the run is not key-shaped however long it is. The predicate has to
+        // reject on any one of them — accept on any one and every long token
+        // in the report is masked, URL included.
+        let url = "https://ollama.com/v1/chat/completions";
+        assert_eq!(redact(url), url);
     }
 
     #[test]
