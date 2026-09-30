@@ -82,13 +82,21 @@ These are benchmark accuracy scores, not per-decision probabilities.
 ## Install
 
 ```bash
-brew install LivioGama/tap/pixel
+curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh
 pixel install      # once: wires Claude Code, Codex, Pi, OpenCode and Antigravity
 pixel doctor .     # optional health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
-On Linux, Homebrew gives every formula its own `glibc` and `gcc` (gcc alone is over 400 MB) when the system glibc is older than the one its CI builds with (2.39 on Homebrew 7: Ubuntu 22.04 and Debian 12 are older). Pixel is a static binary and needs neither; on such a system, `curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh` installs it without them.
+The one-liner runs [`scripts/install.sh`](scripts/install.sh), which every release publishes as an asset: one POSIX `sh` file, no `sudo`. It downloads the release archive for your platform (macOS on Apple Silicon, Linux x86_64 or arm64), refuses it unless its SHA-256 matches the release's checksum, and writes a single file, `~/.local/bin/pixel` (`PIXEL_INSTALL_DIR` moves it). It edits no shell profile; if that directory is not on your `PATH`, it says so. To read it before it runs:
+
+```bash
+curl -fsSL -o install.sh https://github.com/LivioGama/pixel/releases/latest/download/install.sh
+less install.sh    # every line it will run
+sh install.sh
+```
+
+With Homebrew instead: `brew install LivioGama/tap/pixel`. On Linux, Homebrew gives every formula its own `glibc` and `gcc` (gcc alone is over 400 MB) when the system glibc is older than the one its CI builds with (2.39 on Homebrew 7: Ubuntu 22.04 and Debian 12 are older); Pixel is a static binary and needs neither, so the script is the lighter path there.
 
 Once a day, a command run at a terminal prints one yellow line when a newer release is out, with the command that updates your install (`brew`, `mise` or `install.sh`); hooks and agents never see it, and `PIXEL_NO_UPDATE_CHECK=1` turns it off.
 

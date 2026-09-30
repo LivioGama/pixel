@@ -10,10 +10,10 @@
 Pixel is a command-line tool: {{ $a.name }} runs the `pixel` binary, so install it first (macOS and Linux).
 
 ```bash
-brew install LivioGama/tap/pixel
+curl -fsSL https://github.com/{{ site.Params.repo }}/releases/latest/download/install.sh | sh
 ```
 
-The [install script]({{ $docs }}#install) is the other channel. Neither one changes any agent's configuration.
+[How to read the script before it runs, and Homebrew]({{ $docs }}#install), the other channel. Neither one changes any agent's configuration.
 {{ if eq $a.wiring "install" }}
 ## What pixel install writes
 
