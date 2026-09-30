@@ -13,6 +13,10 @@ use std::{
     path::Path,
 };
 
+// Codex's own config file name, owned by `pixel_install::codex_config`
+// because `pixel install` reads and writes that same file: importing it is
+// the only spelling, so a rename there cannot leave this writer behind.
+use pixel_install::codex_config::CODEX_CONFIG_FILE;
 use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
 
@@ -78,7 +82,6 @@ pub(crate) const CLAUDE_MODEL_SLOTS: [&str; 4] = [
 /// slots above because it is not a slot a user sets but a separate override.
 pub(crate) const CLAUDE_SUBAGENT_MODEL_ENV: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
 
-pub(crate) const CODEX_CONFIG_FILE: &str = "config.toml";
 pub(crate) const CLAUDE_SETTINGS_FILE: &str = ".claude/settings.json";
 pub(crate) const DEVIN_CONFIG_FILE: &str = ".config/devin/config.json";
 
