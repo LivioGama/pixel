@@ -1,6 +1,5 @@
 #!/bin/sh
 set -eu
-sh /checks/prepare.sh
 git init -q /source
 cd /source
 git remote add origin https://github.com/LivioGama/pixel.git

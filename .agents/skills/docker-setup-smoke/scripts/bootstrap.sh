@@ -1,6 +1,5 @@
 #!/bin/sh
 set -eu
-sh /checks/prepare.sh
 case "$(uname -m)" in
     aarch64) target=aarch64-unknown-linux-musl ;;
     x86_64) target=x86_64-unknown-linux-musl ;;

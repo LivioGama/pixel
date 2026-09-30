@@ -29,27 +29,38 @@ docker info >/dev/null
 mkdir -p "$repo/target/docker-setup-smoke"
 evidence=$(mktemp -d "$repo/target/docker-setup-smoke/run-XXXXXX")
 container="pixel-setup-smoke-${evidence##*/}-$$"
-image='debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251'
+base='debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251'
 bootstrap=bootstrap.sh
 budget=300
 if [[ $mode == source ]]; then
     release=''
-    image='rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e'
+    base='rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e'
     bootstrap=source.sh
     budget=1800
 fi
+image="pixel-setup-smoke:$mode"
 trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 echo "Evidence: $evidence"
 {
-    printf 'checkout: %s\nmode: %s\nrelease: %s\nsource-ref: %s\nimage: %s\n' \
-        "$(git -C "$repo" rev-parse HEAD)" "$mode" "$release" "$source_ref" "$image"
+    printf 'checkout: %s\nmode: %s\nrelease: %s\nsource-ref: %s\nbase: %s\n' \
+        "$(git -C "$repo" rev-parse HEAD)" "$mode" "$release" "$source_ref" "$base"
     printf 'command: bash %q' "$0"
     if [[ $# -gt 0 ]]; then printf ' %q' "$@"; fi
     printf '\n'
     docker version
 } > "$evidence/identity.txt"
+# Only the environment is built: no context is sent, pixel is fetched at run time.
+if ! docker build --progress plain --build-arg "BASE=$base" --tag "$image" - \
+    < "$scripts/Dockerfile" > "$evidence/build.log" 2>&1; then
+    echo 1 > "$evidence/exit-status.txt"
+    cat "$evidence/build.log"
+    echo 'Could not build the smoke image' >&2
+    exit 1
+fi
+printf 'image: %s %s\n' "$image" "$(docker image inspect --format '{{.Id}}' "$image")" \
+    >> "$evidence/identity.txt"
 # Retain the stopped container just long enough to export failed checks too.
 set +e
 docker run --name "$container" \
@@ -57,7 +68,7 @@ docker run --name "$container" \
     --mount "type=bind,src=$scripts,dst=/checks,readonly" \
     --env "PIXEL_RELEASE=$release" --env "PIXEL_SOURCE_REF=$source_ref" \
     --env "PIXEL_BOOTSTRAP=$bootstrap" --env "PIXEL_BOOTSTRAP_TIMEOUT=$budget" "$image" \
-    sh -ec 'mkdir /evidence; timeout "$PIXEL_BOOTSTRAP_TIMEOUT" sh "/checks/$PIXEL_BOOTSTRAP"; timeout 180 su - tester -s /bin/sh -c "sh /checks/checks.sh"' \
+    sh -ec 'timeout "$PIXEL_BOOTSTRAP_TIMEOUT" sh "/checks/$PIXEL_BOOTSTRAP"; timeout 180 su - tester -s /bin/sh -c "sh /checks/checks.sh"' \
     > "$evidence/run.log" 2>&1
 status=$?
 set -e
