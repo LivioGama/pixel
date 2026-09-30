@@ -48,7 +48,10 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   compatibility (`#agents`), questions (`#faq`), installation (`#install`)
   and the closing map message. Hero, nav and closing share one primary
   action: try Pixel on your repo. Installation stays in one terminal with
-  Script, Read it first, Homebrew and Your agent variants. Keep
+  Script, Read it first, Homebrew and Your agent variants, beside a visual
+  setup sequence. Shell commands stay on one line and scroll within the
+  terminal on narrow screens. Own-repo checks stack vertically; specs use
+  three wider columns, then two, then labelled rows on mobile. Keep
   `$agentPrompt` in step with the root README. The inspected script remains
   linked to the released tag; never deploy while validating a branch.
 - The wall uses `data/read_savings.toml`; the evidence compares whole files

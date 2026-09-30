@@ -211,7 +211,7 @@
           <p>After a few sessions, inspect measured Pixel output volumes and versioned workflow estimates. These do not measure all agent reads or billed cost.</p>
         </li>
       </ol>
-      <p class="numbers__more" data-reveal>Not installed yet? <a class="link" href="#install">Choose your installation method</a>. After installing, run <code>pixel install</code>, restart your agent, and <a class="link" href="{{ "for/" | relURL }}">check its setup</a>. The method behind the count: <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">measure it on your own code</a>.</p>
+      <p class="numbers__more" data-reveal>The method behind the count: <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">measure it on your own code</a>.</p>
     </section>
 
     {{/* ---------- how it works ---------- */}}
@@ -327,16 +327,23 @@
               </div>
               <button class="cmd__copy term__copy" type="button" data-copy="{{ $curl }} && pixel install && pixel doctor .">Copy all</button>
             </div>
-            <pre class="term__body"><code><span data-line="curl"><span class="term__p">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</span><span data-line="inspect" hidden><span class="term__p">$</span> curl -fsSL -o install.sh {{ replace $scriptURL "/" "/<wbr>" | safeHTML }}</span><span data-line="inspect" hidden><span class="term__p">$</span> less install.sh    <span class="term__c"># read every line it will run</span></span><span data-line="inspect" hidden><span class="term__p">$</span> sh install.sh</span><span data-line="brew" hidden><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span></span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel list-signatures path/to/a/large/file.py  <span class="term__c"># first result, in your repo</span></span><span data-line="agent" hidden><span class="term__c"># paste into Claude Code, Codex, Pi or any agent with a shell</span></span><span data-line="agent" hidden><span class="term__p">&gt;</span> {{ $agentPrompt }}</span></code></pre>
+            <pre class="term__body" tabindex="0" role="region" aria-label="Installation commands"><code><span data-line="curl"><span class="term__p">$</span> {{ $curl }}</span><span data-line="inspect" hidden><span class="term__p">$</span> curl -fsSL -o install.sh {{ $scriptURL }}</span><span data-line="inspect" hidden><span class="term__p">$</span> less install.sh</span><span data-line="inspect" hidden><span class="term__p">$</span> sh install.sh</span><span data-line="brew" hidden><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel install</span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel doctor .</span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel list-signatures path/to/a/large/file.py</span><span data-line="agent" hidden><span class="term__c"># paste into Claude Code, Codex, Pi or any agent with a shell</span></span><span data-line="agent" hidden><span class="term__p">&gt;</span> {{ $agentPrompt }}</span></code></pre>
           </div>
+          <p class="term__hint">Scroll sideways to read the full commands.</p>
           <noscript><p class="install__more">For Homebrew or the download-and-read variant, see <a class="link" href="{{ "docs/" | relURL }}#install">all installation methods</a>.</p></noscript>
-          {{/* Measured on a fresh clone of psf/requests with the pixel of this commit; re-run it when the report line changes (crates/pixel-actionlog/src/metrics.rs, measured_read_section). */}}
-          <p class="install__more">The last line needs no session: under the file's outline, Pixel's report compares it with reading the whole file. On Requests at <code>611c616</code>, with Pixel 0.5.1, <code>models.py</code>: <code>full read 10365 tok, pixel answer 641 tok (-94%)</code>, estimated as UTF-8 bytes ÷ 4. <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">Method</a>.</p>
-          {{/* The prebuilt targets are release.yml's matrix (aarch64-apple-darwin, x86_64 and aarch64 musl Linux), and scripts/install.sh refuses an archive whose .sha256 it cannot fetch or match: change this line when either changes. */}}
-          <p class="install__more">Prebuilt for Apple Silicon Macs and Linux (x86_64, arm64); <a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">the script</a> checks the archive's SHA&#8209;256 before it installs anything, and writes only <code>~/.local/bin/pixel</code> (<code>PIXEL_INSTALL_DIR</code> moves it). No Windows build yet. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}">Plugins and rules files</a>.</p>
-          <p class="install__more"><code>pixel install</code> edits your agents' settings, so every file it writes is listed per agent, with the check and the removal: <a class="link" href="{{ "for/" | relURL }}">what Pixel writes for each agent</a>.</p>
-          <p class="install__more install__ask">Questions, or stuck on setup? <a class="link" href="{{ site.Params.github_url }}/discussions" target="_blank" rel="noopener">Ask in GitHub Discussions</a>.</p>
+          <p class="install__more">Run inside your repo. Restart your agent after <code>pixel install</code>.</p>
+          <p class="install__more"><a class="link" href="{{ "docs/" | relURL }}#install">All installation details</a> · <a class="link" href="{{ site.Params.github_url }}/discussions" target="_blank" rel="noopener">Setup help</a></p>
         </div>
+        <aside class="setup__guide" aria-labelledby="setup-guide-title" data-reveal>
+          <h3 id="setup-guide-title">From download to your first outline</h3>
+          <ol class="setup__flow">
+            <li><span class="setup__n" aria-hidden="true">1</span><div><strong>Get the binary</strong><p>Apple Silicon Macs · Linux x86_64 / arm64. No Windows build yet.</p><a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">Read the script</a></div></li>
+            <li><span class="setup__n" aria-hidden="true">2</span><div><strong>Connect your agent</strong><p>Hooks and rules in its settings.</p><a class="link" href="{{ "for/" | relURL }}">Files changed &amp; removal</a></div></li>
+            <li><span class="setup__n" aria-hidden="true">3</span><div><strong>Check the setup</strong><p><code>pixel doctor .</code> checks it. Optional, inspectable.</p></div></li>
+            <li><span class="setup__n" aria-hidden="true">4</span><div><strong>See your first outline</strong><p>Replace the example path with a file in your repo. Compare its outline with a full read.</p><a class="link" href="{{ $bench }}#measure-it-on-your-own-code">How the count works</a></div></li>
+          </ol>
+          <p class="setup__note">Script download: SHA&#8209;256 checked → <code>~/.local/bin/pixel</code><br><code>PIXEL_INSTALL_DIR</code> changes the destination.</p>
+        </aside>
       </div>
       {{/* The call for more voices, under the install it follows (the report needs a few sessions), not in the Proof chapter, where it drew attention to an empty list of quotes: a Show and tell discussion prefilled with what a quote needs (the numbers, the repository, the agent). A quote only moves to data/voices.toml with its author's written consent. */}}
       {{ $title := "My pixel token-savings numbers" }}
