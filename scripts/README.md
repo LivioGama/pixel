@@ -22,6 +22,7 @@ pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-c
 | `test-prepare.py` | `python3 scripts/test-prepare.py` | contract of `.agents/skills/release/prepare.sh`'s pull request listing (stub gh/cargo, disposable repo, needs `jq`) |
 | `test-install.py` | `python3 scripts/test-install.py` | contract of `install.sh` (fake curl/uname, local tarball) |
 | `test-clean.py` | `python3 scripts/test-clean.py` | contract of `clean.sh`, mostly what it must *not* remove (disposable repo with a second worktree) |
+| `test-pr-swarm.py` | `python3 scripts/test-pr-swarm.py` | contract of `pr-swarm.sh` (stub `gh`/`rmux`/`claude`, real git in a throwaway repo): idempotency, a `gh` outage never tearing down, merge/teardown rails, branch-rename retitling and agent-name derivation |
 | `verify-action-pins.py` | `python3 scripts/verify-action-pins.py` | every `uses:` in `.github/` pinned to a full commit SHA with a `# <ref>` comment (or local, or a docker digest); unparsed forms fail closed |
 | `test-verify-action-pins.py` | `python3 scripts/test-verify-action-pins.py` | contract of `verify-action-pins.py`: tags, short SHAs, missing comments and quoted or flow forms refused, this repository's workflows accepted |
 | `install.sh` | `curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh \| sh` | end-user installer, published as an asset of every release: latest GitHub release, checksum, atomic rename into `$PIXEL_INSTALL_DIR` (default `~/.local/bin`) |
@@ -38,6 +39,12 @@ The `justfile` is a front end for it: `just disk` is `clean.sh all --dry-run`,
 `clean-bench` / `clean-all` are the others. Start with `just disk`: it prints
 the exact list the other recipes would remove and removes nothing. The recall
 corpus and `~/.local/state/pixel` are never touched by any of them.
+
+## Worktrees and panes
+
+| Script | Run | What |
+| --- | --- | --- |
+| `pr-swarm.sh` | `scripts/pr-swarm.sh reconcile [--wait N\|--no-wait] [--dry-run] \| status \| up <PR> [--worktree] \| down <PR> [--force] \| watch \| hook-session-start` | one rmux pane per open-PR worktree, each a `claude -n pr-<N>-<slug>` session sitting in that PR's tree; `reconcile` diffs the open PRs against panes titled `PR#<N>` and creates, retitles or tears down (`status` is read-only). Wired to SessionStart by `.claude/settings.json`; rails in `.agents/rules/pr-swarm.md` |
 
 ## Smoke and audits (after `pixel self-update`, before a PR that touches the CLI, hooks or install)
 

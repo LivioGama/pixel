@@ -179,6 +179,12 @@ Machine-wide:
   `publish-recovery/` and `locks/<hash>.lock/owner.json` (the lock alone is
   keyed by the canonical git common directory, so every worktree shares it). Guarded git
   mutations write nothing under `.pixel/` except the two entries above.
+- `~/.local/state/pixel/pr-swarm/`: the repo-local `pr-swarm` reconciler's
+  state — `reconcile.log`, `lock/`, `resolve.tsv`, `last-run.jsonl` and
+  `watch.pid` (the `watch` loop's claim, the authority on whether one runs) —
+  written by `scripts/pr-swarm.sh`, not by any `pixel` crate
+  (`.agents/rules/pr-swarm.md`). The pane set itself is derived from rmux
+  pane titles, not from these files.
 - Daemon socket and pid: `$TMPDIR` on macOS, `$XDG_RUNTIME_DIR` on Linux
   (else `~/.cache/pixel/sockets/`), named
   `pixel-<xxh3 of canonical repo path>.sock`, `.pid` and `.lock`.
