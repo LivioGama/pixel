@@ -326,6 +326,12 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-homebrew-formula.py
 
+      # The homebrew-core formula release.yml attaches to every release;
+      # homebrew-core.yml builds and audits it from source.
+      - name: homebrew-core formula contract (build from source, no prebuilt binary)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-homebrew-core-formula.py
+
       - name: Release-prepare skip contract (disposable repo)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-release-prepare-only.py

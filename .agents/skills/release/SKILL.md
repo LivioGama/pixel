@@ -19,7 +19,7 @@ jobs, each needing the previous one:
 | --- | --- | --- |
 | `verify` | `check-release $GITHUB_REF` (tag = `crates/pixel` version, `Cargo.lock` fresh for all 17 members, `## [x.y.z]` heading and empty Unreleased), then `cargo test --workspace --locked` | nothing built, nothing published |
 | `build` | musl x86_64 + aarch64 via `cross` (`--no-default-features --features model2vec`), `aarch64-apple-darwin` natively; tarball + `.sha256` each; `fail-fast` | nothing published |
-| `release` | writes `pixel.rb` with the real hashes and the two Linux bottles (`scripts/homebrew-formula.py`, held by `scripts/test-homebrew-formula.py` in CI), cuts the release body from the `## [x.y.z]` section of `CHANGELOG.md`, creates the GitHub release (3 tarballs, 3 `.sha256`, 2 `pixel-x.y.z.<arm64|x86_64>_linux.bottle.tar.gz`, `pixel.rb`, `install.sh`), commits `pixel x.y.z` to `LivioGama/homebrew-tap` with `HOMEBREW_TAP_TOKEN` | published, possibly partially: see Recovery |
+| `release` | writes `pixel.rb` with the real hashes and the two Linux bottles (`scripts/homebrew-formula.py`, held by `scripts/test-homebrew-formula.py` in CI), cuts the release body from the `## [x.y.z]` section of `CHANGELOG.md`, creates the GitHub release (3 tarballs, 3 `.sha256`, 2 `pixel-x.y.z.<arm64|x86_64>_linux.bottle.tar.gz`, `pixel.rb`, `pixel-core.rb` (the homebrew-core formula built from the tag's source archive, `scripts/homebrew-core-formula.py`), `install.sh`), commits `pixel x.y.z` to `LivioGama/homebrew-tap` with `HOMEBREW_TAP_TOKEN` | published, possibly partially: see Recovery |
 | `smoke` (×3, `fail-fast: false`) | on each target's own runner, from an empty `HOME`: the release asset (checksum, run), the documented one-liner through `releases/latest/download/install.sh` (when the tag is the latest release), `brew install LivioGama/tap/pixel` + `brew test` (macOS, when the tap was pushed), and on Linux the same install poured from the bottle (`poured_from_bottle`, skipped with a notice on a runner image without Homebrew); each binary's `--version` must print `pixel x.y.z` and `commit: <tag commit>` | already published: the next patch is due |
 
 Three facts shape everything below:
@@ -306,10 +306,11 @@ V=vx.y.z; D=$(mktemp -d); cd "$D"
 gh release view $V --repo LivioGama/pixel --json isDraft,isPrerelease,isImmutable,body \
   --jq '{isDraft, isPrerelease, isImmutable, body: .body[0:200]}'   # false, false, true, the changelog section (not "See [CHANGELOG.md]")
 gh release download $V --repo LivioGama/pixel
-ls                                                     # 3 archives + 2 .bottle.tar.gz, 3 .sha256, pixel.rb, install.sh
+ls                                                     # 3 archives + 2 .bottle.tar.gz, 3 .sha256, pixel.rb, pixel-core.rb, install.sh
 shasum -a 256 -c ./*.sha256                            # 3 × OK
 for f in ./*.sha256; do grep -c "$(awk '{print $1}' "$f")" pixel.rb; done   # darwin 2, each musl 1: the formula carries the real hashes (darwin is also the formula's top-level url)
 for b in ./*.bottle.tar.gz; do grep -c "$(shasum -a 256 "$b" | awk '{print $1}')" pixel.rb; done   # 1 each: the bottle block names the published bottles
+curl -fsSL "https://github.com/LivioGama/pixel/archive/refs/tags/$V.tar.gz" | shasum -a 256 | awk '{print $1}' | xargs -I{} grep -c {} pixel-core.rb   # 1: the core formula names the tag's source archive
 git -C <repo> show "${V}:scripts/install.sh" | diff - install.sh && echo "install.sh == tag's"
 gh api repos/LivioGama/homebrew-tap/contents/Formula/pixel.rb --jq .content \
   | base64 -d | diff - pixel.rb && echo "tap == release formula"
@@ -334,7 +335,7 @@ Report in this shape, and copy it into the record:
 Release vx.y.z: published and verified | NOT verified
 - run <url>: verify ✓, build ✓, release ✓, smoke ✓✓✓
 - smoke: asset ✓✓✓, install.sh ✓✓✓ | notice, brew macOS ✓ | skipped, brew Linux bottle ✓✓ | notice
-- assets: 10, 3 checksums OK, formula and bottle hashes match, install.sh == tag's, immutable
+- assets: 11, 3 checksums OK, formula, bottle and source-archive hashes match, install.sh == tag's, immutable
 - body: CHANGELOG ## [x.y.z] section
 - tap: Formula/pixel.rb == release pixel.rb (commit "pixel x.y.z")
 - binary: aarch64-apple-darwin prints pixel x.y.z, commit <sha> == tag
