@@ -1,6 +1,6 @@
 ---
 name: pixel-retro
-description: Mine the last 24 h (or a given window) of pixel usage — every repo's `.pixel/actions.jsonl` plus the agent transcripts indexed by `pixel recall` (claude, codex, pi…) — for frictions pixel actually caused, verify each one against the current binary and code, and propose ranked, evidence-backed improvements (bug fix, error message, flag, agent prompt, rule, doc). Suggests only; implements nothing without the user's pick. Use when the user says "/pixel-retro", "retro pixel", "qu'est-ce qui a coincé avec pixel", "améliorations pixel depuis les transcripts", "pixel friction", or asks what to improve in pixel from recent sessions.
+description: Mine the last 24 h (or a given window) of pixel usage — every repo's `.pixel/actions.jsonl` plus the agent transcripts indexed by `pixel recall` (claude, codex, pi…) — for frictions pixel actually caused, verify each one against the current binary and code, and propose ranked, evidence-backed improvements (bug fix, error message, flag, agent prompt, rule, doc); for the pixel repo itself, also measure each pull request from first edit to validated CI and where agents sat idle (`lead_time.py`). Suggests only; implements nothing without the user's pick. Use when the user says "/pixel-retro", "retro pixel", "qu'est-ce qui a coincé avec pixel", "améliorations pixel depuis les transcripts", "pixel friction", "où l'agent attend", "bottleneck", "lead time", or asks what to improve in pixel or its development workflow from recent sessions.
 ---
 
 # Pixel retro
@@ -132,6 +132,40 @@ the agent.
 
 `recall` prints timestamps in UTC, the action log's `ts_ms` is epoch: convert
 before matching the two.
+
+**C. The pixel repo's own development loop.** Only when the window has
+sessions in this repository, or when the question is where agents wait
+("bottleneck", "idle", "lead time", « où l'agent attend »). CONTRIBUTING.md
+("Agent validation workflow") measures the loop from the first edit to a
+fully validated pull request, CI queue and fix/push cycles included; agent
+activity alone is not a throughput metric. `lead_time.py` does that per pull
+request opened in the window:
+
+```bash
+python3 .agents/skills/pixel-retro/lead_time.py $W            # reads gh pr view per PR
+python3 .agents/skills/pixel-retro/lead_time.py $W --no-gh    # offline: edit → PR open only
+```
+
+It reads the Claude Code transcripts of this repository and its
+`.claude/worktrees/` (another path with `--projects <dir>`), and prints per
+PR the time from its first edit to `gh pr create`, from there to the last
+check completion on the final head, the pushes in that session, and the
+session's time split into tool, model, idle (waiting on a background task)
+and human; then the median lead time and the commands with the most
+blocking time. Read the numbers with their limits:
+
+- **Idle is a ceiling, not a saving.** It is recoverable only where the
+  session had an independent unit to advance; the data does not say whether
+  it did.
+- **One session per PR.** Follow-up pushes from another session count in
+  open → green but not in the split.
+- **Compare windows, not sessions.** A rule change (#418 on 2026-09-30, say)
+  shows as a shift of the median and of the top blocking commands between a
+  window before it and one after, quoted with both commands.
+
+A finding here is a workflow change, not a pixel bug: its destination is
+CONTRIBUTING.md, `.agents/rules/*.md`, a script under `scripts/` or a CI
+workflow, and its report block gives the before/after numbers.
 
 For each action-log error worth keeping, find its transcript turn with a
 distinctive token from `args` (a `--request-id`, a path, a pattern):

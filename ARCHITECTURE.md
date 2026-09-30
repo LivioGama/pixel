@@ -525,8 +525,9 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
     the checkout's `.pixel/actions.jsonl` alone, the `scripts/test-*.py`
     contract scripts (installer, gate runner, mutation pre-push, release
-    prepare, nightly mutants, mutants config, action pins, clean) and the Bun
-    Pi-policy contract (`scripts/test-pi-policy.mjs`);
+    prepare, nightly mutants, mutants config, action pins, clean), the
+    pixel-retro lead-time contract (`.agents/skills/pixel-retro/test_lead_time.py`)
+    and the Bun Pi-policy contract (`scripts/test-pi-policy.mjs`);
   - **Lint**: `cargo clippy --all-targets` with warnings denied, then
     `cargo check` of the two reduced feature lanes (`--no-default-features`,
     `model2vec` only);
