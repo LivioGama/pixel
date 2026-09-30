@@ -468,4 +468,88 @@ mod tests {
             std::env::remove_var("PIXEL_FLOW_DIR");
         }
     }
+
+    /// `flow()` dispatches to the real action handlers: a mutant that
+    /// replaces the body with `Ok(Default::default())` short-circuits every
+    /// action to a JSON null and silently drops the field the caller
+    /// asked for. Pin each action shape with at least one field the
+    /// action fills in.
+    #[test]
+    fn flow_dispatch_returns_action_specific_fields_not_a_null_default() {
+        let _guard = store::ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: ENV_MUTEX serialises every test that touches PIXEL_FLOW_DIR.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
+        }
+        let steps = tmp.path().join("steps.json");
+        std::fs::write(&steps, r#"[{"action":"snapshot"}]"#).unwrap();
+        let from_file = Some(steps);
+        let saved = flow(&FlowAction::Save {
+            name: "audit".into(),
+            title: "Audit".into(),
+            description: String::new(),
+            tags: vec![],
+            url: None,
+            from_file,
+        })
+        .unwrap();
+        assert_eq!(saved["saved"], true, "{saved}");
+        assert_eq!(saved["steps"], 1, "{saved}");
+
+        let listed = flow(&FlowAction::List { tag: None }).unwrap();
+        assert!(!listed.as_array().unwrap().is_empty(), "{listed}");
+
+        let fetched = flow(&FlowAction::Get {
+            name: "audit".into(),
+        })
+        .unwrap();
+        assert_eq!(fetched["title"], "Audit", "{fetched}");
+
+        let rendered = flow(&FlowAction::Run {
+            name: "audit".into(),
+            vars: HashMap::new(),
+            dry_run: true,
+        })
+        .unwrap();
+        assert_eq!(rendered["dry_run"], true, "{rendered}");
+        assert!(rendered["output"].is_string(), "{rendered}");
+
+        let shown = flow(&FlowAction::Show {
+            name: "audit".into(),
+        })
+        .unwrap();
+        assert!(shown["name"].is_string(), "{shown}");
+
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+    }
+
+    /// `run_flow` resolves the flow, runs the engine, and returns the
+    /// rendered output. A mutant that returns `Ok(Default::default())`
+    /// returns a JSON null and skips the entire pipeline.
+    #[test]
+    fn run_flow_returns_the_engine_output_not_a_null_default() {
+        let _guard = store::ENV_MUTEX.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: as above.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", tmp.path());
+        }
+        let steps = tmp.path().join("steps.json");
+        std::fs::write(&steps, r#"[{"action":"snapshot"}]"#).unwrap();
+        let from_file = Some(steps);
+        save_flow("audit", "Audit", "", &[], &None, &from_file).unwrap();
+        let value = run_flow("audit", &HashMap::new(), true).unwrap();
+        assert!(value["name"].is_string(), "{value}");
+        assert_eq!(value["dry_run"], true, "{value}");
+        assert!(value["output"].is_string(), "{value}");
+        // SAFETY: serialised by ENV_MUTEX; restores the env so the next
+        // test starts clean.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+    }
 }

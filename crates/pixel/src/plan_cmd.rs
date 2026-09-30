@@ -869,6 +869,57 @@ mod tests {
     /// `auth_flow_names` itself: tag matching is case-insensitive (`auth`
     /// or `login` only), names are sorted, duplicates are dropped.
     #[test]
+    fn gates_of_auth_lists_every_matching_flow_and_caps_at_three() {
+        let flows = std::env::temp_dir().join(format!(
+            "px-plan-gate-cap-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&flows);
+        std::fs::create_dir_all(&flows).unwrap();
+        // Four `auth`-tagged flows -- the gate label shows three and adds
+        // `+1 more` for the fourth. The mutation `len() > 3` -> `len() < 3`
+        // suppresses the suffix entirely and a `len() > 3` -> `len() >= 3`
+        // mutation renders `+0 more` at exactly 3.
+        for (name, tags) in [
+            ("zeta-auth", r#"["auth"]"#),
+            ("alpha-auth", r#"["auth"]"#),
+            ("mu-auth", r#"["auth"]"#),
+            ("theta-auth", r#"["auth"]"#),
+        ] {
+            std::fs::write(
+                flows.join(format!("{name}.json")),
+                format!(
+                    r#"{{"name":"{name}","title":"t","description":"d","tags":{tags},"steps":[],"created_unix":1,"revised_unix":1}}"#
+                ),
+            )
+            .unwrap();
+        }
+        // SAFETY: env lock convention shared with pixel-flow's own tests.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", &flows);
+        }
+        let prereqs = [prereq(PrereqKind::Auth, "src/page.tsx", "getServerSession")];
+        let gates = gates_of(&prereqs, &[]);
+        // SAFETY: same serialisation contract as the set_var above;
+        // restores the env so the next test in this binary starts clean.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&flows);
+        assert_eq!(gates.len(), 1);
+        assert!(
+            gates[0].label.contains(
+                "run one of: `pixel flow run `alpha-auth`, `mu-auth`, `theta-auth` +1 more"
+            ),
+            "{}",
+            gates[0].label
+        );
+    }
+
+    /// `auth_flow_names` itself: tag matching is case-insensitive (`auth`
+    /// or `login` only), names are sorted, duplicates are dropped.
+    #[test]
     fn auth_flow_names_filters_and_sorts() {
         let flows = std::env::temp_dir().join(format!(
             "px-plan-gate-fns-{}-{}",
