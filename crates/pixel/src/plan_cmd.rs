@@ -683,6 +683,19 @@ mod tests {
     /// sat comfortably below the cap and the bug survived.
     #[test]
     fn gates_of_boundary_does_not_emit_zero_more() {
+        let flows = std::env::temp_dir().join(format!(
+            "px-plan-gate-boundary-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&flows);
+        std::fs::create_dir_all(&flows).unwrap();
+        // SAFETY: this test owns its unique flow directory and restores the
+        // process-global variable before returning.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", &flows);
+        }
+
         // Three auth files (cap 3) — no "+more".
         let auth3 = [
             prereq(PrereqKind::Auth, "src/a.ts", "auth()"),
@@ -760,6 +773,12 @@ mod tests {
             "4 db drivers must append +1 more: {}",
             gates[0].label
         );
+
+        // SAFETY: restore the process-global variable set above.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&flows);
     }
 
     /// Auth detections fold into one gate; with no `auth`-tagged flow the
