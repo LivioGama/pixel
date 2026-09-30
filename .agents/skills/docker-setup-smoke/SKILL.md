@@ -77,7 +77,11 @@ sh .agents/skills/docker-setup-smoke/scripts/run.sh --agents --source main
 
 A personal `PreToolUse` hook matching Bash makes `pixel install --repo` skip the
 Claude guard (yellow `claude guard not installed`); the fixture matches
-Edit|Write so the guard is installed.
+Edit|Write so the guard is installed. The checks add such a hook for one extra
+project copy (then restore `settings.json` byte for byte): the install step must
+name the hook and what to do (narrow its matcher, or work without the guard),
+and `repo.claude-hooks` must be yellow with the same advice and no `fix:` line;
+a release without that advice gets a `NOTE`.
 
 ## Agent sessions (`--agents`)
 

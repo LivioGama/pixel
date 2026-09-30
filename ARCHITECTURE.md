@@ -432,6 +432,10 @@ by id or by group (`install.*`), and each yellow or red check reports that comma
 `install.claude-hooks` is also yellow when complete hooks run another binary than
 the managed one doctoring them (a global `pixel-dev install`, a previous release's
 path); a `pixel-dev` doctor never judges the home install.
+`repo.claude-hooks` is yellow with no fix when a repository `install --repo`
+prepared (its Pixel-first rule is there) has no guard because a hook of the
+user's that also rewrites shell calls held it back: only the user can narrow
+that hook's matcher or accept the missing guard, and the summary says both.
 `--fix` runs them: `repair_plan` folds the flagged checks into one run of each
 distinct catalogue command, in catalogue order, `run_repair` executes it with
 the running binary, and the checks are re-run so each repair is judged
