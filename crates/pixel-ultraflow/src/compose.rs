@@ -81,7 +81,7 @@ pub fn compose(traces: &[Trace], meta: &FlowMeta) -> Result<Composed, String> {
         mark_decidable(step);
     }
 
-    let success_signal = success_signal(usable[0]);
+    let success_signal = success_signal(&usable);
     if success_signal.is_none() {
         warnings.push(
             "no listed element appeared on the final page that was absent from the first, so the \
@@ -177,7 +177,10 @@ pub fn wrap_with_fallback(step: &FlowStep, repaired: FlowStep) -> Option<FlowSte
 fn first_quoted(hint: &str) -> Option<String> {
     let open = hint.find('\'')?;
     let rest = &hint[open + 1..];
-    let close = rest.find('\'')?;
+    // A hint's term runs to its LAST quote, so a name that itself carries an
+    // apostrophe (`'Don't have an account?'`) is not cut in half — a halved
+    // condition would match unrelated pages.
+    let close = rest.rfind('\'')?;
     Some(rest[..close].to_string())
 }
 
@@ -222,17 +225,33 @@ fn declared_vars(traces: &[&Trace]) -> Vec<FlowVar> {
     declared
 }
 
-/// The condition a replay can check for success: an element the last page
-/// lists and the first page did not, in the order the last page lists them.
+/// The condition a replay can check for success: an element every composed
+/// run's final page lists and its first page did not.
 ///
+/// Every run, not just the first: a composed flow can take any of its
+/// branches, and the outcome check runs after whichever one the replay took.
 /// A signal, not proof — the flow's preconditions say so.
-fn success_signal(trace: &Trace) -> Option<String> {
-    let before: BTreeSet<String> = names(&trace.steps.first()?.snapshot_before);
-    parse_snapshot(&trace.steps.last()?.snapshot_after)
-        .0
+fn success_signal(traces: &[&Trace]) -> Option<String> {
+    let (first, rest) = traces.split_first()?;
+    let gained = |trace: &Trace| -> Option<BTreeSet<String>> {
+        let before = names(&trace.steps.first()?.snapshot_before);
+        Some(
+            parse_snapshot(&trace.steps.last()?.snapshot_after)
+                .0
+                .into_iter()
+                .map(|element| element.name)
+                .filter(|name| !name.is_empty() && !before.contains(name))
+                .collect(),
+        )
+    };
+    // Snapshot order of the first run, filtered to names every other run
+    // gained too.
+    gained(first)?
         .into_iter()
-        .map(|element| element.name)
-        .find(|name| !name.is_empty() && !before.contains(name))
+        .find(|name| {
+            rest.iter()
+                .all(|trace| gained(trace).is_some_and(|gained| gained.contains(name)))
+        })
         .map(|name| format!("page shows '{name}'"))
 }
 
@@ -566,10 +585,11 @@ mod tests {
         // instruction and a retry.
         assert!(flow.steps.iter().all(is_decidable));
         assert!(flow.steps.iter().all(|step| step.max_retries == 1));
-        // The success signal is the element the final page gained.
+        // The success signal is an element the final page gained that the
+        // first page did not list.
         assert_eq!(
             flow.success_signal.as_deref(),
-            Some("page shows 'Welcome back'")
+            Some("page shows 'Select account'")
         );
         assert!(!flow.proven);
         assert!(composed.warnings.is_empty(), "{:?}", composed.warnings);
@@ -614,7 +634,17 @@ mod tests {
             "{:?}",
             steps[1].rationale
         );
-        assert!(composed.warnings.is_empty(), "{:?}", composed.warnings);
+        // The branches end on different pages, so no element is guaranteed
+        // after either: the composer says the signal is missing instead of
+        // picking one a replay could fail on.
+        assert!(
+            composed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("carries no success signal")),
+            "{:?}",
+            composed.warnings
+        );
         // The nested branches are marked decidable and retried too.
         assert!(steps[1].then.iter().all(is_decidable));
         assert!(steps[1].otherwise.iter().all(|step| step.max_retries == 1));
@@ -667,7 +697,17 @@ mod tests {
         );
         assert_eq!(inner[0].then[0].ref_hint.as_deref(), Some("b-hint"));
         assert_eq!(inner[0].otherwise[0].ref_hint.as_deref(), Some("c-hint"));
-        assert!(composed.warnings.is_empty(), "{:?}", composed.warnings);
+        // The branches end on different pages, so no element is guaranteed
+        // after either: the composer says the signal is missing instead of
+        // picking one a replay could fail on.
+        assert!(
+            composed
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("carries no success signal")),
+            "{:?}",
+            composed.warnings
+        );
         composed.flow.validate().unwrap();
     }
 
@@ -859,14 +899,29 @@ mod tests {
         assert_eq!(composed.flow.preconditions.len(), 1);
         assert!(composed.flow.preconditions[0].contains("independently"));
         // An element the final page gained is preferred over one it lost.
+        let single = run(vec![click("hint", PAGE_A, PAGE_B)]);
         assert_eq!(
-            success_signal(&run(vec![click("hint", PAGE_A, PAGE_B)])).as_deref(),
-            Some("page shows 'Welcome back'")
+            success_signal(&[&single]).as_deref(),
+            Some("page shows 'Select account'")
         );
+        let to_c = run(vec![click("hint", PAGE_A, PAGE_C)]);
         assert_eq!(
-            success_signal(&run(vec![click("hint", PAGE_A, PAGE_C)])).as_deref(),
-            Some("page shows 'Two-factor'")
+            success_signal(&[&to_c]).as_deref(),
+            Some("page shows 'Code'"),
+            "BTreeSet order: the alphabetically first gained name"
         );
+        // Two branches compose one signal only when BOTH final pages gained
+        // the element: a replay may take either branch.
+        let a = run(vec![click("a-hint", PAGE_A, PAGE_C)]);
+        let b = run(vec![click("b-hint", PAGE_B, PAGE_C)]);
+        assert_eq!(
+            success_signal(&[&a, &b]).as_deref(),
+            Some("page shows 'Code'"),
+            "both final pages gained it; the signal must survive whichever branch ran"
+        );
+        // No name both runs gained: no signal, and the composition says so.
+        let b2 = run(vec![click("b-hint", PAGE_B, PAGE_B)]);
+        assert_eq!(success_signal(&[&a, &b2]), None);
     }
 
     /// A replay's deviation names a step by its path; the revision has to
@@ -953,6 +1008,18 @@ mod tests {
         // repaired in turn.
         assert!(is_decidable(&wrapped.then[0]));
         assert!(is_decidable(&wrapped.otherwise[0]));
+
+        // A name with an inner apostrophe survives whole: the condition must
+        // name the page's own words, not stop at the apostrophe.
+        let apostrophe = FlowStep {
+            ref_hint: Some("button containing 'Don't have an account?'".to_string()),
+            ..Default::default()
+        };
+        let wrapped = wrap_with_fallback(&apostrophe, repaired.clone()).unwrap();
+        assert_eq!(
+            wrapped.condition.as_deref(),
+            Some("page shows 'Don't have an account?'")
+        );
 
         // A step the condition cannot name is not wrapped: there is no
         // element to ask the page about.

@@ -801,7 +801,8 @@ const SCROLL_SETTLE: Duration = Duration::from_millis(300);
 /// pixel amount defaults to [`DEFAULT_SCROLL_PX`].
 fn parse_scroll(spec: &str) -> (&'static str, u32) {
     let mut parts = spec.split_whitespace();
-    let direction = match parts.next() {
+    // Case-insensitive: `Up` must not silently scroll the wrong way.
+    let direction = match parts.next().map(str::to_ascii_lowercase).as_deref() {
         Some("up") => "up",
         Some("left") => "left",
         Some("right") => "right",
@@ -1254,6 +1255,7 @@ mod tests {
         assert_eq!(parse_scroll(""), ("down", DEFAULT_SCROLL_PX));
         assert_eq!(parse_scroll("down"), ("down", DEFAULT_SCROLL_PX));
         assert_eq!(parse_scroll("sideways"), ("down", DEFAULT_SCROLL_PX));
+        assert_eq!(parse_scroll("Up 400"), ("up", 400), "case-insensitive");
         assert_eq!(parse_scroll("up"), ("up", DEFAULT_SCROLL_PX));
         assert_eq!(parse_scroll("left"), ("left", DEFAULT_SCROLL_PX));
         assert_eq!(parse_scroll("right"), ("right", DEFAULT_SCROLL_PX));

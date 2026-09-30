@@ -516,12 +516,18 @@ fn outcome_error(report: &pixel_ultraflow::ReplayReport) -> Option<String> {
 /// Record every re-decided step into the flow as a `conditional` branch, and
 /// bump the revision. Returns how many were recorded.
 ///
-/// A deviation the flow cannot name (a step with no element to ask the page
-/// about) is left alone: a wrong condition is worse than a re-decision.
+/// Nothing is recorded for a replay that failed: the branches it found were
+/// taken on a page the flow never reached, and persisting them would brand
+/// the flow with a path nobody proved. A deviation the flow cannot name (a
+/// step with no element to ask the page about) is left alone for the same
+/// reason — a wrong condition is worse than a re-decision.
 fn apply_deviations(
     flow: &mut Flow,
     report: &pixel_ultraflow::ReplayReport,
 ) -> Result<usize, String> {
+    if outcome_error(report).is_some() {
+        return Ok(0);
+    }
     let mut recorded = 0;
     for deviation in &report.deviations {
         let Some(repaired) = deviation.repaired.clone() else {
@@ -752,7 +758,10 @@ mod tests {
             revision: 1,
             proven: false,
         };
+        // A report whose replay reached its outcome: only then do the
+        // deviations get recorded.
         let report = pixel_ultraflow::ReplayReport {
+            success: true,
             deviations: vec![
                 deviation("2", Some(click_step("button containing 'Continue'"))),
                 // A step the flow cannot name is left alone.
@@ -771,8 +780,32 @@ mod tests {
             ],
             ..Default::default()
         };
+        // This report carries no error, so the deviations are recorded.
         assert_eq!(apply_deviations(&mut flow, &report).unwrap(), 1);
         assert_eq!(flow.revision, 2);
+
+        // A replay that failed records nothing: its branches were taken on
+        // a page the flow never reached.
+        let mut failed = flow.clone();
+        failed.revision = 5;
+        let failed_report = pixel_ultraflow::ReplayReport {
+            deviations: report.deviations.clone(),
+            error: Some("the flow ran, but the outcome checks did not pass".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(apply_deviations(&mut failed, &failed_report).unwrap(), 0);
+        assert_eq!(failed.revision, 5, "not bumped");
+        // Zero recorded placements do not bump the revision either: the flow
+        // on disk is exactly the one the last replay read.
+        let mut empty = flow.clone();
+        empty.revision = 9;
+        let no_placement = pixel_ultraflow::ReplayReport {
+            success: true,
+            deviations: vec![deviation("2", None), deviation("9", Some(click_step("x")))],
+            ..Default::default()
+        };
+        assert_eq!(apply_deviations(&mut empty, &no_placement).unwrap(), 0);
+        assert_eq!(empty.revision, 9, "no placements, no bump");
         let wrapped = &flow.steps[1];
         assert_eq!(wrapped.action, "conditional");
         assert_eq!(wrapped.condition.as_deref(), Some("page shows 'Sign in'"));

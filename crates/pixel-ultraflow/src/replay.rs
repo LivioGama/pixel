@@ -237,13 +237,30 @@ impl Runner<'_> {
             (None, Some(detail), _) => Some(detail),
             (None, None, None) => Some("the re-decision produced no step".to_string()),
             (None, None, Some(repaired)) => {
-                let (_executed, log) = execute_step(&repaired, self.vars, self.flow, self.browser)?;
+                let (executed, log) =
+                    match execute_step(&repaired, self.vars, self.flow, self.browser) {
+                        Ok(result) => result,
+                        // The re-decision is evidence even when its step
+                        // fails: the deviation and the step id survive it.
+                        Err(error) => {
+                            deviation.detail = format!(
+                                "the re-decided {} did not run: {error}",
+                                cycle.decision.label
+                            );
+                            deviation.repaired = Some(repaired);
+                            self.report.deviations.push(deviation);
+                            return Err(format!("step {id} failed: {failure}"));
+                        }
+                    };
                 let pad = indentation(depth);
                 let label = &cycle.decision.label;
                 let body = indented(&log, depth);
                 self.report.log.push_str(&format!(
                     "{pad}# {id}: {failure}\n{pad}# {id}: re-decided with pixel classify -> {label}\n{body}"
                 ));
+                // A repair's step is a real action, so it always runs; a
+                // skipped step is impossible from `one_cycle`.
+                assert!(executed, "the re-decided step did not run: {log}");
                 self.report.steps_executed += 1;
                 deviation.repaired = Some(repaired);
                 deviation.detail = format!(
@@ -286,7 +303,8 @@ impl Runner<'_> {
     /// Whether the run reached the outcome the flow names: the pages it
     /// must not be on, the URLs it must be on, and the signal it must show.
     ///
-    /// A run that ends without one of these checks is not called a success.
+    /// A flow that names no check succeeds on its steps alone, and the log
+    /// records that nothing was verified.
     fn outcome(&mut self) -> Result<bool, String> {
         let page = Observation::see(self.browser)?;
         if let Some(stale) = self
