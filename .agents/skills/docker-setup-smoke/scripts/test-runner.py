@@ -38,14 +38,15 @@ if sys.argv[1] == 'run':
 """)
         docker.chmod(0o755)
         git = tools / "git"
-        git.write_text("#!/bin/sh\nprintf '%040d\\n' 1\n")
+        # A leaked GIT_DIR would make the runner record another repository's HEAD.
+        git.write_text('#!/bin/sh\nif [ -n "${GIT_DIR:-}" ]; then echo leaked; else printf \'%040d\\n\' 1; fi\n')
         git.chmod(0o755)
         self.log = self.root / "calls.jsonl"
         self.env = dict(os.environ, PATH=f"{tools}:{os.environ['PATH']}", CALL_LOG=str(self.log))
 
     def run_case(self, *args, exit_code=0, build_exit=0):
         env = dict(self.env, RUN_EXIT=str(exit_code), BUILD_EXIT=str(build_exit))
-        result = subprocess.run(["bash", str(self.runner), *args], env=env,
+        result = subprocess.run(["sh", str(self.runner), *args], env=env,
                                 capture_output=True, text=True, timeout=10)
         calls = [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
         return result, calls
@@ -98,6 +99,15 @@ if sys.argv[1] == 'run':
                 build = [call for call in calls if call[0] == 'build'][-1]
                 self.assertTrue(any(arg.startswith(base) for arg in build))
                 self.assertIn(apt, build)
+
+    def test_provenance_names_this_checkout_even_under_an_inherited_git_dir(self):
+        self.env['GIT_DIR'] = str(self.root / 'elsewhere.git')
+        result, _ = self.run_case('v0.6.1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        identity = (next((self.root / 'repo/target/docker-setup-smoke').iterdir()) / 'identity.txt').read_text()
+        self.assertIn('checkout: ' + '0' * 39 + '1\n', identity)
+        command = next(line for line in identity.splitlines() if line.startswith('command: '))
+        self.assertEqual(command, f"command: sh '{self.runner}' 'v0.6.1'")
 
     def test_agents_flag_adds_pinned_agent_clis_and_runs_the_sessions_after_the_checks(self):
         result, calls = self.run_case('--agents', '--pr', '427')
