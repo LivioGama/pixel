@@ -383,6 +383,15 @@ pub(crate) fn claude_trusted(config: &Value, workspace: &str) -> Result<Option<V
 /// writes it `0600`; a readiness run is not the thing that widens that. The
 /// rename keeps a reader from seeing half a document, and the temp file
 /// carries the real extension so a watcher does not try to parse it.
+///
+/// The document was read before this call and the rename replaces whatever is
+/// there now, so a *running* Claude Code that writes its own state in between
+/// loses that write. Nothing here detects it: an mtime check between the read
+/// and the rename narrows the window without closing it, and the honest
+/// instruction is the one `--approve` already implies — it edits a file
+/// another process owns, so close that process first. [`approve`] is only
+/// reached under the explicit flag, for the one workspace named on the command
+/// line, which is what keeps that window from mattering by accident.
 fn write_private(path: &Path, value: &Value) -> Result<(), String> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;

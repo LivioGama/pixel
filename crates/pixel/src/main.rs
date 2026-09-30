@@ -404,7 +404,9 @@ enum Command {
         /// `~/.claude.json`. Off by default — a trust write outlives the run,
         /// and it means "run this folder's hooks and code without asking
         /// again". Antigravity and Devin have no approval path: their trust
-        /// state is only ever read.
+        /// state is only ever read. `~/.claude.json` belongs to Claude Code,
+        /// so close a running one first: the file is read, merged and
+        /// rewritten, and a write Claude Code makes in between is lost.
         #[arg(long)]
         approve: bool,
         /// The folder `--approve` is about. Defaults to the working

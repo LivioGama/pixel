@@ -137,16 +137,9 @@
               "condition": "page shows password input field",
               "then": [
                 {
-                  "action": "fill",
-                  "rationale": "Enter the password. NOTE: the agent does NOT have the password — hand off to user if password is required.",
-                  "ref_hint": "input[type=password] or textbox matching 'Password'",
-                  "on_failure": "Password is not available — notify the user to enter the password manually in the browser, then continue",
-                  "max_retries": 1
-                },
-                {
-                  "action": "press",
-                  "rationale": "Submit the password",
-                  "value": "Enter",
+                  "action": "wait",
+                  "rationale": "Hand off to the user — this flow has no password and must not guess one. Ask them to type it into the browser window and submit it themselves, then continue. Do NOT fill the field and do NOT press Enter: a fill with no value types an empty password, and the Enter after it submits one, spending a failed login attempt on the user's account.",
+                  "wait": "60s",
                   "max_retries": 1
                 }
               ],
