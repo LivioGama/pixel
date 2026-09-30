@@ -753,7 +753,8 @@ Steps 1 to 3 are `.agents/skills/release/prepare.sh x.y.z`.
 5. Tag `vx.y.z` and push the tag. `.github/workflows/release.yml` builds
    `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` and
    `aarch64-apple-darwin`, uploads tarballs with `.sha256` files, and
-   generates the Homebrew formula with real hashes. `fail-fast: true`
+   generates the Homebrew formula with real hashes and its two Linux
+   bottles (`scripts/homebrew-formula.py`). `fail-fast: true`
    means a partial build failure publishes nothing.
 6. Only the latest release receives security fixes.
 

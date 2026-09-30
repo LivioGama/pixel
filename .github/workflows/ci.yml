@@ -320,6 +320,12 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-prepare.py
 
+      # release.yml writes the tap's formula and the Linux bottles with this
+      # script: it is checked here, on every pull request, not first on a tag.
+      - name: Homebrew formula and bottles contract (synthetic release archives)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: python3 scripts/test-homebrew-formula.py
+
       - name: Release-prepare skip contract (disposable repo)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-release-prepare-only.py

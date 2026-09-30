@@ -163,81 +163,17 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Generate Homebrew formula with real hashes
-        run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
-          # Extract SHA256 for each target from the downloaded .sha256 files.
-          ARM_MAC=$(awk '{print $1}' "artifacts/pixel-${VERSION}-aarch64-apple-darwin.tar.gz.sha256")
-          ARM_LINUX=$(awk '{print $1}' "artifacts/pixel-${VERSION}-aarch64-unknown-linux-musl.tar.gz.sha256")
-          INTEL_LINUX=$(awk '{print $1}' "artifacts/pixel-${VERSION}-x86_64-unknown-linux-musl.tar.gz.sha256")
-
-          # No explicit `version`: Homebrew reads it from the archive name
-          # (pixel-vX.Y.Z-<target>.tar.gz) and `brew audit` flags an explicit
-          # one as redundant. This matches Formula/pixel.rb in the tap.
-          cat > pixel.rb <<EOF
-          class Pixel < Formula
-            desc "Local control layer for coding agents — deterministic retrieval + git engine"
-            homepage "https://pixel-cli.dev/"
-            # Homebrew validates a URL for every simulated OS/arch at tap
-            # time; the per-target URLs in the on_* blocks are the ones
-            # actually used. This top-level URL satisfies the check.
-            url "https://github.com/LivioGama/pixel/releases/download/${VERSION}/pixel-${VERSION}-aarch64-apple-darwin.tar.gz"
-            sha256 "${ARM_MAC}"
-            license "MIT"
-
-            on_macos do
-              on_intel do
-                # No prebuilt Intel binary; refuse rather than install the
-                # arm64 tarball. Build from source: cargo build --release -p pixel-cli
-                depends_on arch: :arm64
-              end
-
-              on_arm do
-                url "https://github.com/LivioGama/pixel/releases/download/${VERSION}/pixel-${VERSION}-aarch64-apple-darwin.tar.gz"
-                sha256 "${ARM_MAC}"
-              end
-            end
-
-            on_linux do
-              on_arm do
-                url "https://github.com/LivioGama/pixel/releases/download/${VERSION}/pixel-${VERSION}-aarch64-unknown-linux-musl.tar.gz"
-                sha256 "${ARM_LINUX}"
-              end
-              on_intel do
-                url "https://github.com/LivioGama/pixel/releases/download/${VERSION}/pixel-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
-                sha256 "${INTEL_LINUX}"
-              end
-            end
-
-            def install
-              bin.install "bin/pixel"
-            end
-
-            # An upgrade replaces the binary only; the agent wiring it
-            # deployed lives in the user's home and is refreshed by
-            # running pixel install.
-            def caveats
-              <<~EOS
-                Homebrew upgrades replace the binary only. The agent prompt, shell
-                wrapper and per-agent config keys are written by "pixel install"
-                into your home, not by Homebrew, so they keep the old release's
-                text until refreshed:
-
-                  pixel install
-                  pixel doctor .
-
-                "pixel doctor" reports missing or stale wiring.
-              EOS
-            end
-
-            test do
-              assert_match version.to_s, shell_output("#{bin}/pixel --version")
-            end
-          end
-          EOF
+      # pixel.rb and the two Linux bottles: the musl binary laid out as a keg,
+      # which Homebrew pours where a formula without a bottle would need a C
+      # compiler. The script checks each archive against its .sha256 and is
+      # held by scripts/test-homebrew-formula.py, which CI runs on every pull
+      # request that touches it, so this step changes without a tag.
+      - name: Generate the Homebrew formula and the Linux bottles
+        run: python3 scripts/homebrew-formula.py "${GITHUB_REF#refs/tags/}" artifacts .
 
       # SLSA build provenance for what a user downloads and runs: each
-      # archive, and install.sh, which the README pipes into sh. The
+      # archive, each Linux bottle Homebrew pours, and install.sh, which the
+      # README pipes into sh. The
       # .sha256 files ship beside the archives in the same release, so they
       # prove the download was not corrupted, never who built it; an
       # attestation is signed by this workflow on this tag and checked with
@@ -249,6 +185,7 @@ jobs:
         with:
           subject-path: |
             artifacts/pixel-*.tar.gz
+            pixel-*.bottle.tar.gz
             scripts/install.sh
 
       # The release body is the tag's section of CHANGELOG.md (Keep a
@@ -278,6 +215,7 @@ jobs:
           files: |
             artifacts/pixel-*.tar.gz
             artifacts/pixel-*.tar.gz.sha256
+            pixel-*.bottle.tar.gz
             pixel.rb
             scripts/install.sh
 
@@ -390,8 +328,33 @@ jobs:
             | PIXEL_INSTALL_DIR="$RUNNER_TEMP/install-sh" sh
           "$RUNNER_TEMP/check-version.sh" "$RUNNER_TEMP/install-sh/pixel" "install.sh"
 
-      # Formula-wise the three targets are the same file; macOS is the one
-      # target with no other install path than the tap for most users.
+      # On Linux the tap must pour the release's bottle: installed from its
+      # url instead, the formula counts as a build from source and needs a C
+      # compiler. A runner image without Homebrew skips the check.
+      - name: Homebrew tap (Linux bottle)
+        if: runner.os == 'Linux' && env.HOMEBREW_TAP_TOKEN != ''
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+        run: |
+          brew=/home/linuxbrew/.linuxbrew/bin/brew
+          if [ ! -x "$brew" ]; then
+            echo "::notice::no Homebrew on this runner image; the Linux bottle is not checked"
+            exit 0
+          fi
+          "$brew" tap LivioGama/tap
+          "$brew" install LivioGama/tap/pixel
+          poured="$("$brew" info --json=v2 LivioGama/tap/pixel \
+            | python3 -c 'import json, sys; print(json.load(sys.stdin)["formulae"][0]["installed"][0]["poured_from_bottle"])')"
+          if [ "$poured" != True ]; then
+            echo "::error::brew installed pixel without pouring its bottle (poured_from_bottle: $poured)"
+            exit 1
+          fi
+          "$brew" deps --installed LivioGama/tap/pixel
+          "$RUNNER_TEMP/check-version.sh" "$("$brew" --prefix)/bin/pixel" "brew install LivioGama/tap/pixel (bottle)"
+
+      # macOS is the one target with no other install path than the tap for
+      # most users; it has no bottle and installs from its archive.
       - name: Homebrew tap
         if: runner.os == 'macOS' && env.HOMEBREW_TAP_TOKEN != ''
         env:
