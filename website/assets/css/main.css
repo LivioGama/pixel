@@ -206,6 +206,8 @@ main h2 { position: relative; }
 .hero__cta .cmd { flex: 1 1 420px; min-width: 0; }
 /* What a visitor checks before pasting the command, one quiet line under it. */
 .hero__trust { margin: 14px 0 0; font-size: 0.88rem; color: var(--ink-soft); }
+.hero__script { margin: 12px 0 0; font-size: 0.88rem; color: var(--ink-soft); max-width: 62ch; }
+.hero__script code { background: var(--panel); padding: 1px 6px; border-radius: 3px; }
 .hero__trust code, .closing__lede code { background: var(--panel); padding: 1px 6px; border-radius: 3px; }
 /* The agent prompt beside the command: the same height as the command's box, never wider than its label. */
 .hero__agent { flex: 0 1 auto; padding-block: 12px; font-size: 0.95rem; cursor: pointer; }
@@ -742,7 +744,7 @@ a.agents__item { text-decoration: none; }
 .term__switch { display: inline-flex; margin-left: auto; padding: 3px; border-radius: var(--r); background: var(--ground-2); box-shadow: inset 0 0 0 1px var(--line); }
 .term__switch button { border: 0; background: none; color: var(--ink-soft); font: 600 0.8rem/1 var(--sans); padding: 7px 12px; border-radius: 3px; cursor: pointer; }
 .term__switch button[aria-pressed="true"] { color: var(--on-green); background: var(--green); }
-@media (max-width: 420px) { .term__dots { display: none; } .term__bar { flex-wrap: wrap; gap: 8px; } .term__switch { margin-left: 0; } .term__copy { margin-left: auto; } }
+@media (max-width: 560px) { .term__dots { display: none; } .term__bar { flex-wrap: wrap; gap: 8px; } .term__switch { margin-left: 0; flex-wrap: wrap; } .term__copy { margin-left: auto; } }
 .term__body { margin: 0; padding: 18px 22px 26px; overflow-x: auto; font-size: 1rem; line-height: 2; }
 .term__body code { font-size: 0.95rem; }
 /* The install line is a block that wraps under itself (the long curl one would overflow); the lines after it stay one per row. */

@@ -7,17 +7,27 @@ description: "Install Pixel, wire it into your agents, and read what its answers
 
 ## Install
 
-Pixel is a single binary for macOS and Linux. Pick one channel:
-
-```bash
-brew install LivioGama/tap/pixel
-```
+Pixel is a single binary for macOS and Linux. The install script is one line:
 
 ```bash
 curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh
 ```
 
-The script downloads the latest release, checks its checksum and installs it into `$PIXEL_INSTALL_DIR` (default `~/.local/bin`). To build from source instead, see [CONTRIBUTING.md](https://github.com/LivioGama/pixel/blob/main/CONTRIBUTING.md).
+It runs [`scripts/install.sh`](https://github.com/LivioGama/pixel/blob/main/scripts/install.sh), which every release publishes as an asset: one POSIX `sh` file, no `sudo`. It downloads the latest release for your platform, refuses the archive unless its SHA-256 matches the release's checksum, and writes a single file into `$PIXEL_INSTALL_DIR` (default `~/.local/bin`). It edits no shell profile. To read it before it runs:
+
+```bash
+curl -fsSL -o install.sh https://github.com/LivioGama/pixel/releases/latest/download/install.sh
+less install.sh    # every line it will run
+sh install.sh
+```
+
+With Homebrew instead:
+
+```bash
+brew install LivioGama/tap/pixel
+```
+
+To build from source, see [CONTRIBUTING.md](https://github.com/LivioGama/pixel/blob/main/CONTRIBUTING.md).
 
 Then let your agents use it, and check the result:
 

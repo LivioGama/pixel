@@ -17,6 +17,12 @@
   {{ $agents := hugo.Data.agents.agent }}
   {{/* The prompt a visitor pastes into their agent instead of a shell: the repository README's "Let your agent install it" block, shared by the hero, the Install terminal and the sticky bar. */}}
   {{ $agentPrompt := "Install Pixel (https://github.com/LivioGama/pixel) for me: follow the \"For AI agents\" section of its README, then tell me what changed and whether `pixel doctor .` is green." }}
+  {{/* The install commands, shared by the hero, the Install terminal, the closing block and the dock. The one-liner runs the install.sh asset of the latest release (release.yml uploads scripts/install.sh with every tag); $scriptSrc is that file at the tag of the version this site describes (crates/pixel/Cargo.toml, mounted as data/cli.toml, which the release bumps), so "read the script" opens the bytes the one-liner runs. $inspect is the same install for a visitor who reads before running: download, page through, then run. */}}
+  {{ $scriptURL := printf "%s/releases/latest/download/install.sh" site.Params.github_url }}
+  {{ $curl := printf "curl -fsSL %s | sh" $scriptURL }}
+  {{ $inspect := printf "curl -fsSL -o install.sh %s && less install.sh && sh install.sh" $scriptURL }}
+  {{ $brew := "brew install LivioGama/tap/pixel" }}
+  {{ $scriptSrc := printf "%s/blob/v%s/scripts/install.sh" site.Params.github_url hugo.Data.cli.package.version }}
 
   {{/* Where the reader is: one square per chapter (each section's .chapter label), filled as it passes. Built by the script below. */}}
   <nav class="rail" aria-label="Sections" data-rail hidden></nav>
@@ -37,13 +43,15 @@
       <p class="hero__lede"><strong>Every session starts cold, so your coding agent opens file after file to find its way.</strong> Pixel is a local code index it asks instead: {{ lang.FormatNumber 1 $r.median }}% less read volume at the median across {{ $r.count }} pinned large files (whole file versus signatures), and nothing leaves your machine.</p>
       <div class="hero__cta">
         <div class="cmd">
-          <code><span class="cmd__prompt" aria-hidden="true">$</span> brew install LivioGama/tap/pixel</code>
-          <button class="cmd__copy" type="button" data-copy="brew install LivioGama/tap/pixel" data-copy-next="hero-next">Copy</button>
+          <code><span class="cmd__prompt" aria-hidden="true">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</code>
+          <button class="cmd__copy" type="button" data-copy="{{ $curl }}" data-copy-next="hero-next">Copy</button>
         </div>
         {{/* The second way in, for a visitor already inside an agent: the README's "Let your agent install it" prompt (keep the two in step). */}}
         <button class="button button--ghost hero__agent" type="button" data-copy="{{ $agentPrompt }}" data-copy-next="hero-next-agent">Or let your agent install it</button>
       </div>
       {{/* Shown once a Copy above succeeds, one per button (the last copy wins): the step after the paste, so the copy moves the visitor forward instead of just confirming. */}}
+      {{/* Piping a script into a shell asks for trust, so the script is one click away before the paste, described in the terms a reader checks it against. Keep this line true to scripts/install.sh. */}}
+      <p class="hero__script">Read it before you run it: <a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">the script</a> is one short POSIX <code>sh</code> file, with no <code>sudo</code>. It checks the archive's SHA&#8209;256, then writes one file, <code>~/.local/bin/pixel</code>. Prefer Homebrew, or reading it in your terminal first? <a class="link" href="#install">Other ways in</a>.</p>
       <p class="hero__next" id="hero-next" hidden>Copied. Then run <code>pixel install</code> and restart your agent: the next session starts with the map. In a repository of yours, <code>pixel audit</code> shows what its largest files cost your agent today.</p>
       <p class="hero__next" id="hero-next-agent" hidden>Copied. Paste it into your agent: it installs Pixel, wires itself and tells you whether <code>pixel doctor .</code> is green. Then <code>pixel audit</code> shows what your largest files cost it.</p>
       {{/* Beside the one call to action, what a visitor checks before pasting it: the platforms the release builds (release.yml), the licence and the telemetry. No star button here: the nav links GitHub. */}}
@@ -546,27 +554,26 @@
       <header class="section__head" data-reveal>
         <h2 id="install-title"><span class="glow">Two commands.</span> That's the whole setup.</h2>
       </header>
-      {{ $brew := "brew install LivioGama/tap/pixel" }}
-      {{ $curl := "curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh" }}
       <div class="setup">
         <div class="setup__main" data-reveal>
-          {{/* One terminal, three ways in: Homebrew, the script, or the prompt for an agent to do it. The switch shows that variant's lines and sets what Copy all copies. */}}
+          {{/* One terminal, four ways in: the script piped to sh, the same script read before it runs, Homebrew, or the prompt for an agent to do it. The switch shows that variant's lines and sets what Copy all copies. */}}
           <div class="term" data-term>
             <div class="term__bar">
               <span class="term__dots" aria-hidden="true"><span></span><span></span><span></span></span>
               <div class="term__switch" role="group" aria-label="Install with">
-                <button type="button" aria-pressed="true" data-variant="brew" data-copy-all="{{ $brew }} && pixel install && pixel doctor .">Homebrew</button>
-                <button type="button" aria-pressed="false" data-variant="curl" data-copy-all="{{ $curl }} && pixel install && pixel doctor .">Script</button>
+                <button type="button" aria-pressed="true" data-variant="curl" data-copy-all="{{ $curl }} && pixel install && pixel doctor .">Script</button>
+                <button type="button" aria-pressed="false" data-variant="inspect" data-copy-all="{{ $inspect }} && pixel install && pixel doctor .">Read it first</button>
+                <button type="button" aria-pressed="false" data-variant="brew" data-copy-all="{{ $brew }} && pixel install && pixel doctor .">Homebrew</button>
                 <button type="button" aria-pressed="false" data-variant="agent" data-copy-all="{{ $agentPrompt }}">Your agent</button>
               </div>
-              <button class="cmd__copy term__copy" type="button" data-copy="{{ $brew }} && pixel install && pixel doctor .">Copy all</button>
+              <button class="cmd__copy term__copy" type="button" data-copy="{{ $curl }} && pixel install && pixel doctor .">Copy all</button>
             </div>
-            <pre class="term__body"><code><span data-line="brew"><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl" hidden><span class="term__p">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</span><span data-line="brew curl"><span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span></span><span data-line="brew curl"><span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></span><span data-line="brew curl"><span class="term__p">$</span> pixel list-signatures path/to/a/large/file.py  <span class="term__c"># first result, in your repo</span></span><span data-line="agent" hidden><span class="term__c"># paste into Claude Code, Codex, Pi or any agent with a shell</span></span><span data-line="agent" hidden><span class="term__p">&gt;</span> {{ $agentPrompt }}</span></code></pre>
+            <pre class="term__body"><code><span data-line="curl"><span class="term__p">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</span><span data-line="inspect" hidden><span class="term__p">$</span> curl -fsSL -o install.sh {{ replace $scriptURL "/" "/<wbr>" | safeHTML }}</span><span data-line="inspect" hidden><span class="term__p">$</span> less install.sh    <span class="term__c"># read every line it will run</span></span><span data-line="inspect" hidden><span class="term__p">$</span> sh install.sh</span><span data-line="brew" hidden><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span></span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel list-signatures path/to/a/large/file.py  <span class="term__c"># first result, in your repo</span></span><span data-line="agent" hidden><span class="term__c"># paste into Claude Code, Codex, Pi or any agent with a shell</span></span><span data-line="agent" hidden><span class="term__p">&gt;</span> {{ $agentPrompt }}</span></code></pre>
           </div>
           {{/* Measured on a fresh clone of psf/requests with the pixel of this commit; re-run it when the report line changes (crates/pixel-actionlog/src/metrics.rs, measured_read_section). */}}
           <p class="install__more">The last line needs no session: under the file's outline, Pixel's report compares it with reading the whole file. On Requests' <code>models.py</code>: <code>full read 10365 tok, pixel answer 641 tok (-94%)</code>.</p>
           {{/* The prebuilt targets are release.yml's matrix (aarch64-apple-darwin, x86_64 and aarch64 musl Linux), and scripts/install.sh refuses an archive whose .sha256 it cannot fetch or match: change this line when either changes. */}}
-          <p class="install__more">Prebuilt for Apple Silicon Macs and Linux (x86_64, arm64); the script checks the archive's SHA&#8209;256 before it installs anything. No Windows build yet. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}">Plugins and rules files</a>.</p>
+          <p class="install__more">Prebuilt for Apple Silicon Macs and Linux (x86_64, arm64); <a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">the script</a> checks the archive's SHA&#8209;256 before it installs anything, and writes only <code>~/.local/bin/pixel</code> (<code>PIXEL_INSTALL_DIR</code> moves it). No Windows build yet. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}">Plugins and rules files</a>.</p>
           <p class="install__more"><code>pixel install</code> edits your agents' settings, so every file it writes is listed per agent, with the check and the removal: <a class="link" href="{{ "for/" | relURL }}">what Pixel writes for each agent</a>.</p>
           <p class="install__more install__ask">Questions, or stuck on setup? <a class="link" href="{{ site.Params.github_url }}/discussions" target="_blank" rel="noopener">Ask in GitHub Discussions</a>.</p>
         </div>
@@ -596,8 +603,8 @@
       <h2 id="closing-title" class="closing__title" data-reveal>Give your agent <span class="glow">a map.</span></h2>
       <p class="closing__lede" data-reveal>Give the next session a map before it opens its first file, then inspect local volumes and estimates with <code>pixel token-savings</code>.</p>
       <div class="cmd closing__cmd" data-reveal>
-        <code><span class="cmd__prompt" aria-hidden="true">$</span> {{ $brew }} && pixel install</code>
-        <button class="cmd__copy" type="button" data-copy="{{ $brew }} && pixel install">Copy</button>
+        <code><span class="cmd__prompt" aria-hidden="true">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }} && pixel install</code>
+        <button class="cmd__copy" type="button" data-copy="{{ $curl }} && pixel install">Copy</button>
       </div>
       <p class="hero__trust" data-reveal>Free and MIT &middot; no account, no telemetry &middot; restart your agent and it is live &middot; one <code>pixel uninstall</code> undoes the setup</p>
       {{/* One way onward, not three: the Install block right above already offers the script and the agent prompt, and the docs are in the nav. */}}
@@ -612,8 +619,8 @@
     <div class="dock__inner wrap">
       <span class="dock__brand" aria-hidden="true"><span class="brand__pixel"></span></span>
       <div class="cmd dock__cmd">
-        <code><span class="cmd__prompt" aria-hidden="true">$</span> {{ $brew }}</code>
-        <button class="cmd__copy" type="button" data-copy="{{ $brew }}">Copy</button>
+        <code><span class="cmd__prompt" aria-hidden="true">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</code>
+        <button class="cmd__copy" type="button" data-copy="{{ $curl }}">Copy</button>
       </div>
       <a class="link dock__more" href="#your-number">Measure it on your code</a>
     </div>
@@ -1269,7 +1276,7 @@
       demo.addEventListener('ended', function () { label.textContent = 'Replay video'; btn.hidden = false; });
     })();
 
-    /* Install: the Homebrew / Script / Your agent switch shows the lines of
+    /* Install: the Script / Read it first / Homebrew / Your agent switch shows the lines of
        that variant (a line names every variant it belongs to) and sets what
        Copy all copies. */
     (function () {
