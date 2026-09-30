@@ -23,9 +23,20 @@ def main():
             cand.setdefault(r["scenario"], []).append(r)
     failures = []
     print(f"gate: {args.candidate} vs {args.baseline} (turns slack x{args.turns_slack})")
+    if not base:
+        print(f"GATE FAIL: no {args.baseline} rows in scores.json — nothing to compare against")
+        sys.exit(1)
+    if not cand:
+        print(f"GATE FAIL: no {args.candidate} rows in scores.json")
+        sys.exit(1)
     for scenario in sorted(set(base) | set(cand)):
         b = base.get(scenario, [])
         c = cand.get(scenario, [])
+        if not b or not c:
+            print(f"  {scenario:<18} missing comparison data "
+                  f"(baseline rows: {len(b)}, candidate rows: {len(c)}) -> FAIL")
+            failures.append(scenario)
+            continue
         b_mean = sum(x["score"] for x in b) / len(b) if b else None
         c_mean = sum(x["score"] for x in c) / len(c) if c else None
         b_turns = sum(x["turns"] or 0 for x in b) / len(b) if b else None

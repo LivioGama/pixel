@@ -13,7 +13,7 @@
     {"pattern": "code-vectors|code_search", "points": 2, "why": "distinguishes the separate code-search store"}
   ],
   "never": [
-    {"pattern": "HNSW|FAISS|ANN graph|approximate nearest", "penalty": 2, "why": "the scan is exact brute-force, deliberately no ANN"},
+    {"pattern": "HNSW|FAISS|uses? an? ANN|an ANN (index|graph)|approximate nearest neighbor (search|index)", "penalty": 2, "why": "the scan is exact brute-force, deliberately no ANN — affirmative claims only, rejections of ANN are correct answers"},
     {"pattern": "vectors (are|is) stored in .*\\.pixel/", "penalty": 1, "why": "transcript vectors live under ~/.local/share/pixel, not .pixel/"}
   ]
 }

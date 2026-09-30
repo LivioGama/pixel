@@ -26,15 +26,19 @@ SCENARIOS="${SCENARIOS:-s1-hook-install s2-vector-recall s3-rename-impact}"
 MAX_TURNS="${MAX_TURNS:-12}"
 mkdir -p "$RESULTS"
 
-DEPLOY_BACKUP="$RESULTS/agent-prompt.deployed.bak"
-AGY_BACKUP="$RESULTS/agy-plugin-state.txt"
+DEPLOY_BACKUP="$(mktemp -t pixel-eval-prompt.XXXXXX)"
+AGY_BACKUP="$(mktemp -t pixel-eval-agy.XXXXXX)"
 restore() {
-  if [ -f "$DEPLOY_BACKUP" ]; then cp "$DEPLOY_BACKUP" "$DEPLOY_PROMPT"; fi
-  if [ -f "$AGY_BACKUP" ]; then
+  if [ -s "$DEPLOY_BACKUP" ]; then
+    cp "$DEPLOY_BACKUP" "$DEPLOY_PROMPT" 2>/dev/null || true
+    rm -f "$DEPLOY_BACKUP"
+  fi
+  if [ -s "$AGY_BACKUP" ]; then
     while read -r name state; do
       if [ "$state" = disabled ]; then agy plugin disable "$name" >/dev/null 2>&1 || true
       else agy plugin enable "$name" >/dev/null 2>&1 || true; fi
     done < "$AGY_BACKUP"
+    rm -f "$AGY_BACKUP"
   fi
 }
 trap restore EXIT
@@ -52,7 +56,11 @@ apply_agents_block_py() { python3 "$EVAL_DIR/lib/apply_agents_block.py" "$@"; }
 
 build_arm() {
   local arm="$1" wt="$SCRATCH/wt-$arm" cfg="$SCRATCH/cfg-$arm"
-  if [ ! -d "$wt" ]; then git -C "$REPO" worktree add --detach "$wt" "$EVAL_HEAD" >/dev/null 2>&1; fi
+  if [ ! -d "$wt" ]; then
+    git -C "$REPO" worktree add --detach "$wt" "$EVAL_HEAD" >/dev/null 2>&1
+  else
+    git -C "$wt" reset --hard "$EVAL_HEAD" >/dev/null 2>&1
+  fi
   rm -rf "$wt/.pixel"; cp -R "$MAIN_ROOT/.pixel" "$wt/.pixel"
   git -C "$wt" checkout -- AGENTS.md 2>/dev/null || true
   case "$arm" in
@@ -94,9 +102,8 @@ run_cli() {  # cli arm scenario outfile
   local prompt; prompt=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "$EVAL_DIR/scenarios/$scenario.json")
   case "$cli" in
     claude)
-      if [ "$arm" = baseline ]; then unset CLAUDE_CONFIG_DIR
-      else export CLAUDE_CONFIG_DIR="$cfg"; fi
-      (cd "$wt" && /Users/livio/.local/bin/claude -p "$prompt" \
+      export CLAUDE_CONFIG_DIR="$cfg"
+      (cd "$wt" && "${CLAUDE_BIN:-$HOME/.local/bin/claude}" -p "$prompt" \
         --output-format stream-json --verbose --max-turns "$MAX_TURNS" \
         --dangerously-skip-permissions > "$out" 2> "${out%.jsonl}.err")
       ;;
@@ -111,7 +118,7 @@ run_cli() {  # cli arm scenario outfile
 
 swap_payload() {  # arm -> deploy the payload that arm's session-start hook should emit
   local arm="$1"
-  [ -f "$DEPLOY_BACKUP" ] || cp "$DEPLOY_PROMPT" "$DEPLOY_BACKUP"
+  [ -s "$DEPLOY_BACKUP" ] || cp "$DEPLOY_PROMPT" "$DEPLOY_BACKUP"
   case "$arm" in
     on) cp "$EVAL_DIR/variants/frozen-main/agent-prompt.md" "$DEPLOY_PROMPT" ;;
     vfinal) cp "$EVAL_DIR/variants/final/agent-prompt.md" "$DEPLOY_PROMPT" ;;

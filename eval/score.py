@@ -71,7 +71,10 @@ def main():
             continue
         answer, metrics = load_result(f)
         if not metrics:
-            continue
+            # A transcript with no terminal result (interrupted run) is a
+            # failed trial: score it zero instead of dropping it.
+            metrics = {"answered": False, "turns": None, "input_tokens": None,
+                       "cost_usd": None}
         if not metrics["answered"]:
             score = 0
         else:
