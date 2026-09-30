@@ -5,7 +5,7 @@
 //! and re-probing never changes that. Under `--authenticate`, and only when
 //! the Claude lane fails on an auth wall, the chain spawns `claude auth
 //! login`, reads the authorize URL it prints, replays the installed flow with
-//! that URL (`pixel replay-flow replay claude-code-auth-flow --execute`), waits for
+//! that URL (`pixel flow replay claude-code-auth-flow --execute`), waits for
 //! the login to exit, and re-probes the lane once.
 //!
 //! Two properties are load-bearing, and each is a pure function a test drives
@@ -187,7 +187,7 @@ pub(crate) fn extract_auth_url(output: &str) -> Option<String> {
 /// screen here because [`flow_command`] has already refused a login that
 /// printed none: this function is never reached with an empty one.
 fn flow_argv(account: Option<&str>, url: &str) -> Vec<String> {
-    let mut argv: Vec<String> = ["replay-flow", "replay", CLAUDE_AUTH_FLOW, "--execute"]
+    let mut argv: Vec<String> = ["flow", "replay", CLAUDE_AUTH_FLOW, "--execute"]
         .iter()
         .map(|word| str::to_string(word))
         .collect();
@@ -294,7 +294,7 @@ pub(crate) fn authenticate(account: Option<&str>, reprobe: impl Fn() -> bool) ->
 
 /// Replay the flow under this pixel, which is what actually drives
 /// `agent-browser`. Exit 0 is the flow's own verdict.
-#[cfg_attr(test, mutants::skip)] // spawns `pixel replay-flow`, which drives a browser
+#[cfg_attr(test, mutants::skip)] // spawns `pixel flow`, which drives a browser
 fn run_flow(argv: &[String]) -> bool {
     Command::new(pixel_binary())
         .args(argv)
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn the_flow_command_replays_the_installed_flow_with_the_url_and_the_account() {
         let argv = flow_command(Some("someone@example.com"), PRINTED_URL).expect("a URL was read");
-        assert_eq!(argv[0], "replay-flow", "{argv:?}");
+        assert_eq!(argv[0], "flow", "{argv:?}");
         assert_eq!(argv[1], "replay", "{argv:?}");
         assert_eq!(argv[2], CLAUDE_AUTH_FLOW, "{argv:?}");
         assert!(argv.contains(&"--execute".to_string()), "{argv:?}");
