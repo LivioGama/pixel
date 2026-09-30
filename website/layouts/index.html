@@ -8,8 +8,6 @@
   <a href="#main" class="skip">Skip to content</a>
   {{ partial "nav.html" . }}
   {{ $s := hugo.Data.scope }}
-  {{/* The row marked `wall` in data/read_savings.toml (the well-known files scripts/bench-read-savings.sh measures): the Problem chapter's example file. */}}
-  {{ $big := partial "wall-row.html" . }}
   {{/* The kept files' count, range and median (the hero's median badge, the Results meter): partials/kept-rates.html, which /benchmarks/, /vs/ (partials/alternatives.html) and /savings/ read too. */}}
   {{ $r := partial "kept-rates.html" . }}
   {{ $bench := "benchmarks/" | relURL }}
@@ -102,31 +100,44 @@
     </section>
 
     {{/* ---------- problem: the cost in the reader's words, before the category is named ---------- */}}
-    {{/* Three costs a visitor already pays, in coral (tokens wasted). The one figure is the wall's full read as a share of a context window (partials/context-share.html, which /benchmarks/ quotes under "Well-known files"); the other two cards carry no number on purpose. */}}
-    {{ $ctx := partial "context-share.html" . }}
-    <section class="section wrap" id="problem" aria-labelledby="problem-title">
+    {{/* A problem, so the section is red (.problem redefines the accents). Two costs a visitor already pays, then the proof: one recorded agent without Pixel on the scoping task the next chapter answers, every tool call it made before it answered. All of it is data/problem_trace.toml (scripts/problem-trace.py writes it from docs/bench/problem-trace/). No seconds and no dollars: the recording shows no reliable speed gain (docs/bench/problem-trace.md), and this section compares nothing. */}}
+    {{ $t := hugo.Data.problem_trace }}
+    {{/* `calls` holds every vanilla run's call count, sorted; the list is odd, so its middle is the median. */}}
+    {{ $runs := sort $t.calls }}
+    {{ $median := index $runs (div (len $runs) 2) }}
+    {{ $max := 0 }}{{ $lines := 0 }}{{ $searches := 0 }}{{ $reads := 0 }}
+    {{ range $t.call }}
+      {{ $max = math.Max $max .lines }}{{ $lines = add $lines .lines }}
+      {{ if eq .kind "search" }}{{ $searches = add $searches 1 }}{{ else if eq .kind "read" }}{{ $reads = add $reads 1 }}{{ end }}
+    {{ end }}
+    {{ $n := len $t.call }}
+    <section class="section section--center wrap problem" id="problem" aria-labelledby="problem-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Problem</span></p>
       <header class="section__head" data-reveal>
         <h2 id="problem-title">First, it has to <span class="glow">find its way.</span></h2>
-        <p>A new task needs a map of your repository. Your agent searches, opens a match and reads the file around it before it knows where to start.</p>
+        <p class="problem__lede"><span>Before any edit, your agent maps your codebase.</span> <span>It greps, opens a match, reads around it.</span></p>
       </header>
-      <ul class="pains" data-reveal="stagger">
-        <li class="pains__card">
-          <p class="pains__tag">Context</p>
-          <h3>The window fills before the first edit.</h3>
-          <p>Read whole, {{ $big.owner }} <code>{{ path.Base $big.path }}</code> is <strong>{{ $ctx.share }}%</strong> of a {{ lang.FormatNumberCustom 0 $ctx.window }}-token context window, estimated as UTF-8 bytes ÷ 4. <a class="link" href="{{ $bench }}#well-known-files">Source</a>. That leaves less room for the task itself.</p>
-        </li>
-        <li class="pains__card">
-          <p class="pains__tag">Bill</p>
-          <h3>It reads lines it never needed.</h3>
-          <p>The question was one function. An outline lets the agent locate it before reading the body. The difference in volume is measurable; a lower session bill is not guaranteed.</p>
-        </li>
-        <li class="pains__card">
-          <p class="pains__tag">Time</p>
-          <h3>You watch it search.</h3>
-          <p><code>grep</code>, open, scroll, open the next one. The agent spends its first turns finding its way, and you wait for it.</p>
-        </li>
+      <ul class="problem__cards" data-reveal="stagger">
+        <li class="problem__card"><p class="problem__tag">Search</p><h3>It reads around what it needed.</h3></li>
+        <li class="problem__card"><p class="problem__tag">Time</p><h3>You wait while it explores.</h3></li>
       </ul>
+      {{/* The middle calls fold into a <details>, so the trace stays short and opens without the script. Each row is partials/trace-call.html; its bar is the call's lines of output against the largest one. */}}
+      <figure class="trace" data-reveal>
+        <p class="trace__prompt"><span class="trace__mark" aria-hidden="true">&#10095;</span><span><em>Prompt &middot; agent without Pixel</em>{{ $t.prompt }}</span></p>
+        <ol class="trace__calls" aria-label="Tool calls, in order, with the lines of output each returned">
+          {{ range $i, $c := first $t.head $t.call }}{{ partial "trace-call.html" (dict "i" (add $i 1) "c" $c "max" $max) }}{{ end }}
+          {{ $fold := sub (sub $n $t.head) $t.tail }}
+          {{ if gt $fold 0 }}
+          <li class="trace__fold"><details><summary><span class="trace__n" aria-hidden="true">&#8943;</span><span>{{ $fold }} more call{{ if gt $fold 1 }}s{{ end }} ({{ printf "%02d" (add $t.head 1) }}&ndash;{{ printf "%02d" (sub $n $t.tail) }}) &middot; show all {{ $n }}</span></summary>
+            <ol class="trace__calls">{{ range $i, $c := first $fold (after $t.head $t.call) }}{{ partial "trace-call.html" (dict "i" (add $i $t.head 1) "c" $c "max" $max) }}{{ end }}</ol>
+          </details></li>
+          {{ end }}
+          {{ range $i, $c := last $t.tail $t.call }}{{ partial "trace-call.html" (dict "i" (add $i (sub $n $t.tail) 1) "c" $c "max" $max) }}{{ end }}
+        </ol>
+        <p class="trace__sum">{{ partial "icon.html" (dict "name" "hourglass" "size" 14) }}<span>{{ $n }} calls &middot; {{ $searches }} searches &middot; {{ $reads }} reads</span><strong>{{ lang.FormatNumberCustom 0 $lines }} lines</strong></p>
+        <p class="trace__median">Median of {{ len $runs }} runs: {{ $median }} calls.</p>
+      </figure>
+      <p class="trace__foot"><span>Recorded {{ (time $t.recorded).Format "2 Jan 2006" }} &middot; {{ replace (replace $t.model "claude-opus-" "Opus ") "-" "." }} {{ $t.effort }} &middot; Claude Code {{ $t.claude }} &middot; Pixel <code>{{ $t.ref }}</code> &middot; run {{ strings.TrimPrefix "vanilla-" $t.run }} of {{ len $runs }}</span> <span>Numbers are lines of tool output; reads include <code>sed</code> slices &middot; <a class="link" href="{{ site.Params.github_url }}/blob/main/docs/bench/problem-trace.md">Raw runs</a></span></p>
     </section>
 
     {{/* ---------- scope ---------- */}}
