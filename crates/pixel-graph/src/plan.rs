@@ -1009,24 +1009,24 @@ pub fn detect_prereqs(
         }
         for (marker, line) in auth_marker_hits(&text) {
             let key = (path.clone(), (*marker).to_string());
-            match auth_lines.get_mut(&key) {
-                Some(existing) if *existing <= line => {}
-                Some(existing) => *existing = line,
-                None => {
-                    auth_lines.insert(key.clone(), line);
-                    auth_order.push(key);
+            if let Some(existing) = auth_lines.get_mut(&key) {
+                if line < *existing {
+                    *existing = line;
                 }
+            } else {
+                auth_lines.insert(key.clone(), line);
+                auth_order.push(key);
             }
         }
         for line in auth_call_hits(&text) {
             let key = (path.clone(), "auth()".to_string());
-            match auth_lines.get_mut(&key) {
-                Some(existing) if *existing <= line => {}
-                Some(existing) => *existing = line,
-                None => {
-                    auth_lines.insert(key.clone(), line);
-                    auth_order.push(key);
+            if let Some(existing) = auth_lines.get_mut(&key) {
+                if line < *existing {
+                    *existing = line;
                 }
+            } else {
+                auth_lines.insert(key.clone(), line);
+                auth_order.push(key);
             }
         }
     }
