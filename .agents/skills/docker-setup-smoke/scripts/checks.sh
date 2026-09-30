@@ -160,6 +160,43 @@ grep -q '^# user instruction$' AGENTS.md
 pixel install --repo . --json > /evidence/repo-install-2.json
 report_ok /evidence/repo-install-2.json
 echo 'PASS project install preserves user instructions, reinstall succeeds'
+# A personal Bash hook holds the Claude guard back: install says what the
+# user can do, and doctor stays yellow with no fix line, since no command
+# can choose between their hook and the guard.
+cp -R "$HOME/doctor-project" "$HOME/guard-project"
+cp "$HOME/.claude/settings.json" /evidence/settings-before-bash-hook.json
+python3 - "$HOME/.claude/settings.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+data = json.load(open(path))
+data["hooks"]["PreToolUse"].append(
+    {"matcher": "Bash", "hooks": [{"type": "command", "command": "/usr/local/bin/my-guard"}]})
+json.dump(data, open(path, "w"), indent=2)
+PY
+(cd "$HOME/guard-project" && pixel install --repo . --json > /evidence/guard-install.json)
+report_ok /evidence/guard-install.json
+(cd "$HOME/guard-project" && pixel doctor . --only repo.claude-hooks --fail-on red > /evidence/guard-doctor.txt 2>&1)
+python3 - /evidence/guard-install.json /evidence/guard-doctor.txt <<'PY'
+import json
+import sys
+steps = {s["id"]: s for s in json.load(open(sys.argv[1]))["steps"]}
+step = steps["hooks.claude"]
+assert step["status"] == "yellow", step
+summary = step["summary"]
+assert "`/usr/local/bin/my-guard`" in summary and "also rewrites shell calls" in summary, summary
+if "narrow that hook's `matcher`" not in summary:
+    print("NOTE this pixel does not say how to get the guard past a personal Bash hook (AG-05)")
+    sys.exit(0)
+lines = open(sys.argv[2]).read().splitlines()
+yellow = [i for i, line in enumerate(lines) if line.lstrip().startswith("[yellow] repo.claude-hooks:")]
+assert len(yellow) == 1, lines
+assert "narrow that hook's `matcher`" in lines[yellow[0]], lines
+following = lines[yellow[0] + 1] if yellow[0] + 1 < len(lines) else ""
+assert not following.lstrip().startswith("fix: "), lines
+print("PASS a personal Bash hook holding the guard back is named with what to do, by install and doctor")
+PY
+cp /evidence/settings-before-bash-hook.json "$HOME/.claude/settings.json"
 pixel config classify off
 if pixel classify test --label yes --label no > /evidence/classify.out 2>/evidence/classify.err; then
     echo 'FAIL disabled classify succeeded' >&2

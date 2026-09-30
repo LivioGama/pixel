@@ -1227,9 +1227,9 @@ pub(crate) fn install_project_claude_at(
                 global_blockers.join(", "),
                 global_path.display(),
                 if stale_global_guard {
-                    " — run `pixel install` to take pixel's global guard out"
+                    " — run `pixel install` to take pixel's global guard out".to_string()
                 } else {
-                    ""
+                    held_back_guard_hint(repo)
                 }
             ),
         );
@@ -1239,6 +1239,18 @@ pub(crate) fn install_project_claude_at(
         step.summary = format!("{}; {warning}", step.summary);
     }
     Ok(step)
+}
+
+/// What a user can do about a hook of theirs that keeps the Claude guard out
+/// of `repo`. Pixel never stacks a second rewriter on the same Bash call, so
+/// the choice is theirs: a matcher naming only other tools coexists with the
+/// guard (see [`shell_overlap`]), or the hook stays and the session runs
+/// without the guard.
+pub(crate) fn held_back_guard_hint(repo: &Path) -> String {
+    format!(
+        " — narrow that hook's `matcher` to tools other than Bash (an explicit list such as `Edit|Write` runs beside the guard), then run `pixel install --repo {}`; or keep it and work without the guard",
+        quoted_executable(repo)
+    )
 }
 
 /// The `PreToolUse` groups of the user-level settings at `path`, which

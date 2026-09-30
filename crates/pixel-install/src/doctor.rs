@@ -1082,7 +1082,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             }
         });
 
-        runner.check_status("repo.claude-hooks", || {
+        runner.record("repo.claude-hooks", || {
             // The shared settings.json is committed: a pixel guard there
             // runs this machine's binary path on every teammate's clone.
             let shared = root.join(crate::routing::CLAUDE_SHARED_SETTINGS);
@@ -1096,34 +1096,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     ));
                 }
             }
-            let path = root.join(crate::routing::CLAUDE_LOCAL_SETTINGS);
-            let value = if path.is_file() {
-                install::read_settings(&path).map_err(|e| e.to_string())?
-            } else {
-                serde_json::Value::Null
-            };
-            let rtk_backup = root.join(crate::routing::RTK_BACKUP);
-            if !crate::routing::has_pixel_hook(&value, &exe) && !rtk_backup.is_file() {
-                return Ok((
-                    CheckStatus::Green,
-                    DoctorCheckDetail {
-                        summary: format!(
-                            "no pixel hook in {} — repo-local claude guard not installed",
-                            crate::routing::CLAUDE_LOCAL_SETTINGS
-                        ),
-                        detail: None,
-                    },
-                ));
-            }
-            if !crate::routing::has_pixel_guard(&value, "run-hook guard --provider claude", &exe) {
-                return Err(format!(
-                    "pixel install evidence (hook or {}) but no pixel guard PreToolUse entry in {} — run `pixel install --repo`",
-                    rtk_backup.display(),
-                    path.display()
-                ));
-            }
             // Claude Code merges the shared and global settings into the
-            // same session: a shell rewriter there races the guard.
+            // same session: a shell rewriter there races the guard, and keeps
+            // `pixel install --repo` from adding one.
             let global = crate::routing::Provider::Claude.path(&home);
             let mut others = vec![&shared];
             if !crate::routing::same_file(&shared, &global) {
@@ -1138,6 +1113,54 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     rivals.push(format!("{command} in {}", other.display()));
                 }
             }
+            let path = root.join(crate::routing::CLAUDE_LOCAL_SETTINGS);
+            let value = if path.is_file() {
+                install::read_settings(&path).map_err(|e| e.to_string())?
+            } else {
+                serde_json::Value::Null
+            };
+            let rtk_backup = root.join(crate::routing::RTK_BACKUP);
+            if !crate::routing::has_pixel_hook(&value, &exe) && !rtk_backup.is_file() {
+                // A repository `pixel install --repo` prepared (its Pixel-first
+                // rule is there) whose guard a hook of the user's held back:
+                // yellow, since the session runs unguarded, and no command,
+                // since only the user can choose between their hook and it.
+                let prepared = crate::pixel_first::check_rules(root)
+                    .map_err(|e| e.to_string())?
+                    .is_some();
+                if prepared && !rivals.is_empty() {
+                    return Ok((
+                        CheckStatus::Yellow,
+                        DoctorCheckDetail {
+                            summary: format!(
+                                "claude guard not installed: {} also rewrites shell calls{}",
+                                rivals.join(", "),
+                                crate::routing::held_back_guard_hint(root)
+                            ),
+                            detail: None,
+                        },
+                        Remedy::Manual,
+                    ));
+                }
+                return Ok((
+                    CheckStatus::Green,
+                    DoctorCheckDetail {
+                        summary: format!(
+                            "no pixel hook in {} — repo-local claude guard not installed",
+                            crate::routing::CLAUDE_LOCAL_SETTINGS
+                        ),
+                        detail: None,
+                    },
+                    Remedy::Catalogue,
+                ));
+            }
+            if !crate::routing::has_pixel_guard(&value, "run-hook guard --provider claude", &exe) {
+                return Err(format!(
+                    "pixel install evidence (hook or {}) but no pixel guard PreToolUse entry in {} — run `pixel install --repo`",
+                    rtk_backup.display(),
+                    path.display()
+                ));
+            }
             if !rivals.is_empty() {
                 return Ok((
                     CheckStatus::Yellow,
@@ -1150,6 +1173,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                         ),
                         detail: Some(serde_json::json!({ "path": path.display().to_string() })),
                     },
+                    Remedy::Catalogue,
                 ));
             }
             Ok((
@@ -1158,6 +1182,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     summary: format!("claude guard registered in {}", path.display()),
                     detail: Some(serde_json::json!({ "path": path.display().to_string() })),
                 },
+                Remedy::Catalogue,
             ))
         });
 

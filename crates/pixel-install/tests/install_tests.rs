@@ -5559,11 +5559,13 @@ fn repo_install_should_hold_back_the_guard_beside_a_global_rtk_hook() {
             pixel_install::install::CheckStatus::Yellow,
             "{step:?}"
         );
-        assert!(
-            step.summary.ends_with(&format!(
-                "`rtk hook claude` in {} also rewrites shell calls",
-                global.display()
-            )),
+        assert_eq!(
+            step.summary,
+            format!(
+                "claude guard not installed: `rtk hook claude` in {} also rewrites shell calls — narrow that hook's `matcher` to tools other than Bash (an explicit list such as `Edit|Write` runs beside the guard), then run `pixel install --repo '{}'`; or keep it and work without the guard",
+                global.display(),
+                repo.display()
+            ),
             "{step:?}"
         );
         let local = repo.join(".claude/settings.local.json");
@@ -5575,6 +5577,102 @@ fn repo_install_should_hold_back_the_guard_beside_a_global_rtk_hook() {
         assert!(pixel_commands(&local, "PreToolUse").is_empty(), "{local}");
         assert_eq!(fs::read_to_string(&global).unwrap(), global_text);
     }
+}
+
+/// A personal Bash hook (`/usr/local/bin/my-guard`) keeps the Claude guard
+/// out, on purpose: two rewriters on one shell call race. The user must still
+/// learn what to do about it, from install and afterwards from doctor, which
+/// must not call the repository healthy while its sessions run unguarded,
+/// nor offer a `--fix` that cannot converge: only the user can choose between
+/// their hook and the guard. Narrowing the matcher, the step the message
+/// names, must then be enough for the guard to go in and doctor to turn green.
+#[test]
+#[cfg(unix)]
+fn a_personal_bash_hook_that_holds_the_guard_back_is_reported_with_what_to_do() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    // The command the user pastes quotes the repository.
+    let repo = dir.path().join("it's a repo");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    let global = home.join(".claude/settings.json");
+    let personal = |matcher: &str| {
+        serde_json::to_string_pretty(&serde_json::json!({"model": "opus", "hooks": {"PreToolUse": [
+            {"matcher": matcher, "hooks": [{"type": "command", "command": "/usr/local/bin/my-guard"}]}
+        ]}}))
+        .unwrap()
+    };
+    fs::write(&global, personal("Bash")).unwrap();
+    let hint = format!(
+        " — narrow that hook's `matcher` to tools other than Bash (an explicit list such as `Edit|Write` runs beside the guard), then run `pixel install --repo '{}'`; or keep it and work without the guard",
+        repo.display().to_string().replace('\'', "'\\''")
+    );
+    let options = repo_install_options(&repo, &home);
+    let claude_hooks = || {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.clone()),
+            repo_root: Some(repo.clone()),
+            executable_path: options.executable_path.clone(),
+            only: vec!["repo.claude-hooks".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "repo.claude-hooks").clone()
+    };
+
+    // A repository nobody prepared is not broken, whatever the user's hooks.
+    let untouched = claude_hooks();
+    assert_eq!(untouched.status, CheckStatus::Green, "{untouched:?}");
+
+    let report = install(&options).unwrap();
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "hooks.claude")
+        .unwrap();
+    assert_eq!(step.status, StepStatus::Yellow, "{step:?}");
+    assert_eq!(
+        step.summary,
+        format!(
+            "claude guard not installed: `/usr/local/bin/my-guard` in {} also rewrites shell calls{hint}",
+            global.display()
+        )
+    );
+    assert_eq!(fs::read_to_string(&global).unwrap(), personal("Bash"));
+
+    let held = claude_hooks();
+    assert_eq!(held.status, CheckStatus::Yellow, "{held:?}");
+    assert_eq!(
+        held.summary,
+        format!(
+            "claude guard not installed: `/usr/local/bin/my-guard` in {} also rewrites shell calls{hint}",
+            global.display()
+        )
+    );
+    assert_eq!(held.fix, None, "no command can make this choice: {held:?}");
+    assert_eq!(
+        held.repair, None,
+        "--fix must not rerun an install that cannot converge"
+    );
+
+    fs::write(&global, personal("Edit|Write")).unwrap();
+    let report = install(&options).unwrap();
+    let step = report
+        .steps
+        .iter()
+        .find(|s| s.id == "hooks.claude")
+        .unwrap();
+    assert_eq!(step.status, StepStatus::Green, "{step:?}");
+    let guarded = claude_hooks();
+    assert_eq!(guarded.status, CheckStatus::Green, "{guarded:?}");
+    assert_eq!(
+        guarded.summary,
+        format!(
+            "claude guard registered in {}",
+            repo.join(".claude/settings.local.json").display()
+        )
+    );
 }
 
 /// An unreadable global settings file must not block the repo install: the
@@ -5693,7 +5791,9 @@ fn repo_install_should_name_pixel_install_for_a_global_pixel_guard() {
 
 /// A guard installed before `rtk init -g` (or by a release that did not read
 /// the global file) runs beside the global RTK hook: doctor turns yellow with
-/// the command that holds the guard back, and that command does.
+/// the command that holds the guard back, and that command does. The guard
+/// is then absent while the sessions run: doctor stays yellow, naming what
+/// the user can do, and offers no command, since none can choose for them.
 #[test]
 #[cfg(unix)]
 fn doctor_repo_claude_hooks_should_flag_a_guard_beside_a_global_rewriter() {
@@ -5730,10 +5830,23 @@ fn doctor_repo_claude_hooks_should_flag_a_guard_beside_a_global_rewriter() {
         "{c:?}"
     );
 
+    assert_eq!(
+        c.fix,
+        Some(format!("pixel install --repo '{}'", repo.display())),
+        "rerunning the install does hold the guard back: {c:?}"
+    );
+
     install(&repo_install_options(&repo, &home)).unwrap();
     let c = claude_check();
-    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
-    assert!(c.summary.contains("not installed"), "{c:?}");
+    assert_eq!(c.status, CheckStatus::Yellow, "{c:?}");
+    assert!(
+        c.summary.starts_with(&format!(
+            "claude guard not installed: `rtk hook claude` in {} also rewrites shell calls — narrow that hook's `matcher`",
+            home.join(".claude/settings.json").display()
+        )),
+        "{c:?}"
+    );
+    assert_eq!(c.fix, None, "{c:?}");
 }
 
 /// Read the `PostToolUse` groups whose command runs Pixel's metrics relay
