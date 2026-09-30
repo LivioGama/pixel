@@ -118,6 +118,10 @@ pixel commit-and-push --files <f1> --files <f2> -m "msg" --request-id "id" origi
 
 Two rules hold throughout. `pixel impact` runs before any edit, because editing blind is how callers you never saw break. And the agent never commits or pushes unless asked: every write takes a `--request-id`, which makes it crash-safe and idempotent.
 
+{{< workflow-jobs >}}
+
+Optional model-backed decisions have a [classification guide](../classify/).
+
 ## Commands
 
 The most used commands, by job. `pixel --help` lists all of them, and [ARCHITECTURE.md](https://github.com/LivioGama/pixel/blob/main/ARCHITECTURE.md#command-surface) describes each in one line.
@@ -189,7 +193,7 @@ Pixel does not cover every job. Use the native command for grep flags Pixel lack
 
 ## Token savings
 
-`pixel token-savings` reports, for the retrieval commands you ran, the fraction of the candidate pool the agent did not have to read. It measures what reached the agent's context, not your invoice. The replay of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark on Pixel's own repository is on the [home page](../#savings), and its method on the [benchmarks page](../benchmarks/#reading-code).
+`pixel token-savings` reports, for the retrieval commands you ran, the fraction of the candidate pool the agent did not have to read. It measures what reached the agent's context, not your invoice. The replay of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark on Pixel's own repository is on the [benchmarks page](../benchmarks/#reading-code), with its method.
 
 Each Pixel command also prints a `🟩 Pixel` line on stderr with its measured duration and two estimates: tokens saved against the native workflow, and time saved against sequential round trips. Both are estimates, and zero or negative values are valid. `--metrics=off` or `PIXEL_METRICS=0` turns the line off.
 

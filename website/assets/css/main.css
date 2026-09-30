@@ -488,7 +488,7 @@ main { counter-reset: chapter; }
 /* The matrix: Pixel's column first, one column per code index,
    one row per criterion; a phone scrolls it sideways under the pinned
    criterion column. */
-.mx { margin-top: clamp(8px, 1vw, 16px); border-radius: 8px; background: color-mix(in srgb, var(--panel) 75%, transparent); box-shadow: inset 0 0 0 1px var(--line); }
+.mx { min-width: 0; margin-top: clamp(8px, 1vw, 16px); border-radius: 8px; background: color-mix(in srgb, var(--panel) 75%, transparent); box-shadow: inset 0 0 0 1px var(--line); }
 /* position: relative makes the scroller the containing block of the .sr-only
    spans in its cells (absolutely positioned): without it they escape the
    clip and widen the whole page, which then scrolls sideways on a phone. */
@@ -541,6 +541,8 @@ main { counter-reset: chapter; }
 .vsp__crumbs a { color: var(--ink-soft); text-underline-offset: 3px; }
 .vsp__crumbs + .docs__head { padding-top: 18px; }
 .vsp__body { max-width: 46em; padding-top: 32px; display: grid; gap: 44px; }
+.vsp--index .vsp__body { max-width: none; }
+.vsp--index .vsp__prose, .vsp--index .vsp__index, .vsp--index .faq, .vsp--index .ledger__fine { max-width: 46em; }
 .vsp__body h2 { font: 700 2rem/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; margin: 0 0 14px; }
 .vsp__body p { margin: 0 0 14px; }
 .vsp__body code { background: var(--panel); padding: 1px 5px; border-radius: 3px; overflow-wrap: anywhere; }

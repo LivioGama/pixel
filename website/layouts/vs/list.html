@@ -10,7 +10,7 @@
   {{ $all := partial "alternatives.html" (dict "abs" false) }}
   {{ $pages := .Pages }}
 
-  <main class="docs wrap vsp" id="main">
+  <main class="docs wrap vsp vsp--index" id="main">
     <nav class="vsp__crumbs" aria-label="Breadcrumb"><a href="{{ "" | relURL }}">Pixel</a> / <span aria-current="page">Comparisons</span></nav>
     <header class="docs__head">
       <h1>{{ .Title }}</h1>
@@ -20,6 +20,15 @@
 
     <article class="vsp__body">
       {{ with .Content }}<div class="prose vsp__prose">{{ . }}</div>{{ end }}
+      <h2 id="alternatives">Compare the approaches</h2>
+      {{ partial "comparison-matrix.html" . }}
+      <h2 id="questions">Choosing a tool</h2>
+      <div class="faq">
+        {{ range partial "objections.html" (dict "abs" false "comparisons" true) }}
+        <details><summary>{{ .question }}</summary>{{ .answer | safeHTML }}</details>
+        {{ end }}
+      </div>
+      <h2>Full comparisons</h2>
       <ul class="vsp__index">
         {{ range $all }}
           {{ $tool := . }}

@@ -19,7 +19,10 @@
   "{langs.list}" (delimit $langs ", " ", and ")
 }}
 {{ $out := slice }}
-{{ range hugo.Data.objections.objection }}
+{{ $entries := hugo.Data.objections.objection }}
+{{ if .home }}{{ $entries = where $entries "comparison" "ne" true }}{{ end }}
+{{ if .comparisons }}{{ $entries = where hugo.Data.objections.objection "comparison" true }}{{ end }}
+{{ range $entries }}
   {{ $paras := slice }}
   {{ range .answer }}
     {{ $p := . }}

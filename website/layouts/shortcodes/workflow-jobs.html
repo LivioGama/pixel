@@ -1,0 +1,77 @@
+      <h3 class="vs__kicker" id="jobs">Six jobs your agent runs every day</h3>
+      <p class="ledger__fine">Workflow illustrations, not timed agent trials. The accounting animation combines measured local output volumes with token and time estimates; it does not measure billed savings.</p>
+      <div class="jobs" data-jobs>
+        <div class="jobs__tabs" role="tablist" aria-label="Jobs">
+          {{ range $i, $j := hugo.Data.jobs.job }}
+          <button class="jobs__tab" type="button" role="tab" id="tab-{{ $j.id }}" aria-controls="panel-{{ $j.id }}" aria-selected="{{ if eq $i 0 }}true{{ else }}false{{ end }}"{{ if ne $i 0 }} tabindex="-1"{{ end }}>
+            <span class="jobs__name">{{ $j.name }}</span>
+            <code class="jobs__cmd">{{ $j.command }}</code>
+          </button>
+          {{ end }}
+        </div>
+        {{ range $i, $j := hugo.Data.jobs.job }}
+        <div class="jobs__panel" role="tabpanel" id="panel-{{ $j.id }}" aria-labelledby="tab-{{ $j.id }}"{{ if ne $i 0 }} hidden{{ end }}>
+          <p class="jobs__text">{{ $j.text }}</p>
+          {{ $src := printf "examples/%s.mp4" $j.media | relURL }}
+          <video class="jobs__video" width="1600" height="1000" muted loop playsinline preload="none"
+            poster="{{ printf "examples/%s.jpg" $j.media | relURL }}" aria-label="{{ $j.name }}: workflow illustration without Pixel and with it"
+            {{ if eq $i 0 }}src="{{ $src }}"{{ else }}data-src="{{ $src }}"{{ end }}></video>
+        </div>
+        {{ end }}
+      </div>
+<script>
+    /* Videos play only while on screen, and never on their own under
+       reduced motion: those visitors get the poster (the finished state)
+       and the controls. */
+    var still = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var watch = function (video) {
+      if (still) { video.controls = true; return; }
+      if (!('IntersectionObserver' in window)) return;
+      new IntersectionObserver(function (e) {
+        var v = e[0].target;
+        v.dataset.visible = e[0].intersectionRatio >= 0.5 ? '1' : '';
+        if (v.dataset.visible && !v.closest('[hidden]') && v.dataset.ended !== '1') v.play().catch(function () {});
+        else v.pause();
+      }, { threshold: [0, 0.5, 1] }).observe(video);
+    };
+
+    /* Jobs: a tab list; a recording loads only when its tab is opened. */
+    (function () {
+      var root = document.querySelector('[data-jobs]');
+      if (!root) return;
+      var tabs = [].slice.call(root.querySelectorAll('[role="tab"]'));
+      var videos = [].slice.call(root.querySelectorAll('video'));
+      videos.forEach(watch);
+      var select = function (tab) {
+        tabs.forEach(function (t) {
+          var on = t === tab;
+          t.setAttribute('aria-selected', on);
+          t.tabIndex = on ? 0 : -1;
+          var panel = document.getElementById(t.getAttribute('aria-controls'));
+          panel.hidden = !on;
+          var video = panel.querySelector('video');
+          if (!video) return;
+          if (on && video.dataset.src) { video.src = video.dataset.src; video.removeAttribute('data-src'); }
+          if (on && !still) {
+            video.currentTime = 0;
+            // The panel just became visible, so its observer has not fired yet:
+            // judge the tab list's own visibility instead.
+            var r = root.getBoundingClientRect();
+            if (r.top < innerHeight / 2 && r.bottom > innerHeight / 2) video.play().catch(function () {});
+          }
+          if (!on) video.pause();
+        });
+      };
+      tabs.forEach(function (t, i) {
+        t.addEventListener('click', function () { select(t); });
+        t.addEventListener('keydown', function (e) {
+          var d = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[e.key];
+          if (!d) return;
+          e.preventDefault();
+          var next = tabs[(i + d + tabs.length) % tabs.length];
+          select(next);
+          next.focus();
+        });
+      });
+    })();
+</script>
