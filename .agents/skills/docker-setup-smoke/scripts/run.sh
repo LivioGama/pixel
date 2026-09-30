@@ -1,28 +1,42 @@
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ ${1:-} == --help ]]; then
-    echo "Usage: bash $0 [vX.Y.Z | --source main | --source SHA | --pr NUMBER | --installer | --brew]"
+#!/bin/sh
+set -eu
+# A hook or wrapper may export these; they would make `git -C` report
+# another repository's checkout in the saved provenance.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_PREFIX
+if [ "${1:-}" = --help ]; then
+    echo "Usage: sh $0 [vX.Y.Z | --source main | --source SHA | --pr NUMBER | --installer | --brew]"
     echo 'Default: v0.6.1. Source builds use the fetched commit, not the PR merge ref.'
     echo '--installer and --brew install the latest published release through install.sh or the tap.'
     exit 0
 fi
+is_sha() {
+    case $1 in *[!0-9a-fA-F]*) return 1 ;; esac
+    [ "${#1}" -eq 40 ]
+}
+is_pr() {
+    case $1 in '' | 0* | *[!0-9]*) return 1 ;; esac
+}
+is_tag() {
+    expr "x$1" : 'xv[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*$' >/dev/null
+}
 mode=release
 release=v0.6.1
 source_ref=''
-if [[ $# -eq 2 && $1 == --source && $2 == main ]]; then
+if [ $# -eq 2 ] && [ "$1" = --source ] && [ "$2" = main ]; then
     mode=source
     source_ref=refs/heads/main
-elif [[ $# -eq 2 && $1 == --source && $2 =~ ^[a-fA-F0-9]{40}$ ]]; then
+elif [ $# -eq 2 ] && [ "$1" = --source ] && is_sha "$2"; then
     mode=source
     source_ref=$2
-elif [[ $# -eq 2 && $1 == --pr && $2 =~ ^[1-9][0-9]*$ ]]; then
+elif [ $# -eq 2 ] && [ "$1" = --pr ] && is_pr "$2"; then
     mode=source
     source_ref="refs/pull/$2/head"
-elif [[ $# -eq 1 && ( $1 == --installer || $1 == --brew ) ]]; then
+elif [ $# -eq 1 ] && { [ "$1" = --installer ] || [ "$1" = --brew ]; }; then
     mode=${1#--}
-elif [[ $# -eq 1 && $1 =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+elif [ $# -eq 1 ] && is_tag "$1"; then
     release=$1
-elif [[ $# -ne 0 ]]; then
+elif [ $# -ne 0 ]; then
     echo 'Expected a release tag, --source main/SHA, --pr NUMBER, --installer or --brew' >&2
     exit 2
 fi
@@ -66,8 +80,9 @@ echo "Evidence: $evidence"
 {
     printf 'checkout: %s\nmode: %s\nrelease: %s\nsource-ref: %s\nbase: %s\nuser: %s\n' \
         "$(git -C "$repo" rev-parse HEAD)" "$mode" "$release" "$source_ref" "$base" "$user"
-    printf 'command: bash %q' "$0"
-    if [[ $# -gt 0 ]]; then printf ' %q' "$@"; fi
+    # The selectors above admit no quote, so single quotes spell them exactly.
+    printf "command: sh '%s'" "$0"
+    for arg in "$@"; do printf " '%s'" "$arg"; done
     printf '\n'
     docker version
 } > "$evidence/identity.txt"
@@ -96,7 +111,7 @@ status=$?
 set -e
 if ! docker cp "$container:/evidence/." "$evidence/"; then
     echo 'Could not export container evidence' >&2
-    if [[ $status -eq 0 ]]; then status=1; fi
+    if [ "$status" -eq 0 ]; then status=1; fi
 fi
 printf '%s\n' "$status" > "$evidence/exit-status.txt"
 cat "$evidence/run.log"

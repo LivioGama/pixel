@@ -12,19 +12,19 @@ still exercise Linux. No Docker Agentic Platform or model key is needed.
 From the repository root:
 
 ```bash
-bash .agents/skills/docker-setup-smoke/scripts/run.sh
+sh .agents/skills/docker-setup-smoke/scripts/run.sh
 # Another published release archive:
-bash .agents/skills/docker-setup-smoke/scripts/run.sh v0.6.1
+sh .agents/skills/docker-setup-smoke/scripts/run.sh v0.6.1
 # The published install.sh, into a dedicated directory:
-bash .agents/skills/docker-setup-smoke/scripts/run.sh --installer
+sh .agents/skills/docker-setup-smoke/scripts/run.sh --installer
 # The Homebrew tap on Linuxbrew:
-bash .agents/skills/docker-setup-smoke/scripts/run.sh --brew
+sh .agents/skills/docker-setup-smoke/scripts/run.sh --brew
 # Compile current upstream main:
-bash .agents/skills/docker-setup-smoke/scripts/run.sh --source main
+sh .agents/skills/docker-setup-smoke/scripts/run.sh --source main
 # Compile a PR's head, including a fork PR (not GitHub's merge ref):
-bash .agents/skills/docker-setup-smoke/scripts/run.sh --pr 427
+sh .agents/skills/docker-setup-smoke/scripts/run.sh --pr 427
 # Replay the exact source SHA recorded by a prior run:
-bash .agents/skills/docker-setup-smoke/scripts/run.sh --source <40-character-SHA>
+sh .agents/skills/docker-setup-smoke/scripts/run.sh --source <40-character-SHA>
 ```
 
 ## Binary modes
@@ -103,7 +103,7 @@ SHA. Source mode tests fetched upstream code, not uncommitted local changes.
 Not covered: macOS (Homebrew on macOS included), shells other than bash,
 interactive setup, real agent sessions or model inference.
 
-Prerequisites: Bash, Git, a running Docker engine with BuildKit (Docker Desktop's
+Prerequisites: a POSIX sh, Git, a running Docker engine with BuildKit (Docker Desktop's
 default) and network access to GitHub, Docker Hub and crates.io, plus Debian or
 Ubuntu mirrors until the smoke image is cached. The image build is not
 time-bounded; bootstrap is bounded to 5 minutes (release, installer), 15 minutes
