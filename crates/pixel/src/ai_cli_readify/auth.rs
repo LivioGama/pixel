@@ -60,8 +60,18 @@ const LOGIN_POLL: Duration = Duration::from_millis(200);
 pub(crate) enum AuthOutcome {
     /// `--authenticate` was given and the Claude lane needed no login.
     NotNeeded,
-    /// The login finished, its child exited cleanly, and the flow ran.
+    /// The login finished, its child exited cleanly, the flow ran, and the
+    /// re-probe found the lane ready.
     Completed,
+    /// The login finished and its child exited cleanly, and the re-probe
+    /// still found the lane on an auth wall.
+    ///
+    /// Its own outcome rather than [`AuthOutcome::Completed`] beside a false
+    /// `ready_after`, because the label has to carry the whole verdict: the
+    /// exit code proves `claude auth login` finished, not that Claude can
+    /// reach a model, and "completed" read alone claims the sign-in the very
+    /// next probe refuses.
+    CompletedUnready,
     /// No authorize URL before the launch budget; nothing was opened.
     NoUrl,
     /// The login never started, or did not exit cleanly.
@@ -76,6 +86,7 @@ impl AuthOutcome {
         match self {
             Self::NotNeeded => "not needed",
             Self::Completed => "completed",
+            Self::CompletedUnready => "the login finished but claude is still not ready",
             Self::NoUrl => "refused: the login printed no authorize URL",
             Self::LoginFailed => "the login did not finish cleanly",
             Self::FlowFailed => "the browser flow failed",
@@ -203,6 +214,20 @@ pub(crate) fn flow_command(
         .ok_or(AuthOutcome::NoUrl)
 }
 
+/// The outcome of a login that exited cleanly, given what the re-probe then
+/// saw.
+///
+/// A pure function because the exit code and the readiness are two facts, and
+/// a run that read only the first reported a sign-in it could not see: the
+/// test drives both sides of the branch without spawning a login.
+fn completed_outcome(ready: bool) -> AuthOutcome {
+    if ready {
+        AuthOutcome::Completed
+    } else {
+        AuthOutcome::CompletedUnready
+    }
+}
+
 /// Drive the chain for the Claude lane and report each step it reached.
 ///
 /// The body is process glue end to end — a pty, a subprocess that drives a
@@ -257,7 +282,7 @@ pub(crate) fn authenticate(account: Option<&str>, reprobe: impl Fn() -> bool) ->
                 "re-probed claude: {}",
                 if ready { "ready" } else { "still not ready" }
             ));
-            AuthChain::ended(steps, AuthOutcome::Completed, ready)
+            AuthChain::ended(steps, completed_outcome(ready), ready)
         }
         _ => {
             terminal.stop();
@@ -433,6 +458,7 @@ mod tests {
         let labels: Vec<&str> = [
             AuthOutcome::NotNeeded,
             AuthOutcome::Completed,
+            AuthOutcome::CompletedUnready,
             AuthOutcome::NoUrl,
             AuthOutcome::LoginFailed,
             AuthOutcome::FlowFailed,
@@ -445,10 +471,24 @@ mod tests {
             vec![
                 "not needed",
                 "completed",
+                "the login finished but claude is still not ready",
                 "refused: the login printed no authorize URL",
                 "the login did not finish cleanly",
                 "the browser flow failed",
             ]
+        );
+    }
+
+    #[test]
+    fn a_login_that_exited_cleanly_is_completed_only_when_the_lane_is_ready_again() {
+        // The exit code says the login finished; only the re-probe says
+        // whether it worked. A run that read the first alone reported
+        // "completed" for a lane the very next probe still called a wall.
+        assert_eq!(completed_outcome(true), AuthOutcome::Completed);
+        assert_eq!(
+            completed_outcome(false),
+            AuthOutcome::CompletedUnready,
+            "a re-probe that still sees the wall must not read as a sign-in"
         );
     }
 

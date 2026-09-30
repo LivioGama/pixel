@@ -15,6 +15,8 @@ use std::time::Duration;
 
 use serde_json::json;
 
+use super::agents::READY_TOKEN;
+
 /// Response bytes we are willing to read from a probe. A provider answering
 /// with an HTML error page or a runaway completion must not be read whole.
 pub(crate) const RESPONSE_CAP_BYTES: usize = 16_384;
@@ -30,9 +32,10 @@ pub(crate) const DETAIL_CAP_CHARS: usize = 240;
 /// the dishonesty the probe exists to avoid.
 pub(crate) const PROBE_MAX_TOKENS: u32 = 1_024;
 
-/// The prompt every probe sends. `READY` is the whole reply, so a 200 that
-/// carries prose, a refusal, or an empty completion is visible in the report
-/// rather than counted as a pass.
+/// The prompt every probe sends. A 200 is a pass only when its reply carries
+/// `READY` ([`carries_ready`]), so a 200 that carries prose, a refusal, or an
+/// empty completion is visible in the report as its own failure rather than
+/// counted as a pass.
 pub(crate) const PROBE_PROMPT: &str = "Reply exactly READY.";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,6 +109,14 @@ pub(crate) enum ProbeFailure {
     /// be selected and `--apply` would point four agents' configs at a
     /// provider that serves nothing.
     EmptyCompletion,
+    /// 2xx, and the completion is not the `READY` the probe asked for:
+    /// prose, a refusal, or a gateway's own canned notice. Distinct from
+    /// [`Self::EmptyCompletion`] because something did come back, and distinct
+    /// from a pass because the provider did not answer the question the probe
+    /// asked. Counted as ready, it would be selected and `--apply` would
+    /// point four agents' configs at a gateway that only ever says something
+    /// else.
+    NoReadyMarker,
     /// 5xx — the provider is up and failing.
     Server,
     /// The request never produced a status: DNS, TLS, connect or read.
@@ -128,6 +139,8 @@ impl ProbeFailure {
             // Names no status: this arm is always a 2xx, and the detail
             // appends the one it really saw.
             Self::EmptyCompletion => "no completion",
+            // Same: a 2xx, and the detail carries the status and the reply.
+            Self::NoReadyMarker => "no READY in the reply",
             Self::Server => "provider error (5xx)",
             Self::Transport => "unreachable",
         }
@@ -152,7 +165,8 @@ pub(crate) fn classify_status(status: u16) -> ProbeFailure {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProbeOutcome {
     pub(crate) provider: Provider,
-    /// The provider answered, and the answer was not a placeholder refusal.
+    /// The provider answered, and the answer carried the `READY` the probe
+    /// asked for — not a placeholder refusal or a gateway's canned notice.
     pub(crate) ready: bool,
     /// The reply text on success, or the classified failure plus whatever the
     /// provider said, redacted and capped.
@@ -227,10 +241,18 @@ pub(crate) fn probe(provider: Provider, base: &str, key: &str, timeout: Duration
         .unwrap_or_default();
     if (200..300).contains(&status) {
         return match reply_text(&text) {
-            Some(reply) => ProbeOutcome::ready(provider, reply),
-            // A 200 whose body carries no completion is the provider being
-            // up and not answering. It is a failure with the same detail
-            // shape as the rest, so the body it did send stays readable.
+            Some(reply) if carries_ready(&reply) => ProbeOutcome::ready(provider, reply),
+            // A 200 whose completion is not the `READY` the prompt asked for
+            // is the provider being up and not answering: prose, a refusal,
+            // or a gateway's own canned notice. It is a failure with the same
+            // detail shape as the rest, so the reply it did send stays
+            // readable.
+            Some(reply) => {
+                let failure = ProbeFailure::NoReadyMarker;
+                let line = detail(&reply, status, &failure);
+                ProbeOutcome::failed(provider, failure, line)
+            }
+            // A 200 whose body carries no completion at all.
             None => {
                 let failure = ProbeFailure::EmptyCompletion;
                 let line = detail(&text, status, &failure);
@@ -264,6 +286,18 @@ fn reply_text(body: &str) -> Option<String> {
         Some(text) if !text.trim().is_empty() => Some(text.trim().to_string()),
         _ => None,
     }
+}
+
+/// Whether a reply carries the marker [`PROBE_PROMPT`] asked for.
+///
+/// Case-insensitive, and anywhere in the reply: a chatty model wraps `READY`
+/// in a sentence, and what the probe needs to know is that the round trip
+/// reached a model, not that it obeyed the formatting. The token is
+/// [`agents::READY_TOKEN`], the same one the four agents' own probes require
+/// — the two lanes port the same reference round trip, so they ask for the
+/// same word.
+fn carries_ready(reply: &str) -> bool {
+    reply.to_ascii_uppercase().contains(READY_TOKEN)
 }
 
 /// One line for a failed probe: the classified label, then the provider's own
@@ -335,8 +369,6 @@ pub(crate) fn redact(text: &str) -> String {
     out
 }
 
-/// A token that carries a credential: a bearer value, or a long run of
-/// key-shaped characters. Deliberately generous — a false positive costs a
 /// The prefixes a key carries in the provider's own documentation. A run
 /// matching one of these and longer than a bare word is masked whatever else
 /// it looks like.
@@ -346,22 +378,63 @@ const SECRET_PREFIXES: [&str; 4] = ["sk-", "sk_", "Bearer", "bearer"];
 /// provider's key is made of.
 const KEY_RUN_CHARS: usize = 32;
 
-/// less readable message, a false negative leaks a key into the report.
+/// The characters a provider wraps a value in: a quote, a bracket, or the
+/// punctuation of the sentence around it. Trimmed from each end before a
+/// token is classified, because none of them is in a key's alphabet — left
+/// on, `'sk-…'` is judged as the token that starts with a quote, and every
+/// rule below misses it.
+const WRAPPER_PUNCTUATION: &[char] = &[
+    '\'', '"', '`', '(', ')', '[', ']', '{', '}', '<', '>', ',', ';', ':', '=', '*',
+];
+
+/// The characters that separate a name from its value in an error body
+/// (`api_key=…`, `"token": "…"`). What follows the first one is the
+/// credential when the token is a pair; the name in front of it is not.
+const ASSIGNMENT_SEPARATORS: [char; 2] = ['=', ':'];
+
+/// A token that carries a credential: a bearer value, a long run of
+/// key-shaped characters, or either of those behind the quotes or the
+/// `name=` an error body puts around it. Deliberately generous — a false
+/// positive costs a less readable message, a false negative leaks a key into
+/// the report.
 fn looks_like_a_secret(token: &str) -> bool {
     let trimmed = token.trim_matches(|c: char| !c.is_ascii_graphic());
     if trimmed.is_empty() {
         return false;
     }
-    if trimmed.eq_ignore_ascii_case("bearer") {
+    let bare = trimmed.trim_matches(WRAPPER_PUNCTUATION);
+    if is_a_key(bare) {
+        return true;
+    }
+    // `api_key=sk-…`, `key:sk-…`: the credential is the value, and the name
+    // before the separator makes the whole token stop looking like one.
+    assigned_value(bare).is_some_and(|value| is_a_key(value.trim_matches(WRAPPER_PUNCTUATION)))
+}
+
+/// The value half of a `name=value` or `name:value` token, or `None` when
+/// the token carries neither. The first separator wins: a URL's `https:` is
+/// handled by the value it yields failing [`is_a_key`], not by skipping it.
+fn assigned_value(token: &str) -> Option<&str> {
+    let at = token.find(ASSIGNMENT_SEPARATORS)?;
+    Some(&token[at + 1..])
+}
+
+/// A run of the characters a provider's key is made of, long enough to be
+/// one — or carrying a documented prefix past a bare word's length.
+fn is_a_key(candidate: &str) -> bool {
+    if candidate.is_empty() {
         return false;
     }
-    if SECRET_PREFIXES.iter().any(|p| trimmed.starts_with(p)) && trimmed.len() > 8 {
+    if candidate.eq_ignore_ascii_case("bearer") {
+        return false;
+    }
+    if SECRET_PREFIXES.iter().any(|p| candidate.starts_with(p)) && candidate.len() > 8 {
         return true;
     }
     // A long unbroken alphanumeric run is a key whatever its prefix: the
     // provider's key is 30+ characters of that shape.
-    trimmed.len() >= KEY_RUN_CHARS
-        && trimmed
+    candidate.len() >= KEY_RUN_CHARS
+        && candidate
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
@@ -480,6 +553,42 @@ mod tests {
             "the detail names the condition and the status it really saw: {}",
             outcome.detail
         );
+    }
+
+    #[test]
+    fn a_200_whose_reply_is_not_the_asked_for_marker_is_not_counted_as_ready() {
+        // A gateway that answers 200 with its own prose is the provider up
+        // and not answering. `ready` is what `selected` reads and `--apply`
+        // acts on, so counting it would point three agent configs at a
+        // gateway that only ever says something else.
+        let outcome = probe_against(
+            200,
+            r#"{"choices":[{"message":{"content":"Sure, I'd be happy to help."}}]}"#,
+        );
+        assert!(!outcome.ready, "{outcome:?}");
+        assert_eq!(outcome.failure, Some(ProbeFailure::NoReadyMarker));
+        assert!(
+            outcome.detail.starts_with("no READY in the reply")
+                && outcome.detail.contains("HTTP 200")
+                && outcome.detail.contains("happy to help"),
+            "the detail names the condition, the status and the reply: {}",
+            outcome.detail
+        );
+    }
+
+    #[test]
+    fn a_200_whose_reply_wraps_the_marker_in_prose_or_case_is_ready() {
+        // The marker is required, not the formatting. A chatty model that
+        // wraps `READY` in a sentence or lowercases it reached one, and a
+        // check that demanded the exact string would fail a working provider.
+        for body in [
+            r#"{"choices":[{"message":{"content":"Sure, READY."}}]}"#,
+            r#"{"choices":[{"message":{"content":"ready"}}]}"#,
+        ] {
+            let outcome = probe_against(200, body);
+            assert!(outcome.ready, "{body}: {outcome:?}");
+            assert_eq!(outcome.failure, None, "{body}: {outcome:?}");
+        }
     }
 
     #[test]
@@ -718,6 +827,62 @@ mod tests {
         // in the report is masked, URL included.
         let url = "https://ollama.com/v1/chat/completions";
         assert_eq!(redact(url), url);
+    }
+
+    #[test]
+    fn redact_strips_the_wrapper_a_provider_quotes_a_key_with() {
+        // A provider quotes the value back — `'sk-…'`, `"sk-…"`, `` `sk-…` `` —
+        // and a quote is in no key's alphabet, so a token judged with its
+        // wrapper still on matched none of the rules.
+        let key = "sk-abcdefghijklmnop";
+        for wrapped in [format!("'{key}'"), format!("\"{key}\""), format!("`{key}`")] {
+            let out = redact(&format!("invalid key {wrapped}"));
+            assert!(!out.contains(key), "the wrapper hid the key: {out}");
+            assert!(out.contains("<redacted>"), "{out}");
+        }
+    }
+
+    #[test]
+    fn redact_reads_the_value_of_an_assignment() {
+        // `api_key=sk-…` and `key:sk-…`: the name in front of the value is
+        // what stopped the token looking like a key. The third is a quoted
+        // value with no space after the `=`, where the outer trim takes the
+        // closing quote and the value keeps the opening one.
+        let key = "sk-abcdefghijklmnop";
+        for assigned in [
+            format!("api_key={key}"),
+            format!("key:{key}"),
+            format!("api_key=\"{key}\""),
+        ] {
+            let out = redact(&format!("body carried {assigned} back"));
+            assert!(!out.contains(key), "the assignment hid the key: {out}");
+            assert!(out.contains("<redacted>"), "{out}");
+        }
+    }
+
+    #[test]
+    fn redact_keeps_a_url_intact_quoted_or_behind_a_name() {
+        // The other long token an error body carries is a URL. Trimming the
+        // wrapper and reading an assignment value must not turn one into a
+        // false positive: the `:` and the `/` still fail the key-shaped test,
+        // on the token and on the value after the first separator alike.
+        for url in [
+            "https://ollama.com/v1/chat/completions",
+            "\"https://ollama.com/v1/chat/completions\"",
+            "url=https://ollama.com/v1/chat/completions",
+        ] {
+            assert_eq!(redact(url), url, "{url}");
+        }
+    }
+
+    #[test]
+    fn redact_masks_a_key_shaped_run_at_the_length_cap_and_keeps_one_under_it() {
+        // For a run with no prefix the cap is the whole rule: one character
+        // under it is a word, the cap itself is a key.
+        let under = "a".repeat(KEY_RUN_CHARS - 1);
+        let at_cap = "a".repeat(KEY_RUN_CHARS);
+        assert_eq!(redact(&under), under, "one under the cap stays readable");
+        assert_eq!(redact(&at_cap), "<redacted>", "the cap itself is a key");
     }
 
     #[test]

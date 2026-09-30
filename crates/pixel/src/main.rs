@@ -363,7 +363,9 @@ enum Command {
     /// Probe provider readiness for Codex, Claude Code, Antigravity, and
     /// Devin by sending one real `POST /chat/completions` ("Reply exactly
     /// READY.", a 1024-token reservation, 20 s timeout) to Ollama Cloud. A
-    /// 200 OK means the provider is ready. With
+    /// 200 that answers with the READY it asked for means the provider is
+    /// ready; a 200 whose body reaches no model carries its own failure
+    /// rather than counting as one. With
     /// `--apply`, the provider that answered is written into
     /// `~/.codex/config.toml` (`model`, `model_provider`,
     /// `[model_providers.recording_cloud]`),
@@ -5121,12 +5123,20 @@ fn logged_args(args: &[String]) -> String {
         .windows(2)
         .position(|pair| pair[0] == "config" && pair[1] == "remote-key")
         .map(|at| at + 3);
-    let url_var = format!("{}=", ai_cli_readify::auth::AUTH_URL_VAR);
+    let url_name = ai_cli_readify::auth::AUTH_URL_VAR;
+    let url_var = format!("{url_name}=");
+    // Clap takes `--var auth_url=…` and `--var=auth_url=…` as the same
+    // option, so the one-token spelling carries the same one-time
+    // `code`/`state` payload and is masked the same way. Matching only the
+    // two-argument form left the other in the log in clear text.
+    let url_flag = format!("--var={url_var}");
     args.iter()
         .enumerate()
         .map(|(i, arg)| {
-            if arg.starts_with(&url_var) {
-                format!("{}=<redacted>", ai_cli_readify::auth::AUTH_URL_VAR)
+            if arg.starts_with(&url_flag) {
+                format!("--var={url_name}=<redacted>")
+            } else if arg.starts_with(&url_var) {
+                format!("{url_name}=<redacted>")
             } else if secret_from.is_some_and(|from| i >= from) && !arg.starts_with("--") {
                 "<redacted>".to_string()
             } else {
@@ -9541,6 +9551,18 @@ mod renamed_command_tests {
                 "auth_url=https://platform.claude.com/oauth/authorize?code=secret&state=8f2a",
             ])),
             "flow replay claude-code-auth-flow --execute --account someone@example.com --var auth_url=<redacted>"
+        );
+        // The one-token spelling is the same option to clap and the same
+        // secret to the log, so it is masked with the name kept.
+        assert_eq!(
+            logged_args(&argv(&[
+                "flow",
+                "replay",
+                "claude-code-auth-flow",
+                "--execute",
+                "--var=auth_url=https://platform.claude.com/oauth/authorize?code=secret&state=8f2a",
+            ])),
+            "flow replay claude-code-auth-flow --execute --var=auth_url=<redacted>"
         );
         // A plain `--var token=…` is somebody else's variable and stays as it
         // was: only the URL this repository's own chain writes is masked.

@@ -338,17 +338,45 @@ fn hooks_budget(timeout: Duration) -> Duration {
 struct Wire<W: Write> {
     writer: W,
     lines: Receiver<Vec<u8>>,
+    /// The instant the whole exchange must be finished by, fixed when the
+    /// wire is created.
+    ///
+    /// A budget held as a per-read duration is handed to every read, so each
+    /// line the server emits starts the wait over: a server that streams
+    /// notifications and never answers id 2 would be waited on forever,
+    /// although the contract is that the budget bounds the exchange. Holding
+    /// the deadline instead makes every read wait only for what is left of it.
+    deadline: Instant,
+    /// The caller's budget, for the timeout report.
     budget: Duration,
+}
+
+impl<W: Write> Wire<W> {
+    /// A wire whose exchange must finish within `budget` of this call.
+    fn new(writer: W, lines: Receiver<Vec<u8>>, budget: Duration) -> Self {
+        Self {
+            writer,
+            lines,
+            deadline: Instant::now() + budget,
+            budget,
+        }
+    }
+
+    /// What a read reports once the exchange is out of time.
+    fn timeout_report(&self) -> String {
+        let budget = self.budget;
+        format!("codex app-server did not answer within {budget:?}")
+    }
 }
 
 impl<W: Write> Transport for Wire<W> {
     fn read_line(&mut self) -> Result<Option<Vec<u8>>, String> {
-        let budget = self.budget;
-        match self.lines.recv_timeout(budget) {
+        // Only what is left before the deadline, never a fresh budget: a
+        // server that keeps saying something must still not outlast it.
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        match self.lines.recv_timeout(left) {
             Ok(line) => Ok(Some(line)),
-            Err(RecvTimeoutError::Timeout) => {
-                Err(format!("codex app-server did not answer within {budget:?}"))
-            }
+            Err(RecvTimeoutError::Timeout) => Err(self.timeout_report()),
             Err(RecvTimeoutError::Disconnected) => Ok(None),
         }
     }
@@ -447,11 +475,7 @@ impl Session {
         let (sender, lines) = mpsc::channel();
         std::thread::spawn(move || drain(stdout, &sender));
         Ok(Self {
-            wire: Wire {
-                writer,
-                lines,
-                budget,
-            },
+            wire: Wire::new(writer, lines, budget),
             child,
         })
     }
@@ -586,11 +610,7 @@ mod tests {
     /// A wire over a `Vec<u8>` writer and a channel, with nothing spawned.
     fn wire(budget: Duration) -> Wire<Vec<u8>> {
         let (_sender, lines) = mpsc::channel();
-        Wire {
-            writer: Vec::new(),
-            lines,
-            budget,
-        }
+        Wire::new(Vec::new(), lines, budget)
     }
 
     /// Drain `stdout` into `lines`, then drop the sender so a reader sees the
@@ -600,6 +620,48 @@ mod tests {
         drain(stdout, &sender);
         drop(sender);
         lines
+    }
+
+    /// A transport driven from an explicit script, so `converse` is tested
+    /// without a process and without the wire's own clock. A `None` from the
+    /// script is the server closing its output.
+    struct ScriptedTransport {
+        incoming: std::collections::VecDeque<Vec<u8>>,
+        written: Vec<u8>,
+    }
+
+    impl ScriptedTransport {
+        fn new(incoming: &[&str]) -> Self {
+            Self {
+                incoming: incoming
+                    .iter()
+                    .map(|line| line.as_bytes().to_vec())
+                    .collect(),
+                written: Vec::new(),
+            }
+        }
+
+        /// Everything written, parsed back into messages.
+        fn sent(&self) -> Vec<Value> {
+            String::from_utf8(self.written.clone())
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect()
+        }
+    }
+
+    impl Transport for ScriptedTransport {
+        fn read_line(&mut self) -> Result<Option<Vec<u8>>, String> {
+            Ok(self.incoming.pop_front())
+        }
+
+        fn write_message(&mut self, message: &Value) -> Result<(), String> {
+            let mut line = serde_json::to_vec(message).unwrap();
+            line.push(b'\n');
+            self.written.extend_from_slice(&line);
+            Ok(())
+        }
     }
 
     /// A cap-sized line of `b'x'` followed by a newline and then `b"ok"`.
@@ -830,16 +892,8 @@ mod tests {
 
     #[test]
     fn converse_runs_the_handshake_then_hands_over_the_answer() {
-        let (sender, lines) = mpsc::channel();
-        sender.send(b"{\"id\":1}".to_vec()).unwrap();
-        sender
-            .send(b"{\"id\":2,\"result\":{\"data\":[]}}".to_vec())
-            .unwrap();
-        let mut transport = Wire {
-            writer: Vec::new(),
-            lines,
-            budget: Duration::from_secs(1),
-        };
+        let mut transport =
+            ScriptedTransport::new(&["{\"id\":1}", "{\"id\":2,\"result\":{\"data\":[]}}"]);
         let follow_up = hooks_list_message(Path::new("/w"));
         let mut answer = None;
         converse(&mut transport, &follow_up, &mut |message| {
@@ -847,13 +901,8 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        let written: Vec<Value> = String::from_utf8(transport.writer)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
         assert_eq!(
-            written,
+            transport.sent(),
             vec![initialize_message(), initialized_message(), follow_up]
         );
         assert_eq!(answer, Some(json!({ "id": 2, "result": { "data": [] } })));
@@ -861,18 +910,12 @@ mod tests {
 
     #[test]
     fn converse_skips_noise_and_fails_on_an_error_message() {
-        let (sender, lines) = mpsc::channel();
-        sender.send(b"not json".to_vec()).unwrap();
-        sender.send(b"{\"method\":\"noise\"}".to_vec()).unwrap();
-        sender.send(b"{\"id\":1}".to_vec()).unwrap();
-        sender
-            .send(b"{\"id\":2,\"error\":{\"message\":\"nope\"}}".to_vec())
-            .unwrap();
-        let mut transport = Wire {
-            writer: Vec::new(),
-            lines,
-            budget: Duration::from_secs(1),
-        };
+        let mut transport = ScriptedTransport::new(&[
+            "not json",
+            "{\"method\":\"noise\"}",
+            "{\"id\":1}",
+            "{\"id\":2,\"error\":{\"message\":\"nope\"}}",
+        ]);
         let error = converse(&mut transport, &json!({ "id": 2 }), &mut |_| Ok(())).unwrap_err();
         assert_eq!(
             error,
@@ -882,13 +925,7 @@ mod tests {
 
     #[test]
     fn converse_fails_when_the_server_closes_without_answering() {
-        let (sender, lines) = mpsc::channel();
-        drop(sender);
-        let mut transport = Wire {
-            writer: Vec::new(),
-            lines,
-            budget: Duration::from_secs(1),
-        };
+        let mut transport = ScriptedTransport::new(&[]);
         let error = converse(&mut transport, &json!({ "id": 2 }), &mut |_| Ok(())).unwrap_err();
         assert_eq!(
             error,
@@ -908,11 +945,7 @@ mod tests {
 
     #[test]
     fn wire_reports_a_failed_write() {
-        let mut transport = Wire {
-            writer: Failing,
-            lines: mpsc::channel().1,
-            budget: Duration::from_secs(1),
-        };
+        let mut transport = Wire::new(Failing, mpsc::channel().1, Duration::from_secs(1));
         assert_eq!(
             transport.write_message(&json!(1)).unwrap_err(),
             "write to codex app-server: nope".to_string()
@@ -923,14 +956,55 @@ mod tests {
     fn wire_reads_queued_lines_then_end_of_stream() {
         let (sender, lines) = mpsc::channel();
         sender.send(b"one".to_vec()).unwrap();
-        let mut transport = Wire {
-            writer: Vec::new(),
-            lines,
-            budget: Duration::from_secs(1),
-        };
+        let mut transport = Wire::new(Vec::new(), lines, Duration::from_secs(1));
         assert_eq!(transport.read_line().unwrap(), Some(b"one".to_vec()));
         drop(sender);
         assert_eq!(transport.read_line().unwrap(), None);
+    }
+
+    #[test]
+    fn wire_waits_for_a_line_that_arrives_inside_its_budget() {
+        // The deadline is in the future, not merely spent: a wire that read
+        // only what was already queued would call a slow answer a timeout.
+        let (sender, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            let _ = sender.send(b"late".to_vec());
+        });
+        let mut transport = Wire::new(Vec::new(), lines, Duration::from_secs(5));
+        assert_eq!(transport.read_line().unwrap(), Some(b"late".to_vec()));
+    }
+
+    #[test]
+    fn a_wire_that_only_hears_noise_still_gives_up_at_its_deadline() {
+        // The case a per-line timer never ends on: the server emits a line
+        // more often than the budget and never answers, so every read would
+        // start the wait over. The deadline is fixed when the wire is made,
+        // so the exchange ends `budget` after that however many lines arrived
+        // inside it. The reads are driven under the test's own cap, so a wire
+        // that never gives up fails the assertion in two seconds instead of
+        // hanging the suite for a mutation's whole timeout.
+        let (sender, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            let until = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < until && sender.send(b"{\"method\":\"noise\"}".to_vec()).is_ok()
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        let mut transport = Wire::new(Vec::new(), lines, Duration::from_millis(300));
+        let stop = Instant::now() + Duration::from_secs(2);
+        let mut reported = None;
+        while Instant::now() < stop {
+            if let Err(error) = transport.read_line() {
+                reported = Some(error);
+                break;
+            }
+        }
+        assert_eq!(
+            reported.as_deref(),
+            Some("codex app-server did not answer within 300ms")
+        );
     }
 
     #[test]
@@ -938,11 +1012,7 @@ mod tests {
         // The sender is held for the test's lifetime, so the wait really is
         // the budget rather than a stream that closed.
         let (_sender, lines) = mpsc::channel();
-        let mut transport = Wire {
-            writer: Vec::new(),
-            lines,
-            budget: Duration::from_millis(1),
-        };
+        let mut transport = Wire::new(Vec::new(), lines, Duration::from_millis(1));
         assert_eq!(
             transport.read_line().unwrap_err(),
             "codex app-server did not answer within 1ms".to_string()

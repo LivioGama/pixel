@@ -121,7 +121,27 @@ fn read_or(path: &Path, missing: &str) -> Result<String, String> {
     }
 }
 
-/// Write `text` through a temp file and a rename, creating the directory.
+/// True while `path` still holds `expected` — the text [`read_or`] returned
+/// to the caller that built its merged document from it.
+///
+/// Every writer here reads a document, merges its own keys into it and writes
+/// the whole thing back, so a write built from a stale read commits the old
+/// document and takes the other writer's change with it: a hook Claude Code
+/// added while this run was preparing its output would be gone, with both
+/// writes reporting success. This is the check both writers run between the
+/// read and the rename. `absent` is the sentinel the caller gave [`read_or`],
+/// so a file that is still missing compares equal to what the caller read and
+/// a first run can create it, while a file that appeared or lost content
+/// since does not compare equal. A destination that cannot be read at all is
+/// not unchanged: the write is refused either way, and "changed" is the
+/// outcome the caller can act on.
+pub(crate) fn unchanged_since(path: &Path, expected: &str, absent: &str) -> bool {
+    read_or(path, absent).is_ok_and(|current| current == expected)
+}
+
+/// Write `text` through a temp file and a rename, creating the directory,
+/// but only while `path` still holds `expected` — see [`unchanged_since`] for
+/// what that protects and why `absent` is needed beside it.
 ///
 /// The temp is created with the destination's own mode, or `0600` when there
 /// is no destination yet. `fs::write` would take the mode from the umask, and
@@ -132,8 +152,14 @@ fn read_or(path: &Path, missing: &str) -> Result<String, String> {
 /// credentials, so the narrower default is the one it chooses.
 ///
 /// The temp's name is unique per writer ([`temp_for`]), so two runs against
-/// the same config cannot take the file out from under each other.
-fn write_atomically(path: &Path, text: String) -> Result<(), String> {
+/// the same config cannot take the file out from under each other — which
+/// rules out a collision, not a lost update. The recheck is what covers the
+/// second, and it runs after the temp is complete and immediately before the
+/// rename, so the window is two syscalls wide rather than a whole scan's
+/// worth. Closing it entirely would need a lock, which only serializes the
+/// writers that take it, and the realistic one here — the agent rewriting its
+/// own settings — does not.
+fn write_atomically(path: &Path, expected: &str, absent: &str, text: String) -> Result<(), String> {
     let path = &resolve_target(path);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
@@ -152,6 +178,13 @@ fn write_atomically(path: &Path, text: String) -> Result<(), String> {
     temp.write_all(text.as_bytes())
         .map_err(|e| format!("write {}: {e}", tmp.display()))?;
     drop(temp);
+    if !unchanged_since(path, expected, absent) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!(
+            "{} changed while this run was preparing it — not touched; re-run to merge into the current file",
+            path.display()
+        ));
+    }
     fs::rename(&tmp, path)
         .map_err(|e| format!("rename {} into {}: {e}", tmp.display(), path.display()))
 }
@@ -210,9 +243,15 @@ pub(crate) fn temp_for(path: &Path) -> std::path::PathBuf {
 /// the name of the env var holding the key.
 pub(crate) fn write_codex(path: &Path, provider: Provider) -> Result<String, String> {
     let original = read_or(path, "")?;
+    // The parser error is dropped rather than interpolated: `toml_edit`'s
+    // `TomlError` prints the offending line next to its caret, and this file
+    // is the user's own — a `[mcp_servers.*]` block holds tokens, and an
+    // unterminated string on such a line would put one in a diagnostic that
+    // the report prints and a user pastes into an issue. The path and the
+    // verdict are what the caller acts on.
     let mut doc: DocumentMut = original
         .parse()
-        .map_err(|e| format!("{} is not valid TOML: {e} — not touched", path.display()))?;
+        .map_err(|_| format!("{} is not valid TOML — not touched", path.display()))?;
     doc["model"] = Item::Value(TomlValue::from(provider.model()));
     doc["model_provider"] = Item::Value(TomlValue::from(MODEL_PROVIDER_NAME));
     let mut route = Table::new();
@@ -229,7 +268,11 @@ pub(crate) fn write_codex(path: &Path, provider: Provider) -> Result<String, Str
     // Merged into, never replaced. `[model_providers.<other>]` blocks are the
     // user's own routes, and leaving them alone is what the sibling
     // `write_claude` does with `env`; assigning a fresh table over this key
-    // deleted every one of them on an `--apply`.
+    // deleted every one of them on an `--apply`. The same applies to this
+    // route's own name: a user who tuned `recording_cloud` by hand owns the
+    // fields this command does not write — Codex reads `request_max_retries`
+    // and `stream_idle_timeout_ms` there — and the four below are the ones
+    // `--apply` replaces.
     let root = doc.as_table_mut();
     if !root.contains_key("model_providers") {
         root.insert("model_providers", Item::Table(Table::new()));
@@ -243,8 +286,27 @@ pub(crate) fn write_codex(path: &Path, provider: Provider) -> Result<String, Str
                 path.display()
             )
         })?;
-    providers.insert(MODEL_PROVIDER_NAME, Item::Table(route));
-    write_atomically(path, doc.to_string())?;
+    if providers.contains_key(MODEL_PROVIDER_NAME) {
+        // The four fields above are this command's; every other key in the
+        // table is the user's, and a second `--apply` has to leave them
+        // alone just as the first one did. A name holding something that is
+        // not a table is refused for the same reason `model_providers` is.
+        let existing = providers
+            .get_mut(MODEL_PROVIDER_NAME)
+            .and_then(Item::as_table_like_mut)
+            .ok_or_else(|| {
+                format!(
+                    "`model_providers.{MODEL_PROVIDER_NAME}` in {} is not a table — not touched",
+                    path.display()
+                )
+            })?;
+        for (key, value) in route.iter() {
+            existing.insert(key, value.clone());
+        }
+    } else {
+        providers.insert(MODEL_PROVIDER_NAME, Item::Table(route));
+    }
+    write_atomically(path, &original, "", doc.to_string())?;
     Ok(format!(
         "model={} via {} in {}",
         provider.model(),
@@ -298,7 +360,7 @@ pub(crate) fn write_claude(path: &Path, provider: Provider) -> Result<String, St
         Value::String(DEFAULT_CLAUDE_MODEL.to_string()),
     );
     let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
-    write_atomically(path, format!("{text}\n"))?;
+    write_atomically(path, &original, "{}", format!("{text}\n"))?;
     Ok(format!(
         "ANTHROPIC_BASE_URL={GATEWAY_URL}, {DEFAULT_CLAUDE_MODEL} in the model slots, via {} in {}; export ANTHROPIC_AUTH_TOKEN=\"${GATEWAY_TOKEN_ENV}\" and {CLAUDE_CUSTOM_HEADERS_ENV}=\"{}\" in your shell — a settings file expands neither",
         provider.name(),
@@ -321,7 +383,7 @@ pub(crate) fn write_antigravity(path: &Path, provider: Provider) -> Result<Strin
         Value::String(GATEWAY_URL.to_string()),
     );
     let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
-    write_atomically(path, format!("{text}\n"))?;
+    write_atomically(path, &original, "{}", format!("{text}\n"))?;
     Ok(format!(
         "AGY_LLM_GATEWAY_URL={GATEWAY_URL} via {} in {}",
         provider.name(),
@@ -452,6 +514,68 @@ mod tests {
         );
     }
 
+    /// The route's own table belongs to the user as much as its siblings do:
+    /// the four fields above are the only ones this command owns. Assigning a
+    /// fresh table over the name deleted the rest of it — Codex itself reads
+    /// `request_max_retries` and `stream_idle_timeout_ms` from `[model_providers]` —
+    /// so a user who tuned this route lost that tuning to an `--apply` that
+    /// reported a write.
+    #[test]
+    fn codex_keeps_the_fields_it_does_not_own_in_its_own_route() {
+        let home = Scratch::new();
+        let path = codex_config(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            format!(
+                "[model_providers.{MODEL_PROVIDER_NAME}]\n\
+                 name = \"hand tuned\"\n\
+                 base_url = \"http://stale.invalid/v1\"\n\
+                 request_max_retries = 7\n\
+                 stream_idle_timeout_ms = 90000\n"
+            ),
+        )
+        .unwrap();
+        write_codex(&path, Provider::Ollama).unwrap();
+        let doc: DocumentMut = fs::read_to_string(&path).unwrap().parse().unwrap();
+        let route = &doc["model_providers"][MODEL_PROVIDER_NAME];
+        assert_eq!(
+            route["request_max_retries"].as_integer(),
+            Some(7),
+            "a setting this command does not own survived the rewrite: {doc}"
+        );
+        assert_eq!(
+            route["stream_idle_timeout_ms"].as_integer(),
+            Some(90000),
+            "{doc}"
+        );
+        // The four it does own are rewritten rather than left as found, so
+        // this is a merge and not a `skip when present`.
+        assert_eq!(route["name"].as_str(), Some(MODEL_PROVIDER_NAME), "{doc}");
+        assert_eq!(
+            route["base_url"].as_str(),
+            Some("https://ollama.com/v1"),
+            "{doc}"
+        );
+        assert_eq!(route["env_key"].as_str(), Some("OLLAMA_API_KEY"), "{doc}");
+        assert_eq!(route["wire_api"].as_str(), Some("responses"), "{doc}");
+    }
+
+    /// A scalar under the route's own name is refused rather than clobbered,
+    /// for the reason the sibling above is: this command writes one route and
+    /// has nothing to merge into a value that is not a table.
+    #[test]
+    fn codex_refuses_a_route_name_that_is_not_a_table() {
+        let home = Scratch::new();
+        let path = codex_config(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let broken = format!("[model_providers]\n{MODEL_PROVIDER_NAME} = \"nonsense\"\n");
+        fs::write(&path, &broken).unwrap();
+        let error = write_codex(&path, Provider::Ollama).unwrap_err();
+        assert!(error.contains("is not a table"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), broken, "file touched");
+    }
+
     /// `model_providers` holding something that is not a table is refused
     /// rather than clobbered: this command writes one route, and a value it
     /// cannot merge into is a file it must leave alone.
@@ -477,6 +601,26 @@ mod tests {
         let error = write_codex(&path, Provider::Ollama).unwrap_err();
         assert!(error.contains("not valid TOML"), "{error}");
         assert_eq!(fs::read_to_string(&path).unwrap(), broken, "file touched");
+    }
+
+    /// The parser error is not interpolated into the message. `toml_edit`
+    /// prints the offending line beside its caret, and this file holds the
+    /// user's own `[mcp_servers.*]` blocks and whatever tokens they carry, so
+    /// an unterminated string on such a line would put a credential into a
+    /// diagnostic the report prints and a user pastes into an issue.
+    #[test]
+    fn a_malformed_line_never_carries_its_text_into_the_error() {
+        let home = Scratch::new();
+        let path = codex_config(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let broken = "[mcp_servers.notes]\nbearer_token = \"sk-live-not-a-real-key\n";
+        fs::write(&path, broken).unwrap();
+        let error = write_codex(&path, Provider::Ollama).unwrap_err();
+        assert!(error.contains("is not valid TOML"), "{error}");
+        assert!(
+            !error.contains("sk-live-not-a-real-key"),
+            "the line's own text reached the diagnostic: {error}"
+        );
     }
 
     #[test]
@@ -565,9 +709,13 @@ mod tests {
         // gateway, not a silent fallback. Pinned literally for that reason,
         // and the token is pinned as an expansion — a shell expands it, which
         // is the whole reason this line is an export and not a file entry.
+        // The variable name is spelled out rather than built from
+        // `GATEWAY_TOKEN_ENV`: an expectation that interpolates the constant
+        // it checks passes whatever that constant becomes, which is the
+        // drift this test exists to catch.
         assert_eq!(
             gateway_header(),
-            format!("x-litellm-api-key: Bearer ${{{GATEWAY_TOKEN_ENV}}}")
+            "x-litellm-api-key: Bearer ${RECORDING_GATEWAY_KEY}"
         );
     }
 
@@ -726,5 +874,62 @@ mod tests {
         );
         let doc: DocumentMut = text.parse().expect("the file still parses");
         assert_eq!(doc["model"].as_str(), Some("deepseek-v4.1-flash"));
+    }
+
+    /// A write built from a read that another writer has since invalidated is
+    /// refused, not committed.
+    ///
+    /// The transaction `write_claude` runs is `read_or` and then
+    /// `write_atomically`, and this test drives those two in that order with
+    /// the other writer landing in between. It has to be built by hand: the
+    /// pair is two calls inside one function, so there is no seam to inject a
+    /// real concurrent write through without a watcher and a race that
+    /// reports success on a fast machine and failure on a loaded one. What it
+    /// asserts is what the caller would see: the error says the file moved,
+    /// and the other writer's bytes are still the ones on disk.
+    #[test]
+    fn a_change_between_the_read_and_the_write_is_refused_not_overwritten() {
+        let home = Scratch::new();
+        let path = claude_settings(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{\"env\":{\"KEEP\":\"1\"}}").unwrap();
+
+        // The read half, exactly as `write_claude` opens.
+        let original = read_or(&path, "{}").unwrap();
+        // The other writer — Claude Code adding a hook — commits first.
+        let theirs = "{\"hooks\":{\"Stop\":[{\"command\":\"pixel run-hook guard\"}]}}";
+        fs::write(&path, theirs).unwrap();
+
+        let err = write_atomically(&path, &original, "{}", "{}\n".to_string())
+            .expect_err("a stale write must not be committed");
+        assert!(
+            err.contains("changed while this run was preparing it"),
+            "the error must name the conflict, not something the user would chase: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            theirs,
+            "the other writer's update was overwritten"
+        );
+        let left: Vec<_> = fs::read_dir(path.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            left,
+            vec![path.file_name().unwrap().to_os_string()],
+            "the refused write left its temp file behind"
+        );
+    }
+
+    /// The same recheck must not block the first run, when the file the
+    /// writer read as missing is still missing by the time it renames.
+    #[test]
+    fn a_first_run_write_is_not_a_conflict() {
+        let home = Scratch::new();
+        let path = claude_settings(home.path());
+        assert!(!path.exists());
+        write_claude(&path, Provider::Ollama).unwrap();
+        assert!(path.exists(), "the sentinel read was mistaken for a change");
     }
 }

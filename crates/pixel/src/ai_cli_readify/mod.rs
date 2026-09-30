@@ -45,6 +45,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use pixel_proto::Epistemics;
 use serde::Serialize;
 
 pub(crate) use agents::{Agent, AgentFlag};
@@ -146,6 +147,52 @@ pub(crate) struct Report {
     /// that never touched a browser and a run that found no auth wall must
     /// not read alike.
     pub(crate) auth_chain: Option<AuthChain>,
+    /// That this report observed live processes rather than anything stored:
+    /// the envelope `pixel classify` and `pixel web-search` disclose, in
+    /// their shape.
+    pub(crate) epistemics: Epistemics,
+    /// The surface this run probed, named.
+    pub(crate) snapshot: Snapshot,
+}
+
+/// What a run read, in the shape `pixel classify` discloses under
+/// `snapshot`: the op-specific fields beside `deterministic`.
+///
+/// `deterministic: false` is the load-bearing field — every row above came
+/// from a live probe of a provider endpoint and of the four agent CLIs, at
+/// whatever state the machine was in, so two runs of the same command need
+/// not agree.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Snapshot {
+    /// Always `false`: nothing here is replayed from a store.
+    pub(crate) deterministic: bool,
+    /// The provider endpoints probed, by name.
+    pub(crate) providers: Vec<&'static str>,
+    /// The agent CLIs probed, by name.
+    pub(crate) agents: Vec<&'static str>,
+}
+
+/// What one live probe of this machine can vouch for, and why it is no more
+/// than that.
+///
+/// The words are the ones `classify::document` and `web_search::document`
+/// emit: `closed_world` false and `lower_bound` true, because a provider or
+/// an agent that answered proved it works and one that did not answer proves
+/// nothing about a minute later.
+pub(crate) const PROBE_BASIS: &str = "live probe of one provider endpoint and the four agent CLIs; non-deterministic, one observation of the machine's current state";
+
+/// The confidence label the envelope carries: the verdict
+/// [`Report::all_ready`] prints, spelled the same, so the JSON envelope and
+/// the human line cannot disagree.
+const fn confidence_label(all_ready: bool) -> &'static str {
+    if all_ready { "ready" } else { "unready" }
+}
+
+/// True when `agents` is non-empty and every row in it is ready — the one
+/// place that judgement is computed, so [`Report::all_ready`] and the
+/// envelope's confidence label cannot drift apart.
+fn every_ready(agents: &[AgentRow]) -> bool {
+    !agents.is_empty() && agents.iter().all(|row| row.ready)
 }
 
 impl Report {
@@ -156,7 +203,7 @@ impl Report {
     /// where every agent but one answered is not a readiness run, and saying
     /// otherwise is exactly the narrowing the honest probe exists to refuse.
     pub(crate) fn all_ready(&self) -> bool {
-        !self.agents.is_empty() && self.agents.iter().all(|row| row.ready)
+        every_ready(&self.agents)
     }
 }
 
@@ -412,11 +459,36 @@ where
     }
 }
 
+/// Distinguishes two probes inside one process, the way `config::TEMP_SEQ`
+/// does for two writers of one config file.
+static EXPORT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The path one probe's agent writes its trajectory export to.
+///
+/// Unique per call rather than `<temp>/pixel-readify-<agent>.json`: that fixed
+/// name was shared by every lane and every process, so two runs at once — or
+/// two tests in one binary — had one probe's export land on another's, and a
+/// predictable name in a world-writable directory is one anyone on the box can
+/// leave there first. `seq` rather than the clock, for the reason
+/// [`config::temp_for`] gives: two calls in the same tick would collide.
+fn export_path(agent: Agent) -> PathBuf {
+    let seq = EXPORT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "pixel-readify-{}-{seq}-{}.json",
+        std::process::id(),
+        agent.name()
+    ))
+}
+
 /// Drive an agent's launch under a pty and report the startup prompt that
 /// stopped it, if one did.
 #[cfg_attr(test, mutants::skip)] // the pty adapter; `next_step` above carries the policy
 fn diagnose_startup(agent: Agent, answer_prompts: bool, timeout: Duration) -> Option<&'static str> {
-    let export = std::env::temp_dir().join(format!("pixel-readify-{}.json", agent.name()));
+    // The export is the agent's own trajectory, written where this names it
+    // and read by nothing here: it is a side effect of asking the agent to
+    // run, so the file is removed on the way out. A per-call name would
+    // otherwise leave one trajectory per run in the temp directory.
+    let export = export_path(agent);
     let argv = probe_argv(
         agent,
         PROBE_PROMPT,
@@ -450,10 +522,13 @@ fn diagnose_startup(agent: Agent, answer_prompts: bool, timeout: Duration) -> Op
     // did not work or it never had an answer to send. The driver's own
     // fallback ("the launch budget ran out") is the vaguer of the two, so it
     // loses to a named prompt.
-    if let Some(rule) = terminal::detect_prompt(&outcome.screen) {
-        return Some(rule.label);
-    }
-    outcome.blocker
+    let blocker = if let Some(rule) = terminal::detect_prompt(&outcome.screen) {
+        Some(rule.label)
+    } else {
+        outcome.blocker
+    };
+    let _ = std::fs::remove_file(&export);
+    blocker
 }
 
 /// Probe the selected agents concurrently, each lane against the one provider
@@ -598,6 +673,23 @@ pub(crate) fn run(options: &Options) -> Result<Report, String> {
     let approvals = options
         .approve
         .then(|| clear_gates(&home, &agents, &options.workspace, options.timeout));
+    // The envelope is built from the rows the report carries, not from a
+    // second reading of the machine: `snapshot.agents` is what was probed
+    // under `--agent`, and the confidence label is the verdict
+    // `all_ready()` prints.
+    let snapshot = Snapshot {
+        deterministic: false,
+        providers: vec![provider_row.provider],
+        agents: rows.iter().map(|row| row.agent).collect(),
+    };
+    let epistemics = Epistemics {
+        closed_world: false,
+        lower_bound: true,
+        basis: PROBE_BASIS.to_string(),
+        staleness_ms: None,
+        confidence: Some(confidence_label(every_ready(&rows)).to_string()),
+        extraction_limits: Vec::new(),
+    };
     Ok(Report {
         providers: vec![provider_row],
         selected: winner.map(Provider::name),
@@ -608,6 +700,8 @@ pub(crate) fn run(options: &Options) -> Result<Report, String> {
         verified_only: verified_only(&home, &agents),
         approvals,
         auth_chain,
+        epistemics,
+        snapshot,
     })
 }
 
@@ -1347,6 +1441,12 @@ mod tests {
             verified_only: Vec::new(),
             approvals: None,
             auth_chain: None,
+            epistemics: Epistemics::default(),
+            snapshot: Snapshot {
+                deterministic: false,
+                providers: Vec::new(),
+                agents: Vec::new(),
+            },
         };
         assert!(!report.all_ready(), "an empty run proves nothing");
     }
@@ -1370,10 +1470,45 @@ mod tests {
             verified_only: Vec::new(),
             approvals: None,
             auth_chain: None,
+            epistemics: Epistemics::default(),
+            snapshot: Snapshot {
+                deterministic: false,
+                providers: Vec::new(),
+                agents: Vec::new(),
+            },
         };
         assert!(report.all_ready());
         report.agents.push(row(false));
         assert!(!report.all_ready(), "one unready agent is not ready");
+    }
+
+    #[test]
+    fn two_probes_never_share_one_export_path() {
+        // The name used to be `<temp>/pixel-readify-<agent>.json`: one file
+        // for every lane of every run on the machine, so two runs at once —
+        // or two tests in one binary — had one probe's trajectory overwritten
+        // by another's, and it was left behind when the probe ended.
+        let first = export_path(Agent::Devin);
+        let second = export_path(Agent::Devin);
+        assert_ne!(first, second, "two probes must not share one export file");
+        let name = first.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(
+            name.starts_with(&format!("pixel-readify-{}-", std::process::id())),
+            "the name is qualified by the process that made it: {name}"
+        );
+        assert!(
+            name.ends_with("devin.json"),
+            "the agent it belongs to is still in the name: {name}"
+        );
+    }
+
+    #[test]
+    fn the_envelope_confidence_is_the_verdict_the_report_prints() {
+        // The label is the one claim the envelope makes about the answer as a
+        // whole, so it has to be the same word `overall:` prints — not a
+        // second opinion that can drift from it.
+        assert_eq!(confidence_label(true), "ready");
+        assert_eq!(confidence_label(false), "unready");
     }
 
     #[test]

@@ -34,7 +34,9 @@ use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item};
 
 use super::Agent;
-use super::config::{CLAUDE_ONBOARDING_FILE, codex_config, resolve_target, temp_for};
+use super::config::{
+    CLAUDE_ONBOARDING_FILE, codex_config, resolve_target, temp_for, unchanged_since,
+};
 use super::rpc::{self, MergeStrategy};
 
 /// The Codex config key the `config/batchWrite` RPC addresses hook trust by.
@@ -169,14 +171,26 @@ impl CodexRpc for AppServer<'_> {
 }
 
 fn clear_codex(home: &Path, workspace: &Path, timeout: Duration) -> Result<String, String> {
-    let real = fs::canonicalize(workspace)
-        .map_err(|e| format!("codex: cannot resolve {}: {e}", workspace.display()))?
-        .to_string_lossy()
-        .into_owned();
+    // One path for both halves. The trust entry is keyed by the canonical
+    // path, and the app-server has to be asked about that same one: the
+    // child runs with its cwd set to the workspace, and it asks about the
+    // workspace it was handed, so a relative `--workspace` (the default is
+    // `.`) has the server resolve one directory deeper, and a symlinked one
+    // has it answer under a path the trust key does not name. Either way
+    // `hooks/list` describes a workspace this command never trusts:
+    // `hooks.state` goes unwritten and the run reports `approved: true` with
+    // the hook review prompt still up. The Claude path below resolves both
+    // of its paths for the same reason.
+    let real_path = fs::canonicalize(workspace)
+        .map_err(|e| format!("codex: cannot resolve {}: {e}", workspace.display()))?;
+    let real = real_path.to_string_lossy().into_owned();
     clear_codex_with(
         &real,
         &codex_config(home),
-        &AppServer { workspace, timeout },
+        &AppServer {
+            workspace: &real_path,
+            timeout,
+        },
     )
 }
 
@@ -268,9 +282,9 @@ fn claude(home: &Path, workspace: &Path) -> Approval {
             );
         }
     };
-    let config = match fs::read_to_string(&path) {
+    let (config, original) = match fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<Value>(&text) {
-            Ok(value) => value,
+            Ok(value) => (value, text),
             Err(e) => {
                 return Approval::refused(
                     Agent::Claude,
@@ -281,7 +295,9 @@ fn claude(home: &Path, workspace: &Path) -> Approval {
                 );
             }
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Object(Map::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            (Value::Object(Map::new()), String::new())
+        }
         Err(e) => {
             return Approval::refused(
                 Agent::Claude,
@@ -299,7 +315,7 @@ fn claude(home: &Path, workspace: &Path) -> Approval {
             Agent::Claude,
             format!("claude: {workspace} was already onboarded and trusted"),
         ),
-        Ok(Some(next)) => match write_private(&path, &next) {
+        Ok(Some(next)) => match write_private(&path, &original, &next) {
             Ok(()) => Approval::done(
                 Agent::Claude,
                 format!(
@@ -386,13 +402,17 @@ pub(crate) fn claude_trusted(config: &Value, workspace: &str) -> Result<Option<V
 ///
 /// The document was read before this call and the rename replaces whatever is
 /// there now, so a *running* Claude Code that writes its own state in between
-/// loses that write. Nothing here detects it: an mtime check between the read
-/// and the rename narrows the window without closing it, and the honest
-/// instruction is the one `--approve` already implies — it edits a file
-/// another process owns, so close that process first. [`approve`] is only
-/// reached under the explicit flag, for the one workspace named on the command
-/// line, which is what keeps that window from mattering by accident.
-fn write_private(path: &Path, value: &Value) -> Result<(), String> {
+/// loses that write. `expected` is the text it was read as, and the file is
+/// re-read here, immediately before the rename, so a write that landed in
+/// between refuses this one instead of being deleted by it — the check
+/// [`unchanged_since`] describes, the same one the config writers run. What
+/// survives is the window of two syscalls between that recheck and the
+/// rename, and the honest instruction for the rest is the one `--approve`
+/// already implies: it edits a file another process owns, so close that
+/// process first. [`approve`] is only reached under the explicit flag, for
+/// the one workspace named on the command line, which is what keeps that
+/// window from mattering by accident.
+fn write_private(path: &Path, expected: &str, value: &Value) -> Result<(), String> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
 
@@ -419,6 +439,16 @@ fn write_private(path: &Path, value: &Value) -> Result<(), String> {
     temp.write_all(format!("{text}\n").as_bytes())
         .map_err(|e| format!("write {}: {e}", tmp.display()))?;
     drop(temp);
+    // `""` is the sentinel the caller's read uses for a file that is not
+    // there: a trust write is what creates `~/.claude.json` on a machine
+    // where Claude Code has never run.
+    if !unchanged_since(path, expected, "") {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!(
+            "{} changed while this run was preparing it — not touched; close any running Claude Code and re-run",
+            path.display()
+        ));
+    }
     fs::rename(&tmp, path)
         .map_err(|e| format!("rename {} into {}: {e}", tmp.display(), path.display()))
 }
@@ -605,6 +635,48 @@ mod tests {
         assert!(
             path.is_dir(),
             "the path it could not read is left exactly as it was"
+        );
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// A trust write is built from a document read earlier, and the rename
+    /// replaces whatever is there at that moment. A *running* Claude Code
+    /// writing its own state is the other writer this file really has, so the
+    /// write refuses instead of deleting what it wrote.
+    #[test]
+    fn a_claude_trust_write_is_refused_when_the_file_moved_under_it() {
+        let home = own_dir("claude-moved");
+        let path = home.join(CLAUDE_ONBOARDING_FILE);
+        fs::write(&path, r#"{"hasCompletedOnboarding":false}"#).unwrap();
+        let expected = fs::read_to_string(&path).unwrap();
+        // The agent commits its own state while this run prepares its output.
+        let theirs = r#"{"hasCompletedOnboarding":false,"numStartups":7}"#;
+        fs::write(&path, theirs).unwrap();
+
+        let err = write_private(
+            &path,
+            &expected,
+            &serde_json::json!({ "hasCompletedOnboarding": true }),
+        )
+        .expect_err("a stale trust write must not be committed");
+
+        assert!(
+            err.contains("changed while this run was preparing it"),
+            "the refusal names the conflict: {err}"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            theirs,
+            "the running agent's own state was overwritten"
+        );
+        let left: Vec<_> = fs::read_dir(&home)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            left,
+            vec![std::ffi::OsStr::new(CLAUDE_ONBOARDING_FILE)],
+            "the refused write left its temp file behind"
         );
         fs::remove_dir_all(&home).unwrap();
     }

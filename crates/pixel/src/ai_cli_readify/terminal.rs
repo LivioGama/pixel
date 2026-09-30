@@ -430,6 +430,9 @@ where
     let started = now();
     let mut prompts: Vec<&'static str> = Vec::new();
     let mut answered: Vec<&'static str> = Vec::new();
+    // The last prompt-free screen, so a clean fragment is settled only once a
+    // second pump has seen it unchanged.
+    let mut settled: Option<String> = None;
     loop {
         let screen = pump();
         match next_step(&screen, answer_prompts) {
@@ -453,17 +456,21 @@ where
                 send(keys);
             }
             Step::Wait => {
-                // Stable and clean, or out of budget. The reference wants a
-                // held screen, but a probe that has already answered its
-                // prompt is the case this port cares about, so a clean
-                // non-empty screen with no prompt settles immediately.
+                // A clean screen settles only once a second pump has seen it
+                // unchanged. Startup output arrives in stages, and a clean
+                // fragment is not proof that nothing follows it: a trust or
+                // hook prompt one pump later would be lost by a driver that
+                // returned on the first fragment.
                 if !screen.trim().is_empty() {
-                    return LaunchOutcome {
-                        clean: true,
-                        prompts,
-                        blocker: None,
-                        screen,
-                    };
+                    if settled.as_deref() == Some(screen.as_str()) {
+                        return LaunchOutcome {
+                            clean: true,
+                            prompts,
+                            blocker: None,
+                            screen,
+                        };
+                    }
+                    settled = Some(screen.clone());
                 }
             }
         }
@@ -649,6 +656,64 @@ mod tests {
         assert!(outcome.clean, "{outcome:?}");
         assert_eq!(outcome.blocker, None);
         assert!(outcome.prompts.is_empty());
+    }
+
+    #[test]
+    fn a_clean_fragment_is_not_settled_before_a_later_prompt_appears() {
+        // Startup output arrives in stages. A driver that settles on the
+        // first prompt-free pump returns before the trust prompt — one pump
+        // later — is ever read, and the launch is reported clean although a
+        // blocker is on screen.
+        let script = ["$ welcome\n", "$ welcome\nDo you trust this folder?"];
+        let mut pump = 0_usize;
+        let mut clock = FakeClock::new();
+        let outcome = drive_until_settled(
+            || {
+                let screen = script[pump.min(script.len() - 1)];
+                pump += 1;
+                screen.to_string()
+            },
+            |_| {},
+            false,
+            Duration::from_secs(5),
+            &mut || {
+                clock.elapsed += Duration::from_millis(10);
+                Instant::now()
+            },
+        );
+        assert!(!outcome.clean, "{outcome:?}");
+        assert_eq!(
+            outcome.blocker,
+            Some("Workspace trust confirmation required"),
+            "the prompt on the second pump must be the reported blocker"
+        );
+    }
+
+    #[test]
+    fn a_screen_that_never_settles_twice_ends_the_drive_at_its_budget() {
+        // The stricter settle rule must not turn a live screen into a hang: a
+        // screen that changes on every pump runs out the budget like any
+        // other launch that never reaches a stable screen.
+        let mut pump = 0_usize;
+        let mut clock = FakeClock::new();
+        let outcome = drive_until_settled(
+            || {
+                pump += 1;
+                format!("line {pump}\n")
+            },
+            |_| {},
+            false,
+            Duration::from_millis(500),
+            &mut || {
+                clock.elapsed += Duration::from_millis(200);
+                Instant::now()
+            },
+        );
+        assert!(!outcome.clean, "{outcome:?}");
+        assert_eq!(
+            outcome.blocker,
+            Some("no verified interface before the launch budget ran out")
+        );
     }
 
     #[test]

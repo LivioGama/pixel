@@ -141,6 +141,25 @@
                   "rationale": "Hand off to the user — this flow has no password and must not guess one. Ask them to type it into the browser window and submit it themselves, then continue. Do NOT fill the field and do NOT press Enter: a fill with no value types an empty password, and the Enter after it submits one, spending a failed login attempt on the user's account.",
                   "wait": "60s",
                   "max_retries": 1
+                },
+                {
+                  "action": "snapshot",
+                  "rationale": "Re-read the page after the hand-off: the steps below click Google's 'Continue' or Claude's 'Authorize', and both are only on the right page once a password was actually submitted",
+                  "max_retries": 1
+                },
+                {
+                  "action": "conditional",
+                  "rationale": "The password field is still on screen, so the user has not submitted one — a slow hand-off, not a failed login. Continue and the next click lands on the wrong page and the flow still exits 0. Stop here instead. This is the one way the executor has to end a run: a step whose target does not resolve returns an error, and an error fails the flow.",
+                  "condition": "page shows password input field",
+                  "then": [
+                    {
+                      "action": "click",
+                      "rationale": "Deliberate hard failure, not a selector to repair: `pixel-flow-assert-password-not-submitted` is a sentinel no page contains, so resolving it errors and the run stops with a failed status instead of continuing signed out.",
+                      "ref_hint": "button containing 'pixel-flow-assert-password-not-submitted'",
+                      "max_retries": 1
+                    }
+                  ],
+                  "max_retries": 1
                 }
               ],
               "max_retries": 1
