@@ -99,6 +99,7 @@ STUB_AGG = """\
 #!/bin/sh
 # stub: agg receives <input> <output> then option flags; output is $2
 printf 'GIF89a\\x01\\x00\\x01\\x00' > "$2"
+[ -n "$AGG_LOG" ] && printf '%s\\n' "$*" >> "$AGG_LOG"
 exit 0
 """
 
@@ -110,10 +111,18 @@ echo "https://gist.github.com/stub/1"
 """
 
 # The claude arm expects a stream that json-lines its events. The stub emits a
-# tool_use (a pixel call!) plus a result, so one case can count 1 pixel call.
+# tool_use (a pixel call!) plus a result, so one case can count 1 pixel call;
+# RECORDER_TEST_EVENT_LINES stretches the stream to N tool_use events, whose
+# cast timestamps span N seconds, so the --video-max-seconds speed scaling has
+# something real to bite on.
 STUB_CLAUDE = """\
 #!/bin/sh
 cat > /dev/null
+n=0
+while [ "$n" -lt "${RECORDER_TEST_EVENT_LINES:-0}" ]; do
+    echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"pixel search-content -F x ."}}]}}'
+    n=$((n + 1))
+done
 echo '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"pixel search-content -F x ."}}]}}'
 echo '{"type":"result","subtype":"success","duration_ms":10,"result":"done"}'
 """
@@ -198,6 +207,60 @@ class RecorderContract(unittest.TestCase):
         r = self.run_recorder(*self.base_flags("claude"), "--gif")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue((self.out / "harness-claude-locate.gif").exists())
+
+    def test_gif_speed_scales_long_runs_to_the_video_cap(self):
+        # 20 one-second events plus the stub's base pair: a 21 s cast; the
+        # 15 s default cap asks agg for --speed 2. A short cast stays at 1.
+        agg_log = self.out / "agg.log"
+        env = dict(self.env)
+        env["AGG_LOG"] = str(agg_log)
+        env["RECORDER_TEST_EVENT_LINES"] = "20"
+        r = subprocess.run(
+            [str(RECORDER), *self.base_flags("claude"), "--gif"],
+            env=env, capture_output=True, text=True, cwd=str(self.repo),
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--speed 2", agg_log.read_text())
+        env["RECORDER_TEST_EVENT_LINES"] = "0"
+        r = subprocess.run(
+            [str(RECORDER), *self.base_flags("claude"), "--gif"],
+            env=env, capture_output=True, text=True, cwd=str(self.repo),
+        )
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("--speed 1", agg_log.read_text())
+
+    def test_post_gists_the_cast_and_pushes_the_gif_to_a_media_branch(self):
+        # a real local bare remote, so the plumbing (hash-object, read-tree,
+        # write-tree, commit-tree, push) runs for real against an origin
+        bare = self.root / "harness-recordings-media.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "remote", "add",
+                        "origin", str(bare)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-q",
+                        "--allow-empty", "-m", "base"], check=True)
+        r = self.run_recorder(*self.base_flags("claude"), "--gif", "--post", "42")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        comment = (self.out / "comment-claude-locate.md").read_text()
+        self.assertIn("gist.github.com/stub/1", comment)
+        self.assertIn("raw.githubusercontent.com", comment)
+        self.assertIn("/recordings/claude-locate.gif", comment)
+        tree = subprocess.run(
+            ["git", "-C", str(bare), "ls-tree", "-r", "--name-only",
+             "harness-recordings-media"],
+            capture_output=True, text=True, check=True,
+        ).stdout
+        self.assertIn("recordings/claude-locate.gif", tree)
+
+    def test_media_branch_upload_fails_quietly_without_a_real_repo(self):
+        # the fixture .git is a bare directory until a case turns it into a
+        # repository: the media upload must then leave the comment complete
+        # (gist link, no broken image) instead of crashing the post.
+        r = self.run_recorder(*self.base_flags("claude"), "--gif", "--post", "42")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        comment = (self.out / "comment-claude-locate.md").read_text()
+        self.assertIn("gist.github.com/stub/1", comment)
+        self.assertNotIn("raw.githubusercontent.com", comment)
 
     # ── prompt handling ────────────────────────────────────────────────────
 
