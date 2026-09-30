@@ -88,6 +88,7 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("install.opencode-agents-md", FIX_INSTALL),
     entry("install.antigravity", FIX_INSTALL),
     entry("install.claude-hooks", FIX_INSTALL),
+    entry("install.devin-hooks", FIX_INSTALL),
     // The removal command names the orphaned file, so the outcome carries it.
     entry("install.rtk-backup", None),
     entry("install.legacy-wrappers", FIX_INSTALL),
@@ -467,10 +468,13 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 ));
             }
             let value = install::read_settings(&path).map_err(|e| e.to_string())?;
+            // A config without a hooks object (Devin's own settings only) is
+            // simply missing every hook, not a malformed install.
             let hooks = value
                 .get("hooks")
                 .and_then(serde_json::Value::as_object)
-                .ok_or_else(|| format!("no hooks object in {}", path.display()))?;
+                .cloned()
+                .unwrap_or_default();
             let has = |event: &str, verb: &str| {
                 hooks
                     .get(event)
@@ -553,6 +557,114 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 &exe,
                 &crate::routing::pixel_hooks_running_other_binaries(&value, &exe),
             ))
+        },
+    );
+
+    // Devin's own lifecycle protocol. The global install registers it only
+    // when Devin has been used on this machine, and `doctor` judges what
+    // Pixel wrote: with no `~/.config/devin/` the check is green-absent, not
+    // red. A Devin CLI present but never run is a foreign state, not a
+    // broken install.
+    runner.check(
+        "install.devin-hooks",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let dir = home.join(crate::config::DEVIN_CONFIG_DIR);
+            if !dir.is_dir() {
+                return Ok(DoctorCheckDetail {
+                    summary: "Devin not in use on this machine (no ~/.config/devin)".into(),
+                    detail: None,
+                });
+            }
+            let path = dir.join(crate::config::DEVIN_CONFIG_FILE);
+            if !path.is_file() {
+                return Err(format!(
+                    "{} not found while {} exists — run `pixel install`",
+                    path.display(),
+                    dir.display()
+                ));
+            }
+            let value = install::read_settings(&path).map_err(|e| e.to_string())?;
+            // A config without a hooks object (Devin's own settings only) is
+            // simply missing every hook, not a malformed install.
+            let hooks = value
+                .get("hooks")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let has = |event: &str, verb: &str| {
+                hooks
+                    .get(event)
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|groups| {
+                        groups.iter().any(|group| {
+                            group
+                                .get("hooks")
+                                .and_then(serde_json::Value::as_array)
+                                .is_some_and(|inner| {
+                                    inner.iter().any(|hook| {
+                                        hook.get("command")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(|c| {
+                                                c.contains(&format!(
+                                                    "run-hook {verb} --provider devin"
+                                                )) && c.contains("pixel")
+                                            })
+                                    })
+                                })
+                        })
+                    })
+            };
+            let mut missing = Vec::new();
+            if !has("SessionStart", "session-start") {
+                missing.push("SessionStart→session-start");
+            }
+            if !has("UserPromptSubmit", "prompt-submit") {
+                missing.push("UserPromptSubmit→prompt-submit");
+            }
+            // Post-compaction reads the repo manifest; it carries no
+            // provider argument, unlike the other two.
+            if !hooks
+                .get("PostCompaction")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|groups| {
+                    groups.iter().any(|group| {
+                        group
+                            .get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|inner| {
+                                inner.iter().any(|hook| {
+                                    hook.get("command")
+                                        .and_then(serde_json::Value::as_str)
+                                        .is_some_and(|c| {
+                                            c.contains("run-hook post-compaction")
+                                                && c.contains("pixel")
+                                        })
+                                })
+                            })
+                    })
+                })
+            {
+                missing.push("PostCompaction→post-compaction");
+            }
+            if !missing.is_empty() {
+                return Err(format!(
+                    "missing pixel lifecycle hooks in {}: {} — run `pixel install`",
+                    path.display(),
+                    missing.join(", ")
+                ));
+            }
+            let stacked = crate::routing::stacked_pixel_hooks(&value, &exe);
+            if !stacked.is_empty() {
+                return Err(format!(
+                    "pixel hooks registered more than once in {}: {} — run `pixel install`",
+                    path.display(),
+                    stacked.join(", ")
+                ));
+            }
+            Ok(DoctorCheckDetail {
+                summary: format!("devin lifecycle hooks configured in {}", path.display()),
+                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+            })
         },
     );
 
@@ -2465,7 +2577,7 @@ mod tests {
             .map(|spec| spec.id)
             .filter(|id| id.starts_with("install."))
             .collect();
-        assert_eq!(home.len(), 10, "the install group as catalogued");
+        assert_eq!(home.len(), 11, "the install group as catalogued");
         let skip = ids(&["install.*"]);
         for spec in CHECKS {
             assert_eq!(

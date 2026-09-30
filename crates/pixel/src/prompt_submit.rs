@@ -237,6 +237,17 @@ fn is_claude_host(provider: Option<crate::guard::Provider>) -> bool {
     matches!(provider, Some(crate::guard::Provider::Claude)) && imported_config_host().is_none()
 }
 
+/// Whether this hook invocation is an imported Claude entry running in a
+/// foreign host: the `--provider claude` argument names the install, and the
+/// importing marker names the real host. Such an entry must not act on
+/// Claude's behalf — the host's own protocol carries the behavior, and the
+/// imported copy double-runs beside it. Provider-neutral read-only
+/// advisories (the post-tool-use blast radius) are exempt: they serve any
+/// host that runs them.
+pub(crate) fn imported_claude_entry(provider: Option<crate::guard::Provider>) -> bool {
+    matches!(provider, Some(crate::guard::Provider::Claude)) && imported_config_host().is_some()
+}
+
 enum PromptNote {
     Targets(Value),
     Boundary(BoundaryEvent),
@@ -844,6 +855,27 @@ mod tests {
     /// The host gate is the discriminator between a Claude Code session and
     /// a harness that only imports Claude's configuration: the `--provider
     /// claude` argument alone must never qualify a host.
+    /// The imported-entry gate: a Claude-argued hook inside a host that
+    /// imports Claude's configuration must not act on Claude's behalf. The
+    /// metric relay and the post-compaction re-injection exit on this.
+    #[test]
+    fn imported_claude_entry_is_claude_argued_and_marker_set() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("DEVIN_PROJECT_DIR");
+        // SAFETY: DEVIN_PROJECT_DIR is only changed under ENV_LOCK.
+        unsafe { std::env::set_var("DEVIN_PROJECT_DIR", "/tmp/devin-repo") };
+        assert!(imported_claude_entry(Some(crate::guard::Provider::Claude)));
+        assert!(!imported_claude_entry(Some(crate::guard::Provider::Devin)));
+        assert!(!imported_claude_entry(None));
+        // SAFETY: same lock as above.
+        unsafe { std::env::remove_var("DEVIN_PROJECT_DIR") };
+        assert!(!imported_claude_entry(Some(crate::guard::Provider::Claude)));
+        if let Some(restored) = saved {
+            // SAFETY: same lock as above.
+            unsafe { std::env::set_var("DEVIN_PROJECT_DIR", restored) };
+        }
+    }
+
     #[test]
     fn claude_host_requires_the_provider_without_an_importing_marker() {
         let _lock = crate::ENV_LOCK.lock().unwrap();

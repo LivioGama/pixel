@@ -97,8 +97,7 @@ pub fn session_start_output(pixel_block: &Value, provider: Option<Provider>) -> 
     // measured ~11 KB of Claude-specific doctrine inside Devin sessions;
     // that host gets the short Pixel-first guidance instead — the same text
     // its own `prompt-submit` hook delivers — and the capability block.
-    if provider == Some(Provider::Claude) && crate::prompt_submit::imported_config_host().is_some()
-    {
+    if crate::prompt_submit::imported_claude_entry(provider) {
         let context = format!(
             "{}\n\n{}",
             crate::prompt_submit::DEVIN_PIXEL_GUIDANCE,
@@ -2849,6 +2848,12 @@ const METRICS_SHELL_TOOLS: &[&str] = &[
 /// into a failure.
 #[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; every decision lives in `metrics_hook_line`
 pub fn run_metrics_hook(provider: Option<Provider>) -> ! {
+    // An imported Claude entry running beside Devin's own relay would emit
+    // the Claude contract (`systemMessage`) into a host that never asked for
+    // it and double the native `--provider devin` relay's output.
+    if crate::prompt_submit::imported_claude_entry(provider) {
+        std::process::exit(0);
+    }
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
         std::process::exit(0);

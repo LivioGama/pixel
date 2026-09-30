@@ -650,14 +650,24 @@ fn configure_scoped(
             },
         ),
     ] {
+        // Devin's post-tool-use behavior (the metrics relay) is repo-scoped
+        // (`install_project_devin_at`): a global one would run beside the
+        // repo-local one in every installed repository and double the relay.
+        // The post-edit advisory is provider-neutral and has no Devin entry
+        // of its own, so a global one would be the only double.
+        if provider == Provider::Devin && verb == "post-tool-use" {
+            continue;
+        }
         let groups = hooks
             .entry(event)
             .or_insert_with(|| json!([]))
             .as_array_mut()
             .ok_or_else(|| format!("{event} is not an array"))?;
         // Claude's task runtime is session-scoped. Make that provider choice
-        // explicit at the lifecycle boundary. Session-start carries the
-        // provider for every host: Codex rejects unknown output fields.
+        // explicit at the lifecycle boundary. Session-start and prompt-submit
+        // carry the provider for every host: Codex rejects unknown output
+        // fields, and a Devin prompt-submit without its provider renders the
+        // provider-neutral context instead of the Pixel-first guidance.
         let provider_arg = match verb {
             "session-start" => match provider {
                 Provider::Claude => " --provider claude",
@@ -669,6 +679,7 @@ fn configure_scoped(
             {
                 " --provider claude"
             }
+            "prompt-submit" if provider == Provider::Devin => " --provider devin",
             _ => "",
         };
         groups.push(hook_group(
@@ -1797,6 +1808,11 @@ mod tests {
                 .unwrap();
             if provider == Provider::Claude {
                 assert!(prompt_command.ends_with("hook prompt-submit --provider claude"));
+            } else if provider == Provider::Devin {
+                // Without its provider a Devin prompt-submit renders the
+                // provider-neutral context instead of the Pixel-first
+                // guidance.
+                assert!(prompt_command.ends_with("hook prompt-submit --provider devin"));
             } else {
                 assert!(prompt_command.ends_with("hook prompt-submit"));
             }
