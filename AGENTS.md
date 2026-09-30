@@ -83,7 +83,7 @@ Complete this checklist once per finished reviewable implementation unit—inclu
    ```bash
    pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-cli"
    ```
-   `dev-release` is the release profile without thin LTO and with 16 codegen units: an incremental rebuild takes seconds instead of a minute, and the binary is optimised the same way. Drop `--build` only when you need the exact shipped `release` profile. It runs that build, installs over the binary that is actually running (`pixel` resolved through any shim; `~/.local/bin/pixel` only as a last resort — never copy there by hand, a second copy shadows the managed one), stops this repo's daemon, and warns if another `pixel` earlier on PATH would still be picked up. When that binary belongs to mise (`~/.local/share/mise/installs/`) or Homebrew (a Cellar), it refuses and writes nothing: install the build as `pixel-dev` with `--dev` and run the checks below through `pixel-dev`, or pass `--install-path` to overwrite the managed binary on purpose. The install is an atomic rename: in-place `cp` over a mapped Mach-O invalidates the ad-hoc signature on macOS and SIGKILLs the next invocation.
+   `dev-release` is the release profile without thin LTO and with 16 codegen units: an incremental rebuild takes seconds instead of a minute, and the binary is optimised the same way. Drop `--build` only when you need the exact shipped `release` profile. It runs that build, installs over the binary that is actually running (`pixel` resolved through any shim; `~/.local/bin/pixel` only as a last resort — never copy there by hand, a second copy shadows the managed one), stops this repo's daemon, and warns if another `pixel` earlier on PATH would still be picked up. When that binary belongs to mise (`~/.local/share/mise/installs/`) or Homebrew (a Cellar), it refuses and writes nothing: pass `--dev` from the start (`command -v pixel` under `mise/` or a Cellar tells you before the build) and follow "Side build" below, or pass `--install-path` to overwrite the managed binary on purpose. The install is an atomic rename: in-place `cp` over a mapped Mach-O invalidates the ad-hoc signature on macOS and SIGKILLs the next invocation.
 2. **In parallel** (both only need the new binary, not each other):
    - **Track A:** `pixel build-index --history .` — rebuild the facts/history index.
    - **Track B:** `pixel install` — reinstall hooks and managed blocks. Where `build-agent-config` is installed (it regenerates per-tool rule directories from `~/.agent-config`), run it first: `build-agent-config && pixel install`.
@@ -91,12 +91,22 @@ Complete this checklist once per finished reviewable implementation unit—inclu
 
 Do not report the unit complete without evidence that self-update succeeded, both parallel tracks completed, and doctor exited 0. If a step cannot run, report the unit as incomplete and name the blocker rather than silently skipping it.
 
+### Side build (`pixel-dev`)
+
+With a mise or Homebrew `pixel`, the home install (the Claude hooks in `~/.claude/settings.json`, the deployed prompts, the Codex and pi config) belongs to that managed binary and every other repository runs it. A global `pixel-dev install` rewires all of it to a branch build until someone runs `pixel install` again, so the side build stays in this repository:
+
+1. `pixel self-update --dev --repo . --build "cargo build --profile dev-release -p pixel-cli"`.
+2. Track A: `pixel-dev build-index --history .`. Track B: `pixel-dev install --repo .` (the repo-local files only).
+3. `pixel-dev doctor . --fix --fail-on yellow --skip 'install.*'`: the `install.*` checks judge the home install, which is the managed binary's. A side build's `--fix` never runs a home-install repair (it prints `left pixel install … to the managed pixel`): a `rule.*` check still flagged after it means this build's CLI no longer accepts the deployed rules, a change to the home install.
+
+Only when the unit changes what the home install writes (`crates/pixel-install/`, the prompts in `crates/pixel-install/assets/` or `rules/`, a hook) does the global install belong to the check: run `pixel-dev install` and the full `pixel-dev doctor . --fix --fail-on yellow`, then hand the machine back with `pixel install` and `pixel doctor . --fail-on yellow` through the managed binary, and report both. Using `pixel-dev` is expected here: do not narrate it.
+
 Both commands target the account's login shell (from the user database, not `$SHELL`, which an agent's command tool overrides: Claude Code's runs under `/bin/zsh` on a fish machine): `install` removes the retired `claude()` wrapper from that shell's profile and `doctor` reports one that remains. If `doctor` still reports `install.legacy-wrappers` for the wrong profile, pass the shell a human launches `claude` from to both commands: `--shell fish`.
 
 ### When to skip
 
 - Pure read-only exploration (no edits to `crates/` or rules).
-- The turn only touched docs, prompts, or bench scripts — nothing that changes binary behavior or installed rules.
+- The turn only touched docs, prompts, bench scripts, or contributor instructions (`AGENTS.md`, `CONTRIBUTING.md`, `.agents/`) — nothing that changes binary behavior or installed rules.
 <!-- pixel:warp-retrieval:begin -->
 For repository retrieval, your first tool action must attempt Pixel before any search or read. Do not run `ls`, `command -v`, status probes, or native retrieval first. For a known identifier, start with `pixel search-content -F '<identifier>'`; for behavior described without a name, start with `pixel find-code '<concept>'`. Read matching source after the Pixel attempt to verify the result. If Pixel is unavailable, the repository is not indexed, or Pixel cannot answer, continue with the appropriate native tool; never block or deny repository access.
 <!-- pixel:warp-retrieval:end -->

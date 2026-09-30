@@ -102,9 +102,10 @@ Drop the noise before counting (verified 2026-09):
   those runs land in the real repo's `actions.jsonl` (37 of 40 errors in one
   sample were `check-release`/`classify` test cases). Exclude them from the
   counts; report the leak itself once as a finding while it lasts.
-- **A dev build's own notes.** A `pixel-dev` built from `main` prints the
-  stale-prompt note on every call while the deployed prompts come from the
-  installed release: expected on a pixel developer's machine, not drift.
+- **The stale-prompt note and a side build.** A `pixel-dev` never prints it.
+  The managed `pixel` printing it on every call while `~/.claude/settings.json`
+  runs `pixel-dev run-hook …` means a global `pixel-dev install` took the home
+  install: report it once, with `pixel install` as the hand-back, not as drift.
 - **Refusals that are the contract.** `fast-forward` refusing a non-ff,
   `commit` refusing a dirty or empty stage, a `--request-id` replay: an
   error is a friction only if the agent had to work around it (Step 2 says

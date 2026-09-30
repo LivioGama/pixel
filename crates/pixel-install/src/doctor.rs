@@ -1437,18 +1437,29 @@ fn spec(id: &str) -> &'static CheckSpec {
         .unwrap_or_else(|| panic!("doctor check `{id}` is missing from CHECKS"))
 }
 
-/// Whether `id` runs: listed by `only` (or `only` is empty) and not by `skip`.
-fn selected(only: &[String], skip: &[String], id: &str) -> bool {
-    (only.is_empty() || only.iter().any(|o| o == id)) && !skip.iter().any(|s| s == id)
+/// Whether the `--only`/`--skip` value `selector` names `id`: the id itself,
+/// or its group as `<group>.*` (`install.*` for every home-install check), so
+/// a caller does not have to list, and keep up with, each id of a group.
+fn names_check(selector: &str, id: &str) -> bool {
+    selector.strip_suffix(".*").map_or(selector == id, |group| {
+        id.strip_prefix(group)
+            .is_some_and(|rest| rest.starts_with('.'))
+    })
 }
 
-/// Refuse a selection that names an unknown check, or one both kept and
-/// left out: either would silently run fewer checks than the caller meant.
+/// Whether `id` runs: named by `only` (or `only` is empty) and not by `skip`.
+fn selected(only: &[String], skip: &[String], id: &str) -> bool {
+    (only.is_empty() || only.iter().any(|o| names_check(o, id)))
+        && !skip.iter().any(|s| names_check(s, id))
+}
+
+/// Refuse a selection that names no check, or one both kept and left out:
+/// either would silently run fewer checks than the caller meant.
 fn validate_selection(only: &[String], skip: &[String]) -> Result<()> {
     if let Some(id) = only
         .iter()
         .chain(skip)
-        .find(|id| !CHECKS.iter().any(|spec| spec.id == id.as_str()))
+        .find(|id| !CHECKS.iter().any(|spec| names_check(id, spec.id)))
     {
         return Err(InstallError::UnknownDoctorCheck(id.clone()));
     }
@@ -1558,6 +1569,23 @@ pub struct Repair {
     pub steps: Vec<Vec<String>>,
     /// Ids of the flagged checks this command repairs, in report order.
     pub checks: Vec<String>,
+}
+
+/// `plan` split into the repairs a `--fix` runs and those it leaves to the
+/// managed `pixel`. A side build (`side_build`) never runs one that rewrites
+/// the home install — a `pixel install` step without `--repo`: that install
+/// is the managed binary's, and running it through `pixel-dev` would move
+/// every repository's hooks and prompts onto the side build. The checks it
+/// targets keep their `fix:` line and their colour.
+#[must_use]
+pub fn split_home_repairs(plan: Vec<Repair>, side_build: bool) -> (Vec<Repair>, Vec<Repair>) {
+    plan.into_iter().partition(|repair| {
+        !side_build
+            || !repair.steps.iter().any(|argv| {
+                argv.first().is_some_and(|verb| verb == "install")
+                    && !argv.iter().any(|arg| arg == "--repo")
+            })
+    })
 }
 
 /// The repairs `--fix` runs for `report`: one per distinct catalogue command
@@ -2065,9 +2093,9 @@ mod tests {
         CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary,
         PLACEHOLDER_DUMMY, Remedy, Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL,
         age_secs, capped, catalogue_steps, extract_rule_commands, fix_for, judge_repair,
-        normalize_rule_command, one_line, probe_daemon_epistemics, render_catalogue,
+        names_check, normalize_rule_command, one_line, probe_daemon_epistemics, render_catalogue,
         render_repairs, repair_for, repair_plan, rtk_backup_check, run_repair, scenario_mismatches,
-        selected, shell_word, spec, validate_selection,
+        selected, shell_word, spec, split_home_repairs, validate_selection,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
@@ -2272,6 +2300,39 @@ mod tests {
         assert!(selected(&[], &ids(&["daemon.health"]), "binary.path"));
     }
 
+    /// A side build (`pixel-dev`) leaves the home install to the managed
+    /// `pixel` with `--skip 'install.*'`: the group must reach every
+    /// `install.` check, and nothing else, not even an id that merely starts
+    /// with the same letters.
+    #[test]
+    fn selected_should_treat_a_group_selector_as_every_check_of_that_group() {
+        let home: Vec<&str> = CHECKS
+            .iter()
+            .map(|spec| spec.id)
+            .filter(|id| id.starts_with("install."))
+            .collect();
+        assert_eq!(home.len(), 10, "the install group as catalogued");
+        let skip = ids(&["install.*"]);
+        for spec in CHECKS {
+            assert_eq!(
+                selected(&[], &skip, spec.id),
+                !home.contains(&spec.id),
+                "{}",
+                spec.id
+            );
+        }
+        let only = ids(&["repo.*"]);
+        assert!(selected(&only, &[], "repo.claude-hooks"));
+        assert!(!selected(&only, &[], "install.claude-hooks"));
+        assert!(
+            !names_check("install.*", "installer.x"),
+            "a group ends at its dot"
+        );
+        assert!(!names_check("install.*", "install"), "a group is not an id");
+        assert!(names_check("binary.path", "binary.path"));
+        assert!(!names_check("binary.path", "binary.executable"));
+    }
+
     #[test]
     fn validate_selection_should_refuse_unknown_and_conflicting_ids() {
         assert!(validate_selection(&ids(&["binary.path"]), &ids(&["daemon.health"])).is_ok());
@@ -2287,6 +2348,14 @@ mod tests {
             validate_selection(&ids(&["binary.path"]), &ids(&["binary.path"])),
             Err(InstallError::ConflictingDoctorSelection(id)) if id == "binary.path"
         ));
+        assert!(validate_selection(&[], &ids(&["install.*"])).is_ok());
+        assert!(
+            matches!(
+                validate_selection(&[], &ids(&["instal.*"])),
+                Err(InstallError::UnknownDoctorCheck(id)) if id == "instal.*"
+            ),
+            "a group no check belongs to is as wrong as a mistyped id"
+        );
     }
 
     /// A fix is a command an agent may run as is: never on a healthy check,
@@ -2491,6 +2560,31 @@ mod tests {
 
     /// Twelve checks share `pixel install`: the plan runs it once, lists
     /// every check it repairs, and keeps the report's order.
+    /// A side build's `--fix` keeps every repair but the home install's: a
+    /// `pixel install` step without `--repo`, even inside a chain, is left to
+    /// the managed pixel, while the managed pixel itself runs everything.
+    #[test]
+    fn split_home_repairs_should_leave_the_home_install_to_the_managed_pixel() {
+        let repair = |command: &str, steps: &[&[&str]]| Repair {
+            command: command.into(),
+            steps: argv(steps),
+            checks: ids(&["x"]),
+        };
+        let home = repair("pixel install", &[&["install", "--shell", "fish"]]);
+        let chained = repair(
+            "pixel daemon stop && pixel install",
+            &[&["daemon", "stop", "/r"], &["install"]],
+        );
+        let repo = repair("pixel install --repo /r", &[&["install", "--repo", "/r"]]);
+        let prepare = repair("pixel prepare-repo /r", &[&["prepare-repo", "/r"]]);
+        let plan = vec![home.clone(), chained.clone(), repo.clone(), prepare.clone()];
+        assert_eq!(
+            split_home_repairs(plan.clone(), true),
+            (vec![repo, prepare], vec![home, chained])
+        );
+        assert_eq!(split_home_repairs(plan.clone(), false), (plan, vec![]));
+    }
+
     #[test]
     fn repair_plan_should_run_each_command_once_in_report_order() {
         let install: &[&[&str]] = &[&["install"]];

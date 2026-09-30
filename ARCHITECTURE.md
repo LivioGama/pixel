@@ -425,7 +425,7 @@ The hook entry points, all under `pixel run-hook` (alias `hook`), and where
 or protocol-checked hooks from observed live execution.
 Every check is listed in `pixel_install::doctor::CHECKS` with a stable id and
 the command that repairs it (`pixel doctor --list`): `--only`/`--skip` select
-by id, and each yellow or red check reports that command as `fix`.
+by id or by group (`install.*`), and each yellow or red check reports that command as `fix`.
 `--fix` runs them: `repair_plan` folds the flagged checks into one run of each
 distinct catalogue command, in catalogue order, `run_repair` executes it with
 the running binary, and the checks are re-run so each repair is judged
