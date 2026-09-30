@@ -5595,7 +5595,9 @@ fn repo_install_should_name_pixel_install_for_a_global_pixel_guard() {
 
 /// A guard installed before `rtk init -g` (or by a release that did not read
 /// the global file) runs beside the global RTK hook: doctor turns yellow with
-/// the command that holds the guard back, and that command does.
+/// the command that holds the guard back, and that command does. The guard
+/// is then absent while the sessions run: doctor stays yellow, naming what
+/// the user can do, and offers no command, since none can choose for them.
 #[test]
 #[cfg(unix)]
 fn doctor_repo_claude_hooks_should_flag_a_guard_beside_a_global_rewriter() {
@@ -5632,10 +5634,23 @@ fn doctor_repo_claude_hooks_should_flag_a_guard_beside_a_global_rewriter() {
         "{c:?}"
     );
 
+    assert_eq!(
+        c.fix,
+        Some(format!("pixel install --repo '{}'", repo.display())),
+        "rerunning the install does hold the guard back: {c:?}"
+    );
+
     install(&repo_install_options(&repo, &home)).unwrap();
     let c = claude_check();
-    assert_eq!(c.status, CheckStatus::Green, "{c:?}");
-    assert!(c.summary.contains("not installed"), "{c:?}");
+    assert_eq!(c.status, CheckStatus::Yellow, "{c:?}");
+    assert!(
+        c.summary.starts_with(&format!(
+            "claude guard not installed: `rtk hook claude` in {} also rewrites shell calls — narrow that hook's `matcher`",
+            home.join(".claude/settings.json").display()
+        )),
+        "{c:?}"
+    );
+    assert_eq!(c.fix, None, "{c:?}");
 }
 
 /// Read the `PostToolUse` groups whose command runs Pixel's metrics relay
