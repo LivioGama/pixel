@@ -778,9 +778,11 @@ fn doctor_install_artifact_checks_red_and_green() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
 
+    // The doctor runs as the binary that installs below, as it does in
+    // production: hooks wired to another binary are yellow on their own.
     let doc_opts = DoctorOptions {
         home: Some(home.to_path_buf()),
-        executable_path: None,
+        executable_path: Some(fake_pixel_exe(home)),
         shell: Some(TEST_SHELL.into()),
         claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
         ..Default::default()
@@ -4777,6 +4779,83 @@ fn one_install_should_collapse_stacked_dev_hooks_and_keep_foreign_ones_unchanged
     );
     let after = doctor_hooks();
     assert_eq!(after.status, CheckStatus::Green, "{after:?}");
+}
+
+/// After a global `pixel-dev install` every hook is present and registered
+/// once, yet every session on the machine runs the side build: the managed
+/// `pixel` reads that as yellow with `pixel install` as its fix, and the
+/// same holds for hooks left on a previous release's path by an upgrade.
+/// `pixel install` points them back; the side build itself never judges.
+#[test]
+#[cfg(unix)]
+fn doctor_should_flag_claude_hooks_that_run_another_pixel_binary() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let release = fake_exe_named(home, "pixel");
+    let dev = fake_dev_exe(home);
+    let old_dir = home.join(".local/share/mise/installs/pixel/0.6.0/bin");
+    fs::create_dir_all(&old_dir).unwrap();
+    fs::write(old_dir.join("pixel"), "#!/bin/sh\nexit 0\n").unwrap();
+    fs::set_permissions(old_dir.join("pixel"), fs::Permissions::from_mode(0o755)).unwrap();
+    let old = old_dir.join("pixel").canonicalize().unwrap();
+    let install_as = |exe: &std::path::Path| {
+        install(&InstallOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: Some(exe.to_path_buf()),
+            shell: Some(TEST_SHELL.into()),
+            ..Default::default()
+        })
+        .unwrap();
+    };
+    let hooks_seen_by = |exe: &std::path::Path| {
+        let report = doctor(&DoctorOptions {
+            home: Some(home.to_path_buf()),
+            executable_path: Some(exe.to_path_buf()),
+            shell: Some(TEST_SHELL.into()),
+            only: vec!["install.claude-hooks".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        check(&report, "install.claude-hooks").clone()
+    };
+
+    install_as(&dev);
+    let taken = hooks_seen_by(&release);
+    assert_eq!(taken.status, CheckStatus::Yellow, "{taken:?}");
+    assert!(
+        taken
+            .summary
+            .contains(&format!("run {}, not this pixel", dev.display())),
+        "{taken:?}"
+    );
+    assert!(
+        taken
+            .fix
+            .as_deref()
+            .is_some_and(|f| f.starts_with("pixel install")),
+        "{taken:?}"
+    );
+    let own = hooks_seen_by(&dev);
+    assert_eq!(own.status, CheckStatus::Green, "{own:?}");
+
+    install_as(&release);
+    let back = hooks_seen_by(&release);
+    assert_eq!(back.status, CheckStatus::Green, "{back:?}");
+    let side = hooks_seen_by(&dev);
+    assert_eq!(
+        side.status,
+        CheckStatus::Green,
+        "a side build does not judge: {side:?}"
+    );
+
+    install_as(&old);
+    let upgraded = hooks_seen_by(&release);
+    assert_eq!(upgraded.status, CheckStatus::Yellow, "{upgraded:?}");
+    assert!(
+        upgraded.summary.contains(&old.display().to_string()),
+        "{upgraded:?}"
+    );
 }
 
 /// `pixel-dev uninstall` removes the entries `pixel-dev install` wrote; it

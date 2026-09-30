@@ -4331,16 +4331,6 @@ fn dev_install_path(home: &Path) -> PathBuf {
         .join(pixel_install::config::PIXEL_DEV_EXECUTABLE)
 }
 
-/// Whether `exe` is the side build `self-update --dev` installs, whatever
-/// directory it was copied to: the one binary on a machine that must leave
-/// the home install to the managed `pixel`.
-fn is_side_build(exe: &Path) -> bool {
-    exe.file_name()
-        == Some(std::ffi::OsStr::new(
-            pixel_install::config::PIXEL_DEV_EXECUTABLE,
-        ))
-}
-
 /// True when `path` has a `target` directory component: a cargo build
 /// output, never an install location.
 fn is_cargo_target_path(path: &Path) -> bool {
@@ -5086,7 +5076,7 @@ fn rename_note(argv: &[String], unprotected: bool) -> Option<String> {
 /// every command but the protected streams, the three that already deal
 /// with them (`install` rewrites them, `doctor` reports them, `uninstall`
 /// removes them), and any command of the `pixel-dev` side build
-/// ([`is_side_build`]). The deployed prompts are the managed `pixel`'s: a
+/// ([`pixel_install::config::is_side_build`]). The deployed prompts are the managed `pixel`'s: a
 /// `pixel-dev` built from another commit differs from them by construction,
 /// and the fix the note names, `pixel install`, would hand the whole
 /// machine's hooks and prompts to that build.
@@ -5332,7 +5322,8 @@ fn run() -> Result<(), String> {
     if let Some(note) = rename_note(&argv, !protected) {
         eprint!("{note}");
     }
-    let side_build = std::env::current_exe().is_ok_and(|exe| is_side_build(&exe));
+    let side_build =
+        std::env::current_exe().is_ok_and(|exe| pixel_install::config::is_side_build(&exe));
     if checks_deployed_prompts(&command_label, protected, side_build)
         && let Some(home) = std::env::var_os("HOME")
         && let Some(note) =
@@ -9235,12 +9226,11 @@ mod prompt_asset_parity {
 #[cfg(test)]
 mod renamed_command_tests {
     use super::{
-        Cli, checks_deployed_prompts, is_side_build, logged_args, rename_note, renamed_invocation,
+        Cli, checks_deployed_prompts, logged_args, rename_note, renamed_invocation,
         stale_prompt_note,
     };
     use clap::CommandFactory;
     use std::collections::BTreeSet;
-    use std::path::Path;
 
     /// The full `Cli` definition overflows a 2 MiB test thread in debug
     /// builds (the reason `validate_cli_syntax` runs on 4 MiB); build and
@@ -9428,14 +9418,6 @@ mod renamed_command_tests {
     fn deployed_prompts_are_never_checked_by_a_side_build() {
         assert!(!checks_deployed_prompts("search-content", false, true));
         assert!(!checks_deployed_prompts("self-update", false, true));
-        assert!(is_side_build(Path::new("/home/u/.local/bin/pixel-dev")));
-        assert!(is_side_build(Path::new("/tmp/copy/pixel-dev")));
-        assert!(!is_side_build(Path::new("/home/u/.local/bin/pixel")));
-        assert!(
-            !is_side_build(Path::new("/home/u/code/pixel/target/dev-release/pixel")),
-            "a checkout build run by hand still hears about stale prompts"
-        );
-        assert!(!is_side_build(Path::new("/opt/pixel-dev-helper")));
     }
 
     #[test]

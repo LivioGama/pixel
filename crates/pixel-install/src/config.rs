@@ -35,6 +35,14 @@ pub const PIXEL_DEV_EXECUTABLE: &str = "pixel-dev";
 /// `pixel-dev` invocation as it does a `pixel` one.
 pub const PIXEL_EXECUTABLES: [&str; 2] = [PIXEL_EXECUTABLE, PIXEL_DEV_EXECUTABLE];
 
+/// Whether `exe` is the side build `self-update --dev` installs, whatever
+/// directory it was copied to: the one binary on a machine that leaves the
+/// home install (hooks, deployed prompts) to the managed `pixel`.
+#[must_use]
+pub fn is_side_build(exe: &Path) -> bool {
+    exe.file_name() == Some(std::ffi::OsStr::new(PIXEL_DEV_EXECUTABLE))
+}
+
 /// The Claude hooks directory (relative to home).
 pub const CLAUDE_HOOKS_DIR: &str = ".claude/hooks";
 /// The guard script name used before the `gitpixel` → `pixel` rename; still
@@ -724,6 +732,20 @@ mod tests {
 
     fn hook_entry(command: &str) -> serde_json::Value {
         serde_json::json!({ "matcher": "Bash", "hooks": [{ "type": "command", "command": command }] })
+    }
+
+    /// The side build is known by its installed name wherever it sits; a
+    /// checkout build run by hand, or a tool whose name merely starts with
+    /// `pixel-dev`, is not one and keeps the managed binary's rules.
+    #[test]
+    fn is_side_build_should_recognise_the_pixel_dev_name_only() {
+        assert!(is_side_build(Path::new("/home/u/.local/bin/pixel-dev")));
+        assert!(is_side_build(Path::new("/tmp/copy/pixel-dev")));
+        assert!(!is_side_build(Path::new("/home/u/.local/bin/pixel")));
+        assert!(!is_side_build(Path::new(
+            "/home/u/code/pixel/target/dev-release/pixel"
+        )));
+        assert!(!is_side_build(Path::new("/opt/pixel-dev-helper")));
     }
 
     #[test]
