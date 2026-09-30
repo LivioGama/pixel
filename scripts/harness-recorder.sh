@@ -243,15 +243,20 @@ START_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
 # ── Record. PTY is fresh (worse case: it inherits the caller's COLUMNS/
 #    LINES, which is what makes a terminal-sized recording feel natural).
 rm -f "$CAST"
+REC_STATUS=0
 asciinema rec \
     --command "bash \"$RUNNER_SCRIPT\"" \
     --output-format asciicast-v3 \
     --idle-time-limit "$IDLE_LIMIT" \
     --overwrite \
     --quiet \
-    "$CAST" || true
+    "$CAST" || REC_STATUS=$?
 
 [ -s "$CAST" ] || die "asciinema produced an empty recording: $CAST"
+if [ "$REC_STATUS" -ne 0 ]; then
+    echo "harness-recorder: harness failed (status $REC_STATUS); no artifacts posted" >&2
+    exit "$REC_STATUS"
+fi
 
 END_MS=$(python3 -c 'import time; print(int(time.time()*1000))')
 WALL_MS=$((END_MS - START_MS))
@@ -345,15 +350,13 @@ body_file="$OUTDIR/comment-$BASE.md"
 
 if [ -n "$POST_PR" ]; then
     command -v gh >/dev/null 2>&1 || die "--post: gh not on PATH"
-    if [ "$UPLOAD" -eq 1 ]; then
-        # an asciinema-server link that reviewers can open — plus the gist
-        # holding the raw .cast for offline replay.
-        GIST_URL=$(gh gist create "$CAST" -d "$PROVIDER/$SCENARIO" 2>/dev/null | tail -1) || true
-        [ -n "$GIST_URL" ] && {
-            echo
-            echo "**Replay offline:** $GIST_URL"
-        } >> "$body_file"
-    fi
+    # the raw .cast goes to a secret gist so every --post run has a replay
+    # link; --upload adds an asciinema-server URL on top.
+    GIST_URL=$(gh gist create "$CAST" -d "$PROVIDER/$SCENARIO" 2>/dev/null | tail -1) || true
+    [ -n "$GIST_URL" ] && {
+        echo
+        echo "**Replay offline:** $GIST_URL"
+    } >> "$body_file"
     gh pr comment "$POST_PR" --body-file "$body_file"
     echo "harness-recorder: posted comment on PR #$POST_PR" >&2
 else
