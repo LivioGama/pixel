@@ -124,13 +124,7 @@ const CLAUDE_INLINE_CONTEXT_LIMIT: usize = 10_000;
 /// Agent-prompt sections a Claude session can do without at its start, in
 /// the order they are left out when the prompt has to fit: each is needed
 /// only by a task that names it, and the pointer line says where it is.
-const DEFERRABLE_SECTIONS: &[&str] = &[
-    "## Classify",
-    "## User configuration",
-    "## Recall",
-    "## Reading Pixel output",
-    "## LIVE OPERATION METRICS",
-];
+const DEFERRABLE_SECTIONS: &[&str] = &["## When native tools are right", "## Reading results"];
 
 /// Length as Claude Code measures a hook's output string.
 fn utf16_len(text: &str) -> usize {
@@ -6934,15 +6928,15 @@ mod tests {
     }
 
     /// Past 10 000 UTF-16 units Claude Code hands the model a 2 KB preview
-    /// of the context instead of the text, so the Claude session must get a
-    /// context within the limit that keeps the retrieval rules, says what
-    /// it left out and where it is, and keeps the index freshness line.
+    /// of the context instead of the text (#443). The deployed prompt was
+    /// slimmed to fit whole (#475), so the Claude session gets every section
+    /// plus the index freshness line with no compression and no preview.
     #[test]
     fn claude_session_start_fits_the_deployed_prompt_in_the_inline_limit() {
         assert!(
-            utf16_len(DEPLOYED_PROMPT) > CLAUDE_INLINE_CONTEXT_LIMIT,
-            "fixture: the deployed prompt exceeds the limit; if it no longer does, this test \
-             only checks that nothing is dropped"
+            utf16_len(DEPLOYED_PROMPT) <= CLAUDE_INLINE_CONTEXT_LIMIT,
+            "fixture: the deployed prompt exceeds the inline limit again; slim it, or \
+             restore the deferrable-section compression coverage"
         );
         for provider in [None, Some(Provider::Claude)] {
             let out = session_start_envelope(&fresh_repo_block(), Some(DEPLOYED_PROMPT), provider);
@@ -6952,25 +6946,13 @@ mod tests {
                 "{provider:?}"
             );
             for kept in [
-                "# Pixel Retrieval Layer",
-                "## Choose the first retrieval command",
-                "## MANDATORY WORKFLOW",
-                "## REPLACEMENT MAP",
-                "## Hard rules",
-                "## FAIL-OPEN",
-                "## Environment",
+                "# Pixel — indexed code retrieval (optional)",
+                "## Retrieval commands",
+                "## Reading results",
+                "## When native tools are right",
             ] {
                 assert!(context.contains(kept), "{provider:?} lost {kept}");
             }
-            assert!(!context.contains("## Classify"), "{provider:?}");
-            assert!(
-                context.contains("Left out to fit Claude Code's") && context.contains("Classify"),
-                "{provider:?}: the pointer names what is missing"
-            );
-            assert!(
-                context.contains(AGENT_PROMPT_REL),
-                "{provider:?}: and where it is"
-            );
             assert!(
                 context.ends_with(
                     "Pixel index: commit 5855ef57b69f, code graph present, history index fresh."
@@ -7008,29 +6990,30 @@ mod tests {
     fn fit_prompt_leaves_out_deferrable_sections_first_then_trailing_ones() {
         let body = "x".repeat(200);
         let prompt = format!(
-            "# Title\n\n## Keep\n{body}\n## Recall\n{body}\n## Classify\n{body}\n## Tail\n{body}\n"
+            "# Title\n\n## Keep\n{body}\n## Reading results\n{body}\n## When native tools are \
+             right\n{body}\n## Tail\n{body}\n"
         );
         let one = fit_prompt(&prompt, utf16_len(&prompt) - 100, "/p");
         assert!(
-            !one.contains("## Classify") && one.contains("## Recall"),
+            !one.contains("## When native tools are right") && one.contains("## Reading results"),
             "{one}"
         );
         // The line names the sections and the file, not the budget left
         // after the freshness reservation, which is no limit the user has.
         assert!(
             one.ends_with(
-                "\n\nLeft out to fit Claude Code's hook context limit: Classify. Read /p when a \
-                 task needs them."
+                "\n\nLeft out to fit Claude Code's hook context limit: When native tools are \
+                 right. Read /p when a task needs them."
             ),
             "{one}"
         );
         let two = fit_prompt(&prompt, utf16_len(&prompt) - 300, "/p");
         assert!(
-            !two.contains("## Classify") && !two.contains("## Recall"),
+            !two.contains("## When native tools are right") && !two.contains("## Reading results"),
             "{two}"
         );
         assert!(
-            two.contains("## Tail") && two.contains("Classify; Recall"),
+            two.contains("## Tail") && two.contains("When native tools are right; Reading results"),
             "{two}"
         );
         let tail = fit_prompt(&prompt, 400, "/p");

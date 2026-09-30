@@ -1,0 +1,110 @@
+[
+  {
+    "scenario": "s1-hook-install",
+    "arm": "baseline",
+    "cli": "claude",
+    "score": 14,
+    "max": 16,
+    "answered": true,
+    "turns": 14,
+    "input_tokens": 112975,
+    "cost_usd": 0.9648240000000002,
+    "penalties": 0
+  },
+  {
+    "scenario": "s1-hook-install",
+    "arm": "on",
+    "cli": "claude",
+    "score": 9,
+    "max": 16,
+    "answered": true,
+    "turns": 14,
+    "input_tokens": 98121,
+    "cost_usd": 0.74564,
+    "penalties": 0
+  },
+  {
+    "scenario": "s1-hook-install",
+    "arm": "vslim",
+    "cli": "claude",
+    "score": 9,
+    "max": 16,
+    "answered": true,
+    "turns": 18,
+    "input_tokens": 103378,
+    "cost_usd": 0.824508,
+    "penalties": 0
+  },
+  {
+    "scenario": "s2-vector-recall",
+    "arm": "baseline",
+    "cli": "claude",
+    "score": 10,
+    "max": 13,
+    "answered": true,
+    "turns": 9,
+    "input_tokens": 136777,
+    "cost_usd": 0.9110580000000001,
+    "penalties": 0
+  },
+  {
+    "scenario": "s2-vector-recall",
+    "arm": "on",
+    "cli": "claude",
+    "score": 8,
+    "max": 13,
+    "answered": true,
+    "turns": 20,
+    "input_tokens": 51455,
+    "cost_usd": 0.577458,
+    "penalties": 0
+  },
+  {
+    "scenario": "s2-vector-recall",
+    "arm": "vslim",
+    "cli": "claude",
+    "score": 11,
+    "max": 13,
+    "answered": true,
+    "turns": 20,
+    "input_tokens": 90857,
+    "cost_usd": 0.800583,
+    "penalties": 0
+  },
+  {
+    "scenario": "s3-rename-impact",
+    "arm": "baseline",
+    "cli": "claude",
+    "score": 12,
+    "max": 12,
+    "answered": true,
+    "turns": 5,
+    "input_tokens": 92546,
+    "cost_usd": 0.575963,
+    "penalties": 0
+  },
+  {
+    "scenario": "s3-rename-impact",
+    "arm": "on",
+    "cli": "claude",
+    "score": 11,
+    "max": 12,
+    "answered": true,
+    "turns": 7,
+    "input_tokens": 47443,
+    "cost_usd": 0.375674,
+    "penalties": 0
+  },
+  {
+    "scenario": "s3-rename-impact",
+    "arm": "vslim",
+    "cli": "claude",
+    "score": 10,
+    "max": 12,
+    "answered": true,
+    "turns": 4,
+    "input_tokens": 69586,
+    "cost_usd": 0.400107,
+    "penalties": 0
+  }
+]

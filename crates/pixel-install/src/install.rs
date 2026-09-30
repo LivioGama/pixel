@@ -918,15 +918,11 @@ mod pi_prompt_content_tests {
 
     #[test]
     fn an_earlier_similar_heading_stays_outside_the_edited_legacy_prompt() {
-        let edited = AGENT_PROMPT_ASSET.replacen(
-            "Pixel provides deterministic code retrieval",
-            "This repo keeps Pixel ready",
-            1,
-        );
-        assert_ne!(
-            edited, AGENT_PROMPT_ASSET,
-            "the fixture must contain an edit"
-        );
+        let edited = "# Pixel Retrieval Layer\n\
+                      Pixel provides deterministic code retrieval, edited by hand.\n\
+                      ## MANDATORY WORKFLOW\nDo the workflow.\n\
+                      ## REPLACEMENT MAP\nMap.\n\
+                      All commands accept `[PATH]`, default current directory.\n";
         let existing = format!("# Pixel Retrieval Layer\nMy own note.\n{edited}After.\n");
         let wrapped = managed_pi_content(&existing, PI_PROMPT_ASSET);
         assert!(
@@ -934,10 +930,7 @@ mod pi_prompt_content_tests {
             "{wrapped}"
         );
         assert!(wrapped.ends_with("After.\n"), "{wrapped}");
-        assert!(
-            !wrapped.contains("This repo keeps Pixel ready"),
-            "{wrapped}"
-        );
+        assert!(!wrapped.contains("edited by hand"), "{wrapped}");
         assert!(
             !wrapped.contains(super::LEGACY_PI_PROMPT_END),
             "the final legacy rule must be removed with the old section: {wrapped}"
@@ -953,15 +946,11 @@ mod pi_prompt_content_tests {
 
     #[test]
     fn an_inline_legacy_heading_does_not_replace_quoted_user_text() {
-        let edited = AGENT_PROMPT_ASSET.replacen(
-            "Pixel provides deterministic code retrieval",
-            "This repo keeps Pixel ready",
-            1,
-        );
-        assert_ne!(
-            edited, AGENT_PROMPT_ASSET,
-            "the fixture must contain an edit"
-        );
+        let edited = "# Pixel Retrieval Layer\n\
+                      Pixel provides deterministic code retrieval, quoted inline.\n\
+                      ## MANDATORY WORKFLOW\nDo the workflow.\n\
+                      ## REPLACEMENT MAP\nMap.\n\
+                      All commands accept `[PATH]`, default current directory.\n";
         let existing = format!("Quoted: {edited}After.");
         let wrapped = managed_pi_content(&existing, PI_PROMPT_ASSET);
         assert!(wrapped.starts_with(&existing), "{wrapped}");

@@ -20,7 +20,7 @@ use crate::install::{self, CheckStatus, InstallStep, Result};
 /// blocks unmanaged beside a second copy.
 const RULES_BEGIN: &str = "<!-- pixel:warp-retrieval:begin -->";
 const RULES_END: &str = "<!-- pixel:warp-retrieval:end -->";
-const RULES_BODY: &str = "For repository retrieval, your first tool action must attempt Pixel before any search or read. Do not run `ls`, `command -v`, status probes, or native retrieval first. For a known identifier, start with `pixel search-content -F '<identifier>'`; for behavior described without a name, start with `pixel find-code '<concept>'`. Read matching source after the Pixel attempt to verify the result. If Pixel is unavailable, the repository is not indexed, or Pixel cannot answer, continue with the appropriate native tool; never block or deny repository access.\n";
+const RULES_BODY: &str = "This repository has a Pixel index (`.pixel/`). Optional retrieval helpers: `pixel search-content -F '<identifier>'` for exact identifiers, `pixel find-code '<concept>'` for behavior-described code, and `pixel impact '<symbol>'` before renames. Use them when they fit; native tools stay available, and two fruitless pixel calls mean switch to grep.\n";
 
 /// Install Pixel-first retrieval guidance in the repository's root `AGENTS.md`.
 pub(crate) fn install_rules(repo: &Path, dry_run: bool) -> Result<InstallStep> {
@@ -165,16 +165,9 @@ mod tests {
 
         let installed = fs::read_to_string(&path).unwrap();
         assert!(installed.starts_with(original));
-        assert!(
-            installed
-                .contains("your first tool action must attempt Pixel before any search or read")
-        );
-        assert!(
-            installed.contains(
-                "Do not run `ls`, `command -v`, status probes, or native retrieval first"
-            )
-        );
-        assert!(installed.contains("never block or deny repository access"));
+        assert!(installed.contains("pixel search-content -F '<identifier>'"));
+        assert!(installed.contains("native tools stay available"));
+        assert!(installed.contains("two fruitless pixel calls"));
         assert_eq!(check_rules(repo.path()).unwrap(), Some(true));
     }
 
@@ -202,7 +195,7 @@ mod tests {
     fn check_rules_should_mark_changed_managed_content_stale() {
         let repo = tempfile::tempdir().unwrap();
         let path = repo.path().join("AGENTS.md");
-        fs::write(&path, rules_block().replace("never block", "always block")).unwrap();
+        fs::write(&path, rules_block().replace("Optional", "Mandatory")).unwrap();
         assert_eq!(check_rules(repo.path()).unwrap(), Some(false));
 
         install_rules(repo.path(), false).unwrap();
