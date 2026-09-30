@@ -284,6 +284,7 @@ fn probe_agent_with<F>(
     provider: Option<Provider>,
     timeout: Duration,
     answer_prompts: bool,
+    claude_credential: bool,
     run: &F,
     diagnose: &dyn Fn(Agent, bool) -> Option<&'static str>,
 ) -> AgentProbe
@@ -318,13 +319,12 @@ where
             // command is its auth check and carries no reply token at all,
             // and Claude's CLI answers `authentication_failed` both for a
             // credential that was rejected and for one that was never
-            // configured — so its lane is the one that reads the environment
-            // to choose the wording.
+            // configured — so its lane is handed the one fact that tells them
+            // apart. The environment is read by the caller, not here: an
+            // input read inside the body is an input no test can vary.
             let probe_result = match agent {
                 Agent::Devin => parse_devin_auth(&output, success),
-                Agent::Claude => {
-                    parse_probe_with(&output, success, any_env_set(&CLAUDE_CREDENTIAL_ENVS))
-                }
+                Agent::Claude => parse_probe_with(&output, success, claude_credential),
                 _ => parse_probe(&output, success),
             };
             if probe_result.ready {
@@ -403,6 +403,9 @@ where
     F: Fn(&[String], Duration) -> io::Result<(bool, String)> + Sync,
     D: Fn(Agent, bool, Duration) -> Option<&'static str> + Sync,
 {
+    // Read once, before any lane starts: the environment is process-wide, so
+    // four lanes reading it four times can only disagree with each other.
+    let claude_credential = any_env_set(&CLAUDE_CREDENTIAL_ENVS);
     let rows: Mutex<Vec<AgentRow>> = Mutex::new(Vec::new());
     std::thread::scope(|scope| {
         for agent in agents {
@@ -421,6 +424,7 @@ where
                     provider,
                     timeout,
                     answer_prompts,
+                    claude_credential,
                     run,
                     &|agent, answer| diagnose(agent, answer, timeout),
                 );
@@ -645,6 +649,27 @@ fn verified_only(home: &std::path::Path, agents: &[Agent]) -> Vec<String> {
         .collect()
 }
 
+/// One titled block of the report, or nothing at all when it has no lines.
+///
+/// The three lists — what `--apply` wrote, what it would have written, and
+/// what it verified without writing — are each *absent* rather than printed
+/// empty, so a run that wrote nothing does not read like one that wrote
+/// something. Splitting it out is what makes that rule assertable: the
+/// alternative is capturing stdout, and a header nobody can test is a header
+/// that comes back inverted.
+fn section(title: &str, lines: &[String]) -> String {
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut out = format!("\n{title}\n");
+    for line in lines {
+        out.push_str("  ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// The human-readable report. Every line is a fact the run established: a
 /// provider's classified condition, the provider each agent settled on, and
 /// One provider row's text after the state column.
@@ -688,24 +713,12 @@ pub(crate) fn print_report(report: &Report) {
             println!("  {:<12} blocked: {blocker}", "");
         }
     }
-    if !report.applied.is_empty() {
-        println!("\napplied");
-        for line in &report.applied {
-            println!("  {line}");
-        }
-    }
-    if !report.pending.is_empty() {
-        println!("\nwould apply (re-run with --apply)");
-        for line in &report.pending {
-            println!("  {line}");
-        }
-    }
-    if !report.verified_only.is_empty() {
-        println!("\nverified only");
-        for line in &report.verified_only {
-            println!("  {line}");
-        }
-    }
+    print!("{}", section("applied", &report.applied));
+    print!(
+        "{}",
+        section("would apply (re-run with --apply)", &report.pending)
+    );
+    print!("{}", section("verified only", &report.verified_only));
     match &report.approvals {
         None => println!(
             "\napprovals: not attempted — re-run with --approve to clear each agent's own startup gate"
@@ -760,6 +773,107 @@ mod tests {
 
     fn throttled(provider: Provider) -> ProbeOutcome {
         ProbeOutcome::failed(provider, ProbeFailure::RateLimited, "429".to_string())
+    }
+
+    /// A home directory this test owns, emptied on the way in so a rerun
+    /// starts clean. Named per test, so two of them cannot share one.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pixel-readify-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create the test directory");
+        dir
+    }
+
+    #[test]
+    fn a_report_prints_a_section_only_when_it_has_something_in_it() {
+        // The three lists are each absent rather than printed empty: a run
+        // that wrote nothing must not read like one that wrote something.
+        assert_eq!(
+            section("applied", &[]),
+            "",
+            "an empty section prints no header at all"
+        );
+        let one = section("applied", &["a line".to_string()]);
+        assert!(one.starts_with("\napplied\n"), "{one:?}");
+        assert!(one.contains("\n  a line\n"), "{one:?}");
+    }
+
+    #[test]
+    fn applying_writes_every_agent_that_owns_a_config_and_spares_the_verified_one() {
+        let home = scratch("apply");
+        let written = write_configs(&home, Provider::Ollama, &Agent::ALL);
+        assert_eq!(
+            written.len(),
+            3,
+            "one line per rewritten config: {written:?}"
+        );
+        for path in [
+            codex_config(&home),
+            claude_settings(&home),
+            antigravity_settings(&home),
+        ] {
+            assert!(path.is_file(), "{} was not written", path.display());
+        }
+        assert!(
+            !devin_config(&home).exists(),
+            "Devin's config is verified, never rewritten"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_plan_names_the_three_configs_and_omits_the_verified_one() {
+        let home = scratch("plan");
+        let planned = planned_configs(&home, Provider::Ollama, &Agent::ALL);
+        assert_eq!(planned.len(), 3, "{planned:?}");
+        let joined = planned.join("\n");
+        for path in [
+            codex_config(&home),
+            claude_settings(&home),
+            antigravity_settings(&home),
+        ] {
+            assert!(
+                joined.contains(&path.display().to_string()),
+                "{} is missing from the plan: {joined}",
+                path.display()
+            );
+        }
+        assert!(
+            planned.iter().all(|line| line.ends_with("via ollama")),
+            "every line names the provider it would point at: {planned:?}"
+        );
+        assert!(
+            !joined.contains("devin"),
+            "Devin is verified rather than planned: {joined}"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn the_approval_rows_come_back_in_the_agents_own_order() {
+        // The approvals run in parallel and finish in whatever order they
+        // finish. The report is the fixed order, so two runs of the same
+        // state are not a race a reader has to notice.
+        let home = scratch("approve-order");
+        let shuffled = [
+            Agent::Devin,
+            Agent::Codex,
+            Agent::Antigravity,
+            Agent::Claude,
+        ];
+        let rows = clear_gates(
+            &home,
+            &shuffled,
+            Path::new("/nonexistent-workspace-does-not-exist"),
+            Duration::from_secs(1),
+        );
+        let order: Vec<&str> = rows.iter().map(|row| row.agent).collect();
+        assert_eq!(
+            order,
+            vec!["codex", "claude", "antigravity", "devin"],
+            "the order is Agent::ALL whatever order they finished in"
+        );
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -895,6 +1009,39 @@ mod tests {
             failure: None,
         };
         assert_eq!(provider_line(&row), "READY");
+    }
+
+    #[test]
+    fn the_claude_lane_reaches_the_reader_with_the_fact_it_was_handed() {
+        // `agents` tests the reader; this is about the wiring, which is the
+        // half a reader test cannot see. Claude's CLI answers the same way
+        // for a rejected credential and for one that was never configured, so
+        // the two facts must produce two different reports — and until the
+        // fact was a parameter, the only way to vary it was to write to the
+        // process environment, which no test can do safely.
+        let stream = || Ok((false, r#"{"error":"authentication_failed"}"#.to_string()));
+        let probe = |claude_credential| {
+            probe_agent_with(
+                Agent::Claude,
+                Some(Provider::Ollama),
+                Duration::from_secs(1),
+                false,
+                claude_credential,
+                &|_argv: &[String], _timeout: Duration| stream(),
+                &|_, _| None,
+            )
+        };
+        let rejected = probe(true);
+        let absent = probe(false);
+        assert!(
+            rejected.detail.contains("credential rejected"),
+            "{rejected:?}"
+        );
+        assert!(
+            absent.detail.contains("no credential configured"),
+            "{absent:?}"
+        );
+        assert_ne!(rejected.detail, absent.detail);
     }
 
     #[test]

@@ -111,14 +111,80 @@ fn codex(home: &Path, workspace: &Path, timeout: Duration) -> Approval {
     }
 }
 
+/// The two `codex` app-server exchanges [`clear_codex_with`] makes, behind a
+/// trait so the policy over their answers can be tested without a server.
+///
+/// [`rpc`] already carries the skip for the parts that spawn a real `codex`
+/// (`Session::spawn`, `hooks_list`, `config_batch_write`), the same way
+/// [`workspace_trusted`] is split from the decision in
+/// [`workspace_trusted_in`]. What was left under the spawn is the policy:
+/// that an empty hook state is not written, and that a workspace already
+/// recorded as trusted is not written again. Policy no test can reach is
+/// policy that comes back inverted, and both of those writes outlive the run.
+trait CodexRpc {
+    /// The workspace's hooks, each with the hash the server computed for it.
+    fn hooks(&self) -> Result<Vec<rpc::HookEntry>, String>;
+    /// One `config/batchWrite` edit.
+    fn write(
+        &self,
+        key_path: String,
+        value: Value,
+        merge_strategy: MergeStrategy,
+    ) -> Result<(), String>;
+}
+
+/// The real server: one spawn per exchange, which is what [`rpc`] does.
+struct AppServer<'a> {
+    workspace: &'a Path,
+    timeout: Duration,
+}
+
+impl CodexRpc for AppServer<'_> {
+    // No logic of its own: each of these is the `rpc` function of the same
+    // name with this struct's two fields passed on, and both of those
+    // already carry `mutants::skip` because they spawn a real `codex`. A
+    // mutant here is a mutant in code no test can reach, reported as a
+    // survivor; the decisions worth mutating live in `clear_codex_with`,
+    // which the fake below does reach.
+    #[cfg_attr(test, mutants::skip)] // delegates to `rpc::hooks_list`, which spawns a real `codex`
+    fn hooks(&self) -> Result<Vec<rpc::HookEntry>, String> {
+        rpc::hooks_list(self.workspace, self.timeout)
+    }
+
+    #[cfg_attr(test, mutants::skip)] // delegates to `rpc::config_batch_write`, which spawns a real `codex`
+    fn write(
+        &self,
+        key_path: String,
+        value: Value,
+        merge_strategy: MergeStrategy,
+    ) -> Result<(), String> {
+        rpc::config_batch_write(
+            self.workspace,
+            key_path,
+            value,
+            merge_strategy,
+            self.timeout,
+        )
+    }
+}
+
 fn clear_codex(home: &Path, workspace: &Path, timeout: Duration) -> Result<String, String> {
     let real = fs::canonicalize(workspace)
         .map_err(|e| format!("codex: cannot resolve {}: {e}", workspace.display()))?
         .to_string_lossy()
         .into_owned();
+    clear_codex_with(
+        &real,
+        &codex_config(home),
+        &AppServer { workspace, timeout },
+    )
+}
+
+/// The decisions, over a transport a test can stand in for.
+fn clear_codex_with(real: &str, config: &Path, rpc: &dyn CodexRpc) -> Result<String, String> {
     let mut written = Vec::new();
 
-    let entries = rpc::hooks_list(workspace, timeout)?;
+    let entries = rpc.hooks()?;
     let state = match rpc::hook_state(&entries) {
         // An enabled hook the server reported no current hash for cannot be
         // trusted by this command, and guessing at one is the whole thing the
@@ -138,27 +204,23 @@ fn clear_codex(home: &Path, workspace: &Path, timeout: Duration) -> Result<Strin
     };
     if !state.is_empty() {
         let count = state.len();
-        rpc::config_batch_write(
-            workspace,
+        rpc.write(
             HOOKS_STATE_KEY.to_string(),
             Value::Object(state),
             MergeStrategy::Upsert,
-            timeout,
         )?;
         written.push(format!(
             "{count} enabled hook(s) trusted at their current hashes"
         ));
     }
 
-    if workspace_trusted(&codex_config(home), &real) {
+    if workspace_trusted(config, real) {
         written.push(format!("{real} was already trusted"));
     } else {
-        rpc::config_batch_write(
-            workspace,
-            rpc::trust_key_path(&real),
+        rpc.write(
+            rpc::trust_key_path(real),
             Value::String(TRUSTED.to_string()),
             MergeStrategy::Replace,
-            timeout,
         )?;
         written.push(format!("{real} marked {TRUSTED}"));
     }
@@ -329,7 +391,7 @@ fn write_private(path: &Path, value: &Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    let tmp = path.with_extension("json.tmp");
+    let tmp = temp_for(path);
     fs::write(&tmp, format!("{text}\n")).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
         .map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
@@ -337,8 +399,29 @@ fn write_private(path: &Path, value: &Value) -> Result<(), String> {
         .map_err(|e| format!("rename {} into {}: {e}", tmp.display(), path.display()))
 }
 
+/// Distinguishes two writers of the same path inside one process.
+static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The temp path a write to `path` goes through.
+///
+/// Unique per writer rather than fixed: two callers writing the same file
+/// would otherwise share `<path>.tmp`, and the first `rename` takes it out
+/// from under the second, which then reports a rename that failed on a file
+/// it wrote itself. Two tests in one binary are enough to hit that, and two
+/// concurrent processes are the same race with a longer window. The real
+/// extension stays in the name so a watcher watching `.claude.json` does not
+/// try to parse a half-written document.
+fn temp_for(path: &Path) -> std::path::PathBuf {
+    let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.{seq}.tmp", std::process::id()));
+    path.with_file_name(name)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+
     use super::*;
 
     fn config(value: Value) -> Value {
@@ -662,5 +745,208 @@ mod tests {
     #[test]
     fn an_unparsable_config_is_not_evidence_of_trust() {
         assert!(!workspace_trusted_in("this is not toml [", "/work/repo"));
+    }
+
+    /// A `codex` app-server that answers `hooks/list` from a fixture and
+    /// records every `config/batchWrite` made through it. The real one is a
+    /// spawned child speaking a line protocol; this stands in for it so the
+    /// policy above it is reachable at all.
+    struct FakeAppServer {
+        hooks: Value,
+        writes: Mutex<Vec<(String, Value, MergeStrategy)>>,
+    }
+
+    impl FakeAppServer {
+        fn answering(hooks: Value) -> Self {
+            Self {
+                hooks,
+                writes: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn keys(&self) -> Vec<String> {
+            self.writes
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(key, _, _)| key.clone())
+                .collect()
+        }
+    }
+
+    impl CodexRpc for FakeAppServer {
+        fn hooks(&self) -> Result<Vec<rpc::HookEntry>, String> {
+            Ok(rpc::parse_hook_entries(&self.hooks))
+        }
+
+        fn write(
+            &self,
+            key_path: String,
+            value: Value,
+            merge_strategy: MergeStrategy,
+        ) -> Result<(), String> {
+            self.writes
+                .lock()
+                .unwrap()
+                .push((key_path, value, merge_strategy));
+            Ok(())
+        }
+    }
+
+    /// A Codex `hooks/list` answer carrying one enabled hook the server
+    /// reported a current hash for, which is what makes hook state non-empty.
+    fn one_trustable_hook() -> Value {
+        serde_json::json!([{ "hooks": [{
+            "enabled": true,
+            "trust_status": "untrusted",
+            "key": "session-start",
+            "current_hash": "abc123",
+        }] }])
+    }
+
+    #[test]
+    fn an_empty_hook_state_is_not_written_but_the_trust_level_still_is() {
+        // The two writes are independent, and the report has to keep them so.
+        // Writing an empty `hooks.state` would be a write that records
+        // nothing and a line claiming hooks were trusted when none were.
+        let home = own_dir("codex-empty-hooks");
+        let config = home.join("config.toml");
+        let server = FakeAppServer::answering(serde_json::json!([{ "hooks": [] }]));
+
+        let detail =
+            clear_codex_with("/work/repo", &config, &server).expect("the exchange succeeds");
+
+        assert_eq!(
+            server.keys(),
+            vec![rpc::trust_key_path("/work/repo")],
+            "only the trust level is written: {detail}"
+        );
+        assert!(
+            !detail.contains("hook(s) trusted"),
+            "no hook was trusted, so nothing may say one was: {detail}"
+        );
+        assert!(detail.contains("/work/repo marked trusted"), "{detail}");
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn hook_state_is_written_once_per_hook_the_server_reported_a_hash_for() {
+        let home = own_dir("codex-hooks");
+        let config = home.join("config.toml");
+        let server = FakeAppServer::answering(one_trustable_hook());
+
+        let detail =
+            clear_codex_with("/work/repo", &config, &server).expect("the exchange succeeds");
+
+        let writes = server.writes.lock().unwrap().clone();
+        assert_eq!(writes.len(), 2, "{writes:?}");
+        assert_eq!(writes[0].0, HOOKS_STATE_KEY);
+        assert_eq!(writes[0].2, MergeStrategy::Upsert);
+        assert_eq!(
+            writes[0].1["session-start"]["trusted_hash"],
+            Value::String("abc123".to_string()),
+            "the hash written is the one the server computed, not one read from disk"
+        );
+        assert_eq!(writes[1].0, rpc::trust_key_path("/work/repo"));
+        assert_eq!(writes[1].2, MergeStrategy::Replace);
+        assert!(detail.contains("1 enabled hook(s) trusted"), "{detail}");
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_workspace_the_config_already_records_as_trusted_is_not_written_again() {
+        let home = own_dir("codex-already-trusted");
+        let config = home.join("config.toml");
+        fs::write(
+            &config,
+            "[projects.\"/work/repo\"]\ntrust_level = \"trusted\"\n",
+        )
+        .unwrap();
+        let server = FakeAppServer::answering(serde_json::json!([{ "hooks": [] }]));
+
+        let detail =
+            clear_codex_with("/work/repo", &config, &server).expect("the exchange succeeds");
+
+        assert!(
+            server.keys().is_empty(),
+            "a trust the config already records is not re-granted: {detail}"
+        );
+        assert!(detail.contains("was already trusted"), "{detail}");
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_workspace_the_config_does_not_record_as_trusted_is_marked_trusted() {
+        let home = own_dir("codex-not-trusted");
+        let config = home.join("config.toml");
+        fs::write(
+            &config,
+            "[projects.\"/work/other\"]\ntrust_level = \"trusted\"\n",
+        )
+        .unwrap();
+        let server = FakeAppServer::answering(serde_json::json!([{ "hooks": [] }]));
+
+        let detail =
+            clear_codex_with("/work/repo", &config, &server).expect("the exchange succeeds");
+
+        assert_eq!(
+            server.keys(),
+            vec![rpc::trust_key_path("/work/repo")],
+            "another folder's trust does not cover this one: {detail}"
+        );
+        assert!(detail.contains("/work/repo marked trusted"), "{detail}");
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_hook_the_server_cannot_hash_refuses_the_whole_write() {
+        let home = own_dir("codex-unhashable");
+        let config = home.join("config.toml");
+        let server = FakeAppServer::answering(serde_json::json!([{ "hooks": [{
+            "enabled": true,
+            "trust_status": "untrusted",
+            "key": "session-start",
+        }] }]));
+
+        let err = clear_codex_with("/work/repo", &config, &server).unwrap_err();
+
+        assert!(
+            server.keys().is_empty(),
+            "a partial map is not written: {err}"
+        );
+        assert!(err.contains("no current hash"), "{err}");
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn two_writers_of_one_file_never_share_a_temp_path() {
+        // The bug this pins: the temp name was fixed, so two tests writing
+        // the same `~/.claude.json` in parallel shared `<home>/.claude.json
+        // .tmp` and the first rename took it away from the second — a run
+        // that reported failing to rename a file it had just written.
+        let path = Path::new("/home/someone/.claude.json");
+        let first = temp_for(path);
+        let second = temp_for(path);
+        assert_ne!(first, second, "two writers must not share one temp path");
+        assert_eq!(
+            first.parent(),
+            path.parent(),
+            "the rename is within the one directory"
+        );
+        assert_eq!(
+            first.extension(),
+            Some(std::ffi::OsStr::new("tmp")),
+            "the temp file is not spelled like the file it becomes: {}",
+            first.display()
+        );
+        assert!(
+            first
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with(".claude.json"),
+            "{}",
+            first.display()
+        );
     }
 }

@@ -185,7 +185,15 @@ pub(crate) struct ScriptTerminal {
 impl ScriptTerminal {
     /// Spawn `argv` under a pty in `cwd`. The caller owns the child's
     /// lifetime; [`ScriptTerminal::stop`] ends it.
-    #[cfg_attr(test, mutants::skip)] // the one-line adapter over `script`; the policy above is tested directly
+    //
+    // The `script` invocation is the one thing here whose branches are
+    // chosen by `cfg!(target_os)`: only one of the two is compiled into a
+    // given test run, so a mutant in the other survives however many real
+    // children the tests spawn, and would be reported as a survivor nothing
+    // can kill. The rest is not unverified — the child returned here is what
+    // every driver test in this module reads, and `shell_quote`, which the
+    // util-linux branch is built on, carries its own test.
+    #[cfg_attr(test, mutants::skip)] // platform-exclusive argv branches; only one is compiled per test run
     pub(crate) fn spawn(
         argv: &[String],
         cwd: &Path,
@@ -264,7 +272,13 @@ impl ScriptTerminal {
     /// `None` means the budget ran out with the child still running: the
     /// caller owns the teardown, and a login left waiting is reported rather
     /// than waited on.
-    #[cfg_attr(test, mutants::skip)] // the process wait itself, bounded by its own argument
+    //
+    // The one caller is `auth::authenticate`, which runs a real
+    // `claude auth login` and a real browser flow; no test reaches this
+    // without both. The budget policy around a launch that does settle is
+    // tested where it lives — `drive_until_settled` is not skipped, and its
+    // own deadline (`>= deadline`) carries the mutants this would duplicate.
+    #[cfg_attr(test, mutants::skip)] // reached only under `--authenticate`, which runs a real login
     pub(crate) fn wait_for_exit(&mut self, budget: Duration) -> Option<ExitStatus> {
         let deadline = Instant::now() + budget;
         loop {

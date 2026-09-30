@@ -130,6 +130,18 @@ fn devin_is_verified_and_never_rewritten() {
         verified.iter().any(|line| line.starts_with("devin:")),
         "Devin's absence from the rewrite list must read as a decision: {report}"
     );
+    // The path has to be the real one under the HOME the run was given. A
+    // line that only says "devin: something verified" is also what an empty
+    // home directory produces, and then the report names a file the user
+    // does not have.
+    let home = neutral_home();
+    assert!(
+        verified.iter().any(
+            |line| line.contains(&home.join(".config/devin/config.json").display().to_string())
+        ),
+        "the verified path is under the HOME the run was given ({}): {report}",
+        home.display()
+    );
 }
 
 #[test]

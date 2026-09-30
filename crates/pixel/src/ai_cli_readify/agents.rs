@@ -99,11 +99,15 @@ pub(crate) fn probe_argv(
     minimal: bool,
 ) -> Vec<String> {
     let owned = str::to_string;
+    // One spelling for the binary. `executable` is the accessor for it, and a
+    // copy of the name here is what drifts the day the accessor moves — the
+    // test that says every lane runs its own binary cannot see a copy.
+    let exe = agent.executable();
     match agent {
         // `exec` is Codex's non-interactive path; `-s read-only` bounds the
         // probe so a model that ignores the prompt still cannot write.
         Agent::Codex => [
-            "codex",
+            exe,
             "--no-daemon",
             "exec",
             "--json",
@@ -128,7 +132,7 @@ pub(crate) fn probe_argv(
             // while the argv passes `--safe-mode`; the argv is the half that
             // is current.
             let mut argv: Vec<String> = [
-                "claude",
+                exe,
                 "-p",
                 prompt,
                 "--model",
@@ -152,7 +156,7 @@ pub(crate) fn probe_argv(
             argv
         }
         Agent::Antigravity => [
-            "agy",
+            exe,
             "-p",
             prompt,
             "--output-format",
@@ -176,7 +180,7 @@ pub(crate) fn probe_argv(
         // `--export` writes the trajectory, which is what makes Devin's
         // result inspectable rather than a bare exit code.
         Agent::Devin => [
-            "devin",
+            exe,
             "--permission-mode",
             "auto",
             "--export",
@@ -193,7 +197,7 @@ pub(crate) fn probe_argv(
 /// Devin's own auth check, which the reference treats as the readiness
 /// signal for it (success iff the output starts a line with `Logged in`).
 pub(crate) fn devin_auth_argv() -> Vec<String> {
-    ["devin", "auth", "status"]
+    [Agent::Devin.executable(), "auth", "status"]
         .iter()
         .map(|s| str::to_string(s))
         .collect()
