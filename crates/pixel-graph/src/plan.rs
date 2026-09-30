@@ -6,6 +6,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+#[cfg(test)]
+use crate::extract::ImportBinding;
 use crate::store::GraphStore;
 use crate::{concept_resolve, concept_resolve::ResolveOptions};
 
@@ -2209,16 +2211,16 @@ mod tests {
         let page = file(&mut store, "src/page.tsx");
         let db = file(&mut store, "src/db.ts");
         store
-            .insert_import(pay, "stripe", None, &["Stripe".into()])
+            .insert_import(pay, "stripe", None, &[ImportBinding::named("Stripe")])
             .unwrap();
         store
             .insert_import(pay, "./middleware", Some(mid), &[])
             .unwrap();
         store
-            .insert_import(page, "./pay", Some(pay), &["pay".into()])
+            .insert_import(page, "./pay", Some(pay), &[ImportBinding::named("pay")])
             .unwrap();
         store
-            .insert_import(db, "drizzle-orm", None, &["sql".into()])
+            .insert_import(db, "drizzle-orm", None, &[ImportBinding::named("sql")])
             .unwrap();
 
         // Seeds: pay.ts + db.ts. middleware arrives via the import-out hop;
