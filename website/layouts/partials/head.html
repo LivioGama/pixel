@@ -66,7 +66,7 @@
   {{ if .publisher }}{{ $publisher = dict "@id" $id }}{{ end }}
   {{ if .creator }}{{ $creators = $creators | append (dict "@id" $id) }}{{ end }}
 {{ end }}
-{{ range partial "objections.html" (dict "abs" true) }}
+{{ range partial "objections.html" (dict "abs" true "home" true) }}
   {{ $faq = $faq | append (dict "@type" "Question" "name" .question "acceptedAnswer" (dict "@type" "Answer" "text" .answer)) }}
 {{ end }}
 {{ $graph := slice

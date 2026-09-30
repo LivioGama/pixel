@@ -9,7 +9,7 @@ enableGitInfo = true
 disableKinds = ["taxonomy", "term", "RSS"]
 
 [params]
-description = "A local code index for AI coding agents. Your agent queries Pixel instead of reading files: Whole-file versus signatures: 94.5% less read volume at the median on eight pinned large files; tokens estimated from bytes ÷ 4."
+description = "A local code index that gives coding agents a map of your repository and reduces whole-file reads. Try it on your own code; evidence and limits are documented."
 github_url = "https://github.com/LivioGama/pixel"
 repo = "LivioGama/pixel"
 # The nav shows the repository's GitHub star count only from this many up:
