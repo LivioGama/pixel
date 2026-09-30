@@ -169,12 +169,17 @@ main h2 { position: relative; }
 }
 .cmd__copy:hover { background: var(--line); }
 
-/* ---------- hero ---------- */
+/* ---------- hero ----------
+   Left: what Pixel is, the title, the lede, one call to action, the agents
+   by name, the trust lines. Right, a little wider: the agent session.
+   Both columns start at the top: the session's height follows the file
+   on screen, and a centred left column would move with it. */
 .hero {
-  display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: clamp(32px, 5vw, 80px); align-items: center;
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: clamp(32px, 4.5vw, 72px); align-items: start;
   padding-block: clamp(32px, 6vh, 72px) clamp(56px, 10vh, 112px);
 }
 @media (max-width: 1000px) { .hero { grid-template-columns: minmax(0, 1fr); } }
+.hero__kind { margin: 0 0 clamp(14px, 1.8vw, 22px); font: 500 0.78rem/1.3 var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--green-hi); }
 .hero__title {
   font: 700 clamp(3.6rem, 8.4vw, 8.4rem)/0.86 var(--display);
   font-variation-settings: "ELSH" 2, "ELGR" 1.5;
@@ -183,7 +188,7 @@ main h2 { position: relative; }
 .hero__title span { display: block; white-space: nowrap; }
 /* A sentence per line is too long for one unbroken line at the short
    title's size: smaller, and each sentence may wrap, balanced. */
-.hero__title--long { font-size: clamp(2.8rem, 5.2vw, 5.2rem); line-height: 0.9; }
+.hero__title--long { font-size: clamp(2.8rem, 4.6vw, 4.6rem); line-height: 0.9; }
 .hero__title--long span { white-space: normal; text-wrap: balance; }
 .hero__title--long span + span { margin-top: 0.12em; }
 @media (prefers-reduced-motion: no-preference) {
@@ -193,33 +198,26 @@ main h2 { position: relative; }
   from { font-variation-settings: "ELSH" 0, "ELGR" 1.5; opacity: 0.4; }
   to { font-variation-settings: "ELSH" 2, "ELGR" 1.5; opacity: 1; }
 }
-.hero__for { text-wrap: balance; display: flex; align-items: center; gap: 12px; margin: 0 0 clamp(18px, 2.4vw, 28px); font-size: 0.98rem; line-height: 1.35; color: var(--ink-soft); }
-.hero__marks { display: inline-flex; flex: none; }
-.hero__mark { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 50%; background: var(--panel); box-shadow: 0 0 0 2px var(--ground), inset 0 0 0 1px var(--cell-edge); color: var(--ink); }
-.hero__mark + .hero__mark { margin-left: -8px; }
-.hero__mark svg { width: 16px; height: 16px; }
+.hero__lede { font-size: clamp(1.1rem, 1.5vw, 1.3rem); line-height: 1.5; color: var(--ink-soft); max-width: 32em; margin: clamp(20px, 2.6vw, 30px) 0 0; }
+.hero__cta { display: flex; flex-wrap: wrap; gap: 12px 24px; margin-top: 28px; align-items: center; }
+.hero__how { font-weight: 600; }
+.hero__works { margin-top: 28px; }
+.hero__works-label { margin: 0 0 10px; font-size: 0.82rem; color: var(--ink-soft); }
+.hero__agents { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px 6px; max-width: 30rem; }
+.hero__agents li { display: grid; justify-items: center; gap: 6px; min-width: 0; }
+.hero__mark { display: grid; place-items: center; width: 36px; height: 36px; border-radius: var(--r); background: var(--panel); box-shadow: inset 0 0 0 1px var(--cell-edge); color: var(--ink); }
+.hero__mark svg { width: 20px; height: 20px; }
 /* Pi's mark fills its whole viewBox where the others keep a margin: drawn
    at full size it reads heavier than its neighbours. */
-.hero__mark--pi svg { width: 12px; height: 12px; }
-.hero__lede { font-size: clamp(1.15rem, 1.8vw, 1.4rem); line-height: 1.5; color: var(--ink-soft); max-width: 32em; margin: clamp(24px, 3vw, 36px) 0 0; }
-.hero__cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; align-items: stretch; }
-.hero__cta .cmd { flex: 1 1 420px; min-width: 0; }
-/* What a visitor checks before pasting the command, one quiet line under it. */
-.hero__trust { margin: 14px 0 0; font-size: 0.88rem; color: var(--ink-soft); }
-.hero__script { margin: 12px 0 0; font-size: 0.88rem; color: var(--ink-soft); max-width: 62ch; }
-.hero__script code { background: var(--panel); padding: 1px 6px; border-radius: 3px; }
-.hero__trust code, .closing__lede code { background: var(--panel); padding: 1px 6px; border-radius: 3px; }
-/* The agent prompt beside the command: the same height as the command's box, never wider than its label. */
-.hero__agent { flex: 0 1 auto; padding-block: 12px; font-size: 0.95rem; cursor: pointer; }
-/* The step after a successful copy (the script in partials/footer.html unhides it). */
-.hero__next { margin: 14px 0 0; padding-left: 14px; font-size: 0.95rem; color: var(--ink); box-shadow: inset 2px 0 0 var(--green); }
-.hero__next code { background: var(--panel); padding: 1px 6px; border-radius: 3px; }
-/* On a phone the command holds one line: a break inside it reads like two commands. */
-@media (max-width: 480px) {
-  .hero__cta .cmd code { font-size: 0.8rem; }
-  .hero__cta .cmd__prompt { display: none; }
-  .hero__cta .cmd__copy { padding-inline: 10px; }
-}
+.hero__mark--pi svg { width: 15px; height: 15px; }
+.hero__agent-name { font-size: 0.7rem; line-height: 1.2; color: var(--ink-soft); text-align: center; }
+.hero__claim { margin: 24px 0 0; font-size: 0.98rem; line-height: 1.45; color: var(--ink-soft); }
+.hero__claim strong { color: var(--ink); font-weight: 650; }
+.hero__facts { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 18px; margin: 10px 0 0; font-size: 0.85rem; color: var(--ink-soft); }
+.hero__facts span { display: inline-flex; align-items: center; gap: 6px; }
+.hero__facts small { font-size: 0.78rem; opacity: 0.8; }
+.hero__facts .px-icon { color: var(--green-hi); }
+.closing__lede code { background: var(--panel); padding: 1px 6px; border-radius: 3px; }
 .hero__down { grid-column: 1 / -1; justify-self: center; display: grid; place-items: center; width: 48px; height: 48px; margin-top: clamp(8px, 3vh, 32px); color: var(--green-hi); border-radius: var(--r); }
 .hero__down:hover { background: var(--panel); }
 @media (prefers-reduced-motion: no-preference) {
@@ -227,57 +225,73 @@ main h2 { position: relative; }
 }
 @keyframes nudge { 0%, 100% { transform: translateY(-3px); opacity: 0.6; } 50% { transform: translateY(5px); opacity: 1; } }
 
-/* The token wall: the page's one big moment. */
-.wall { margin: 0; }
-@media (max-width: 1000px) { .wall { margin-top: 24px; } }
-.wall__meter { margin-bottom: 18px; }
-/* Which side of the comparison the wall shows: coral while it is the
-   full read, green once it is the answer through Pixel, with the saving. */
-.wall__state { margin: 0 0 10px; }
-.wall__state span {
-  display: inline-block; padding: 4px 8px; border-radius: 3px; font: 600 0.72rem/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
-  color: var(--coral); background: color-mix(in srgb, var(--coral) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--coral) 45%, transparent);
-}
-.wall.is-done .wall__state span { color: var(--green-hi); background: color-mix(in srgb, var(--green) 14%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--green) 50%, transparent); }
-.wall__delta {
-  display: inline-block; vertical-align: 0.35em; margin-left: 6px; padding: 6px 9px; border-radius: var(--r);
-  font: 600 1rem/1 var(--mono); letter-spacing: 0; color: var(--on-green); background: var(--green);
-  opacity: 0; transform: scale(0.6);
-}
-.wall.is-done .wall__delta { opacity: 1; transform: none; }
-/* Reduced motion lands on the final state at once (final() sets .is-done
-   on load): the chip and the badge only animate when motion is welcome. */
-@media (prefers-reduced-motion: no-preference) {
-  .wall__state span { transition: color 0.4s ease, background-color 0.4s ease, box-shadow 0.4s ease; }
-  .wall__delta { transition: opacity 0.3s ease 0.2s, transform 0.4s cubic-bezier(0.3, 1.6, 0.5, 1) 0.2s; }
-}
-.wall__label { margin: 0; font-size: 1.05rem; color: var(--ink-soft); }
-.wall__count { margin: 0; font: 700 clamp(2.6rem, 5vw, 4rem)/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; font-variant-numeric: tabular-nums; color: var(--coral); transition: color 0.4s ease; }
-.wall__count { margin-top: 6px; }
-.wall.is-done .wall__count { color: var(--green-hi); }
-.wall__grid { display: grid; grid-template-columns: repeat(50, minmax(0, 1fr)); gap: 2px; }
-.wall__grid span { aspect-ratio: 1; border-radius: 1px; background: var(--coral); }
-@media (prefers-reduced-motion: no-preference) {
-  .wall__grid span { transition: opacity 0.25s ease, transform 0.9s cubic-bezier(0.6, 0, 0.2, 1), background-color 0.3s ease; }
-}
-.wall__grid .is-gone { opacity: 0.07; }
-.wall__grid .is-kept { background: var(--green); }
-.wall__grid .is-kept.is-waiting { background: var(--coral); }
-.wall.is-done .wall__grid .is-kept { box-shadow: 0 0 10px rgba(34, 197, 94, 0.55); position: relative; z-index: 1; }
-.wall__caption { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; margin-top: 18px; font-size: 0.88rem; color: var(--ink-soft); }
-.wall__unit { flex: 1 1 100%; order: 3; }
-.wall__replay { font: 600 0.85rem/1 var(--sans); color: var(--ink); background: var(--panel); border: 0; border-radius: var(--r); padding: 9px 14px; cursor: pointer; }
-.wall__replay:hover { background: var(--line); }
-/* Hidden but still holding its place, so the caption does not grow when it appears. */
-.wall__replay[hidden] { display: inline-block; visibility: hidden; opacity: 0; }
-.wall__replay { transition: opacity 0.3s ease; }
-@media (max-width: 760px) {
-  .wall__grid { grid-template-columns: repeat(40, minmax(0, 1fr)); gap: 2px; }
+/* The agent session: the question, the read without Pixel (coral), the
+   command the agent picks (green), its output, the sum. One square is 25
+   estimated tokens on both fields, so their areas compare. */
+.session { margin: 0; display: grid; gap: 10px; min-width: 0; }
+@media (max-width: 1000px) { .session { margin-top: 12px; } }
+.session__tabs { display: flex; flex-wrap: wrap; gap: 6px; padding-right: 110px; }
+.session__tab { font: 500 0.85rem/1 var(--sans); color: var(--ink-soft); background: transparent; border: 1px solid var(--line); border-radius: 2px; padding: 8px 12px; cursor: pointer; }
+.session__tab span { opacity: 0.7; margin-left: 3px; }
+.session__tab:hover { color: var(--ink); }
+.session__tab[aria-selected="true"] { color: var(--ink); background: var(--panel); border-color: var(--green); }
+.session__shell { position: relative; display: grid; gap: 10px; min-width: 0; padding: 18px 20px; border: 1px solid var(--line); border-radius: var(--r); background: #07170f; font: 400 0.84rem/1.6 var(--mono); }
+.session__panel { display: grid; gap: 10px; min-width: 0; }
+.session__panel[hidden] { display: none; }
+.session__median { position: absolute; top: -46px; right: -10px; z-index: 1; margin: 0; padding: 8px 12px; border-radius: 3px; background: var(--green); color: var(--on-green); font: 500 0.72rem/1.2 var(--sans); text-align: center; transform: rotate(3deg); box-shadow: 0 0 24px rgba(34, 197, 94, 0.35); }
+.session__median strong { display: block; font: 700 1.7rem/1 var(--display); }
+.session__ask { margin: 0; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session__who { color: var(--green-hi); }
+.session__who::after { content: " \203A"; }
+.session__row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: baseline; margin: 0; padding-top: 8px; border-top: 1px dashed var(--line); }
+.session__row em { font-style: normal; font-size: 0.9em; padding: 1px 6px; border-radius: 2px; }
+.session__row--waste em { background: color-mix(in srgb, var(--coral) 16%, transparent); color: var(--coral); }
+.session__row--kept em { background: color-mix(in srgb, var(--green) 16%, transparent); color: var(--green-hi); }
+.session__row code { color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: inherit; }
+.session__row strong { font: 700 1.6rem/1 var(--display); font-variant-numeric: tabular-nums; }
+.session__row--waste strong { color: var(--coral); }
+.session__row--kept strong { color: var(--green-hi); }
+.session__step { display: grid; gap: 6px; }
+.session__field { display: block; width: 100%; }
+.session__auto { margin: 0; padding: 8px 12px; border: 1px solid var(--green); border-radius: 3px; background: color-mix(in srgb, var(--green) 14%, transparent); color: var(--ink); font: 500 0.98rem/1.35 var(--sans); }
+.session__auto strong { color: var(--green-hi); font-weight: 700; }
+.session__out { display: grid; padding-left: 12px; border-left: 2px solid var(--green); color: var(--ink-soft); }
+.session__out span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.session__sum { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.session__sum p { margin: 0; font: 700 2.1rem/1 var(--display); color: var(--ink-soft); }
+.session__sum small { font: 500 0.95rem/1 var(--sans); }
+.session__from { color: var(--coral); }
+.session__to { color: var(--green-hi); }
+.session__saved { font: 500 0.82rem/1 var(--sans); color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 6px 11px; }
+.session__saved strong { color: var(--green-hi); }
+.session__foot { margin: 0; font: 400 0.78rem/1.5 var(--sans); color: var(--ink-soft); }
+.session__replay { font: inherit; color: var(--green-hi); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+/* Typing and reveal states, set only by the script while it plays. */
+.session__step { transition: opacity 0.25s ease; }
+.session__step.is-off { opacity: 0; }
+.is-typing::after { content: "\258D"; color: var(--green-hi); animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.session__auto.is-pop { animation: pop 0.6s ease-out; }
+@keyframes pop { 0% { transform: scale(0.96); box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.6); } 60% { transform: scale(1.02); box-shadow: 0 0 0 10px rgba(74, 222, 128, 0); } 100% { transform: none; } }
+@media (prefers-reduced-motion: reduce) { .session__step { transition: none; } .is-typing::after, .session__auto.is-pop { animation: none; } }
+@media (max-width: 560px) {
+  .session__shell { padding: 14px 12px; font-size: 0.78rem; }
+  .session__tabs { padding-right: 0; }
+  /* No room beside the tabs: the badge joins the shell's flow as one line. */
+  .session__median { position: static; justify-self: start; order: -1; transform: none; padding: 5px 10px; box-shadow: none; }
+  .session__median strong { display: inline; font-size: 1.15rem; margin-right: 4px; }
+  .session__median br { display: none; }
+  /* The command is the point of the row: it takes its own line rather than an ellipsis. */
+  .session__row { grid-template-columns: auto minmax(0, 1fr); }
+  .session__row code { grid-column: 1 / -1; grid-row: 2; white-space: normal; overflow-wrap: anywhere; }
+  .session__row strong { justify-self: end; }
+  .session__row strong { font-size: 1.3rem; }
+  .session__sum p { font-size: 1.7rem; }
+  .hero__agent-name { font-size: 0.64rem; }
 }
 
 .key { display: inline-flex; align-items: center; gap: 8px; }
 .key::before { content: ""; width: 10px; height: 10px; border-radius: 1px; }
-.key--waste::before { background: var(--coral); }
 .key--kept::before { background: var(--green); }
 .key--likely::before { background: var(--green-dim); }
 .key--pad::before { background: var(--cell); box-shadow: inset 0 0 0 1px var(--cell-edge); }
@@ -1015,7 +1029,7 @@ a.agents__item { text-decoration: none; }
    A pixel arrow (static/cursor.svg), green over anything clickable. Fine pointers only. */
 @media (pointer: fine) {
   html { cursor: url("../cursor.svg") 1 1, auto; }
-  a, button, summary, [role="tab"], .cmd__copy, .jobs__tab, .wall__replay, .faq summary, .hero__down { cursor: url("../cursor-link.svg") 1 1, pointer; }
+  a, button, summary, [role="tab"], .cmd__copy, .jobs__tab, .session__replay, .faq summary, .hero__down { cursor: url("../cursor-link.svg") 1 1, pointer; }
 }
 
 /* ---------- splash ----------

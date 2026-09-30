@@ -8,12 +8,12 @@
   <a href="#main" class="skip">Skip to content</a>
   {{ partial "nav.html" . }}
   {{ $s := hugo.Data.scope }}
-  {{/* The token wall's file and the spread its caption quotes: data/read_savings.toml, the well-known files scripts/bench-read-savings.sh measures. */}}
+  {{/* The row marked `wall` in data/read_savings.toml (the well-known files scripts/bench-read-savings.sh measures): the Problem chapter's example file. */}}
   {{ $big := partial "wall-row.html" . }}
-  {{/* The kept files' count, range and median: partials/kept-rates.html, which /benchmarks/, /vs/ (partials/alternatives.html) and /savings/ read too. */}}
+  {{/* The kept files' count, range and median (the hero's median badge, the Results meter): partials/kept-rates.html, which /benchmarks/, /vs/ (partials/alternatives.html) and /savings/ read too. */}}
   {{ $r := partial "kept-rates.html" . }}
   {{ $bench := "benchmarks/" | relURL }}
-  {{/* The supported agents, shown by the hero's line and the Compatibility grid, from data/agents.toml (which also feeds /for/ and the /docs/ wiring table). Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
+  {{/* The supported agents, shown by the hero's Works with row and the Compatibility grid, from data/agents.toml (which also feeds /for/ and the /docs/ wiring table). Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
   {{ $agents := hugo.Data.agents.agent }}
   {{/* The prompt a visitor pastes into their agent instead of a shell: the repository README's "Let your agent install it" block, used by the Install terminal. */}}
   {{ $agentPrompt := "Install Pixel (https://github.com/LivioGama/pixel) for me: follow the \"For AI agents\" section of its README, then tell me what changed and whether `pixel doctor .` is green." }}
@@ -28,41 +28,73 @@
   <nav class="rail" aria-label="Sections" data-rail hidden></nav>
 
   <main id="main">
-    {{/* ---------- hero: the token wall ---------- */}}
+    {{/* ---------- hero: the agent session ---------- */}}
+    {{/* The session's files: data/hero_session.toml, each joined to its kept row of data/read_savings.toml by `repo`, so every figure on the right comes from the bench. */}}
+    {{ $session := slice }}
+    {{ range hugo.Data.hero_session.file }}
+      {{ $row := index (where hugo.Data.read_savings.row "repo" .repo) 0 }}
+      {{ $session = $session | append (merge $row .) }}
+    {{ end }}
+    {{ $langs := partial "languages.html" . }}
     <section class="hero wrap">
       <div class="hero__copy">
-      {{/* Who it is for, before the title: four marks a visitor recognises, then the count of the rest (the Compatibility grid lists them). The ids inside a mark get a prefix, since the grid inlines the same SVG. */}}
-      {{ $named := first 4 (where $agents "logo" "in" (slice "claude" "codex" "pi" "cursor")) }}
-      <p class="hero__for">
-        <span class="hero__marks" aria-hidden="true">{{ range $named }}<span class="hero__mark hero__mark--{{ .logo }}">{{ replace (resources.Get (printf "logos/%s.svg" .logo)).Content "lobe-icons-" "hero-lobe-icons-" | safeHTML }}</span>{{ end }}</span>
-        {{ $rest := sub (len $agents) (len $named) }}
-        <span>For {{ range $i, $a := $named }}{{ if $i }}, {{ end }}{{ $a.name }}{{ end }} and <a class="link" href="#agents" aria-label="{{ $rest }} more coding agents">{{ $rest }} more</a></span>
+      {{/* What Pixel is, before what it does: a visitor otherwise cannot tell a CLI from a hosted service or an MCP server. */}}
+      <p class="hero__kind">Open-source CLI &middot; runs on your machine</p>
+      {{/* Agents do not read every file whole: they grep, then read slices. The title names that search and the map Pixel gives instead; the lede says what the map is and that nobody learns a command. */}}
+      <h1 class="hero__title hero__title--long"><span>Agents grep your code blind.</span> <span class="glow">Pixel hands them the map.</span></h1>
+      <p class="hero__lede"><strong>A local index of signatures and callers that your agent queries before it greps.</strong> One install, zero commands to learn: you keep prompting as usual.</p>
+      {{/* No install command here: the hero convinces, the Install chapter asks for the paste, with the script one click away. */}}
+      <div class="hero__cta"><a class="button" href="#your-number">Try Pixel on your repo</a><a class="link hero__how" href="#how">See how it works</a></div>
+      {{/* Every supported agent, named: several are not household names. Marks from assets/logos/ (the ids inside a mark get a prefix, since the Compatibility grid inlines the same SVG). */}}
+      <div class="hero__works">
+        <p class="hero__works-label">Works with</p>
+        <ul class="hero__agents">
+          {{ range $agents }}<li><span class="hero__mark hero__mark--{{ .logo }}">{{ replace (resources.Get (printf "logos/%s.svg" .logo)).Content "lobe-icons-" "hero-lobe-icons-" | safeHTML }}</span><span class="hero__agent-name">{{ .name }}</span></li>{{ end }}
+        </ul>
+      </div>
+      {{/* Keep each claim true to the binary: no account, no key for anything an agent runs (`pixel classify` is off by default and uses the key the user configures), no telemetry (SECURITY.md). The code stays local; the network use the FAQ lists carries no source. Platforms: the targets release.yml builds. */}}
+      <p class="hero__claim"><strong>No account. No API key. No telemetry.</strong><br>Your code stays on your machine.</p>
+      <p class="hero__facts">
+        <span>{{ len $langs }} languages</span>
+        <span>{{ partial "icon.html" (dict "name" "scale" "size" 14) }}MIT</span>
+        <span>{{ partial "icon.html" (dict "name" "apple" "size" 14) }}macOS <small>Apple Silicon</small></span>
+        <span>{{ partial "icon.html" (dict "name" "penguin" "size" 14) }}Linux</span>
       </p>
-      {{/* The title names the pain and the mechanism, and the lede carries one figure only: the kept files' median saving (partials/kept-rates.html), the number the wall beside it illustrates and the Tokens meter rounds. Agent timings are discussed separately in Proof; the headline is a file/outline volume comparison. */}}
-      <h1 class="hero__title hero__title--long"><span>Your agent reads whole files.</span> <span class="glow">Pixel hands it the map.</span></h1>
-      <p class="hero__lede"><strong>Your coding agent opens file after file to find its way.</strong> Pixel is a local code index it asks for signatures, callers and starting files instead: a map of your repo before it reads the relevant code. The index stays on your machine.</p>
-      <div class="hero__cta"><a class="button" href="#your-number">Try Pixel on your repo</a></div>
-      {{/* Piping a script into a shell asks for trust, so the script is one click away before the paste, described in the terms a reader checks it against. Keep this line true to scripts/install.sh. */}}
-      <p class="hero__script">Read it before you run it: <a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">the script</a> is one short POSIX <code>sh</code> file, with no <code>sudo</code>. It checks the archive's SHA&#8209;256, then writes one file, <code>~/.local/bin/pixel</code>. Prefer Homebrew, or reading it in your terminal first? <a class="link" href="#install">Other ways in</a>.</p>
-      {{/* Beside the one call to action, what a visitor checks before pasting it: the platforms the release builds (release.yml), the licence and the telemetry. No star button here: the nav links GitHub. */}}
-      <p class="hero__trust">Free and MIT &middot; macOS on Apple Silicon and Linux &middot; no account, no telemetry &middot; <code>pixel uninstall</code> removes the agent wiring</p>
       </div>
 
-      <figure class="wall" data-wall data-full="{{ $big.full }}" data-pixel="{{ $big.pixel }}" data-per="25">
-        <div class="wall__meter">
-          <p class="wall__state" aria-hidden="true"><span data-wall-state>Without Pixel</span></p>
-          <p class="wall__label" data-wall-label aria-hidden="true">Your agent reading {{ $big.owner }} {{ path.Base $big.path }}, all {{ lang.FormatNumberCustom 0 $big.lines }} lines</p>
-          <p class="wall__count" aria-hidden="true"><span data-wall-count>{{ lang.FormatNumberCustom 0 $big.full }}</span> estimated tokens <span class="wall__delta">&minus;{{ math.Floor $big.saved }}%</span></p>
-          <p class="sr-only" aria-live="polite" data-wall-announce>Your agent reading {{ $big.owner }} {{ path.Base $big.path }}, all {{ lang.FormatNumberCustom 0 $big.lines }} lines: {{ lang.FormatNumberCustom 0 $big.full }} estimated tokens. Signatures through Pixel: {{ lang.FormatNumberCustom 0 $big.pixel }} estimated tokens. UTF-8 bytes divided by four.</p>
+      {{/* The same question about three well-known files: without Pixel the agent reads the file (Claude Code's Read returns at most 2,000 lines a call), with Pixel it runs `pixel list-signatures` by itself. One square is 25 estimated tokens. Rendered at rest; the script below types it out, one tab after another, and each tab replays its own. */}}
+      <figure class="session" data-session>
+        <div class="session__tabs" role="tablist" aria-label="Example file">
+          {{ range $i, $f := $session }}<button class="session__tab" type="button" role="tab" id="session-tab-{{ $i }}" aria-controls="session-{{ $i }}" aria-selected="{{ cond (eq $i 0) "true" "false" }}" tabindex="{{ cond (eq $i 0) "0" "-1" }}">{{ $f.lang }} <span>{{ $f.project }}</span></button>{{ end }}
         </div>
-        <div class="wall__grid" aria-hidden="true"></div>
-        <figcaption class="wall__caption">
-          <span class="key key--waste">{{ lang.FormatNumberCustom 0 $big.full }} estimated tokens, whole file</span>
-          <span class="key key--kept">{{ lang.FormatNumberCustom 0 $big.pixel }} estimated tokens, signatures</span>
-          {{/* One file is an example, so the caption gives the spread over every kept file, with the link to the table and the excluded one. */}}
-          <span class="wall__unit">One square is 25 estimated tokens (UTF-8 bytes ÷ 4), not billed tokens. With Pixel 0.5.0, across <a class="link" href="{{ $bench }}#well-known-files">{{ $r.count }} pinned well-known files</a>, the outline is {{ lang.FormatNumber 1 ($r.min) }} to {{ lang.FormatNumber 1 ($r.max) }}% less (median {{ lang.FormatNumber 1 $r.median }}%).</span>
-          <button class="wall__replay" type="button" data-wall-replay hidden>Replay</button>
-        </figcaption>
+        <div class="session__shell">
+          <p class="session__median"><strong>&minus;{{ lang.FormatNumber 1 $r.median }}%</strong> median <br>on {{ $r.count }} large files</p>
+          {{ range $i, $f := $session }}
+          {{ $reads := int (math.Ceil (div (float $f.lines) 2000)) }}
+          {{ $file := path.Base $f.path }}
+          <div class="session__panel" role="tabpanel" id="session-{{ $i }}" aria-labelledby="session-tab-{{ $i }}" data-full="{{ $f.full }}" data-pixel="{{ $f.pixel }}"{{ if $i }} hidden{{ end }}>
+            <p class="session__ask"><span class="session__who">you</span> <span data-type>what's in {{ $file }}?</span></p>
+            <div class="session__step">
+              <p class="session__row session__row--waste"><em>without pixel</em><code>{{ $reads }} Read call{{ if gt $reads 1 }}s{{ end }} &middot; {{ lang.FormatNumberCustom 0 $f.lines }} lines</code><strong data-count="{{ $f.full }}">{{ lang.FormatNumberCustom 0 $f.full }}</strong></p>
+              <canvas class="session__field" data-field="waste" aria-hidden="true"></canvas>
+            </div>
+            <div class="session__step">
+              <p class="session__row session__row--kept"><em>with pixel</em><code data-type>pixel list-signatures {{ $file }}</code><strong data-count="{{ $f.pixel }}">{{ lang.FormatNumberCustom 0 $f.pixel }}</strong></p>
+              <canvas class="session__field" data-field="kept" aria-hidden="true"></canvas>
+            </div>
+            <p class="session__step session__auto">&#8627; Your agent picked this command. <strong>You typed nothing.</strong></p>
+            <div class="session__out">
+              {{ range $f.sample }}<span class="session__step">{{ . }}</span>{{ end }}
+              <span class="session__step">&hellip; {{ sub $f.signatures (len $f.sample) }} more signatures</span>
+            </div>
+            <div class="session__step session__sum">
+              <p><span class="session__from">{{ lang.FormatNumberCustom 0 $f.full }}</span> <span aria-hidden="true">&rarr;</span><span class="sr-only">to</span> <span class="session__to">{{ lang.FormatNumberCustom 0 $f.pixel }}</span> <small>tokens</small></p>
+              <span class="session__saved"><strong>&minus;{{ lang.FormatNumber 1 $f.saved }}%</strong> on this file</span>
+            </div>
+          </div>
+          {{ end }}
+          <p class="session__foot">One square is 25 estimated tokens (UTF-8 bytes ÷ 4), Pixel 0.5.0 &middot; <button class="session__replay" type="button" data-session-replay>Replay</button> &middot; <a class="link" href="{{ $bench }}#well-known-files">How we measure</a></p>
+        </div>
       </figure>
       <a class="hero__down" href="#problem" aria-label="Scroll to the problem">
         <svg viewBox="0 0 14 8" width="28" height="16" aria-hidden="true" fill="currentColor"><path d="M0 0h2v2H0zM2 2h2v2H2zM4 4h2v2H4zM6 6h2v2H6zM8 4h2v2H8zM10 2h2v2h-2zM12 0h2v2h-2z"/></svg>
@@ -404,141 +436,155 @@
       return r.bottom > 0 && r.top < window.innerHeight;
     };
 
-    /* Token wall: one square per 25 tokens of a full file read. On load the
-       wall burns down to what the same question costs through Pixel, the
-       counter follows, and the survivors gather into a P. Reduced
-       motion gets the final state; Replay runs it again. */
+    /* Agent session: the hero's tabs, each a file of data/hero_session.toml.
+       The page renders every panel at rest. Once the session is on screen
+       (after the splash), the script types each tab out in turn: the
+       question, the coral field filling as the file is read, the command
+       the agent picks, the green field, its output, the sum. A tab click
+       or Replay plays one panel. Reduced motion gets the panels at rest. */
     (function () {
-      var fig = document.querySelector('[data-wall]');
+      var fig = document.querySelector('[data-session]');
       if (!fig) return;
-      var grid = fig.querySelector('.wall__grid');
-      var count = fig.querySelector('[data-wall-count]');
-      var label = fig.querySelector('[data-wall-label]');
-      var replay = fig.querySelector('[data-wall-replay]');
-      var announce = fig.querySelector('[data-wall-announce]');
-      var said = announce.textContent;
-      var full = +fig.dataset.full, kept = +fig.dataset.pixel, per = +fig.dataset.per;
-      var n = Math.round(full / per), k = Math.round(kept / per);
-      var startLabel = label.textContent;
-      var state = fig.querySelector('[data-wall-state]');
-      var startState = state.textContent;
-      var cells = [];
-      var frag = document.createDocumentFragment();
-      for (var i = 0; i < n; i++) { var c = document.createElement('span'); cells.push(c); frag.appendChild(c); }
-      grid.appendChild(frag);
-
-      // A fixed shuffle, so every visit burns the same squares.
-      var order = cells.map(function (_, i) { return i; });
-      var seed = 7;
-      for (var j = order.length - 1; j > 0; j--) {
-        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-        var r = seed % (j + 1), t = order[j]; order[j] = order[r]; order[r] = t;
-      }
-      var keep = order.slice(0, k).sort(function (a, b) { return a - b; });
-      var burn = order.slice(k);
+      var tabs = [].slice.call(fig.querySelectorAll('[role="tab"]'));
+      var panels = [].slice.call(fig.querySelectorAll('[role="tabpanel"]'));
+      var PER = 25;
+      var still = matchMedia('(prefers-reduced-motion: reduce)').matches;
       var fmt = function (v) { return Math.round(v).toLocaleString('en-US'); };
-
-      // The survivors gather into a P, for Pixel, made of exactly k squares,
-      // so "one square is 25 tokens" stays true. The bowl is a stroke-t
-      // outline, the stem takes the rest in whole rows: the search keeps the
-      // shapes whose remainder divides by t, then the one closest to a 1.6
-      // height-to-width ratio, a 3-square stroke and notched corners.
-      // Failing that, the smallest P is cut down from the stem's foot, and
-      // failing that, a plain block.
-      var outline = function (t, w, b, notch, x, y) {
-        return (x < t || y < t || y >= b - t || x >= w - t) && !(notch && x === w - 1 && (y === 0 || y === b - 1));
-      };
-      var letter = function (rows, cols) {
-        var best = null, near = null;
-        for (var t = 2; t <= 4; t++) for (var w = 3 * t; w <= 6 * t; w++) for (var b = 2 * t + 1; b <= 2 * t + 9; b++) {
-          [true, false].forEach(function (notch) {
-            var pts = [];
-            for (var y = 0; y < b; y++) for (var x = 0; x < w; x++) if (outline(t, w, b, notch, x, y)) pts.push([x, y]);
-            var rest = k - pts.length;
-            if (rest <= 0) return;
-            var len = Math.ceil(rest / t), h = b + len;
-            if (h > rows || w > cols || len < 0.6 * b || len > 1.2 * b) return;
-            for (var yy = b; yy < h; yy++) for (var xx = 0; xx < t; xx++) pts.push([xx, yy]);
-            var score = Math.abs(h / w - 1.6) + (t === 3 ? 0 : 0.2) + (notch ? 0 : 0.05);
-            var cand = { pts: pts.slice(0, k), w: w, h: h, score: score };
-            if (rest % t === 0) { if (!best || score < best.score) best = cand; }
-            else if (!near || score < near.score) near = cand;
-          });
+      var token = function (name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); };
+      /* Both fields of a panel share one square size, so their areas
+         compare; each field is as tall as its own file needs. */
+      var cols = function (w) { return w < 300 ? 50 : w < 480 ? 72 : 96; };
+      var fields = panels.map(function (p) {
+        return {
+          waste: { cv: p.querySelector('[data-field="waste"]'), total: Math.round(+p.dataset.full / PER), shown: 0, color: '--coral', alpha: 0.55, glow: 0 },
+          kept: { cv: p.querySelector('[data-field="kept"]'), total: Math.round(+p.dataset.pixel / PER), shown: 0, color: '--green-hi', alpha: 1, glow: 6 }
+        };
+      });
+      var paint = function (f) {
+        var w = f.cv.clientWidth;
+        if (!w) return;
+        var dpr = window.devicePixelRatio || 1, n = cols(w), gap = 1, cell = (w - gap * (n - 1)) / n;
+        var h = Math.ceil(f.total / n) * (cell + gap);
+        if (f.cv.width !== Math.round(w * dpr) || f.cv.height !== Math.round(h * dpr)) {
+          f.cv.style.height = h + 'px'; f.cv.width = Math.round(w * dpr); f.cv.height = Math.round(h * dpr);
         }
-        return best || near;
+        var c = f.cv.getContext('2d');
+        c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, w, h);
+        c.fillStyle = token('--cell');
+        for (var i = 0; i < f.total; i++) c.fillRect((i % n) * (cell + gap), Math.floor(i / n) * (cell + gap), cell, cell);
+        var col = token(f.color);
+        c.fillStyle = col; c.globalAlpha = f.alpha; c.shadowColor = col; c.shadowBlur = f.glow;
+        for (var k = 0; k < f.shown; k++) c.fillRect((k % n) * (cell + gap), Math.floor(k / n) * (cell + gap), cell, cell);
+        c.shadowBlur = 0; c.globalAlpha = 1;
       };
-      var gather = function () {
-        var cols = getComputedStyle(grid).gridTemplateColumns.split(' ').length;
-        var rows = Math.ceil(n / cols);
-        var a = cells[0].getBoundingClientRect(), b = cells[1].getBoundingClientRect();
-        var step = b.left - a.left;
-        var shape = letter(rows, cols);
-        if (!shape) {
-          var bw = Math.ceil(Math.sqrt(k * 1.6)), bh = Math.ceil(k / bw), pts = [];
-          for (var s = 0; s < k; s++) pts.push([s % bw, Math.floor(s / bw)]);
-          shape = { pts: pts, w: bw, h: bh };
-        }
-        var c0 = Math.floor((cols - shape.w) / 2), r0 = Math.floor((rows - shape.h) / 2);
-        keep.forEach(function (idx, s) {
-          var x = (idx % cols), y = Math.floor(idx / cols);
-          var tx = c0 + shape.pts[s][0], ty = r0 + shape.pts[s][1];
-          cells[idx].style.transform = 'translate(' + (tx - x) * step + 'px,' + (ty - y) * step + 'px)';
+      var paintPanel = function (i) { paint(fields[i].waste); paint(fields[i].kept); };
+      var cur = 0, run = 0;
+      var show = function (i) {
+        cur = i;
+        tabs.forEach(function (t, j) { t.setAttribute('aria-selected', String(j === i)); t.tabIndex = j === i ? 0 : -1; });
+        panels.forEach(function (p, j) { p.hidden = j !== i; });
+      };
+      var parts = function (i) {
+        var p = panels[i];
+        return {
+          steps: [].slice.call(p.querySelectorAll('.session__step')),
+          typed: [].slice.call(p.querySelectorAll('[data-type]')),
+          counts: [].slice.call(p.querySelectorAll('[data-count]')),
+          auto: p.querySelector('.session__auto')
+        };
+      };
+      var texts = panels.map(function (_, i) { return parts(i).typed.map(function (el) { return el.textContent; }); });
+      var rest = function (i) {
+        run++;
+        var q = parts(i);
+        q.steps.forEach(function (s) { s.classList.remove('is-off'); });
+        q.typed.forEach(function (el, j) { el.textContent = texts[i][j]; el.classList.remove('is-typing'); });
+        q.counts.forEach(function (el) { el.textContent = fmt(+el.dataset.count); });
+        q.auto.classList.remove('is-pop');
+        fields[i].waste.shown = fields[i].waste.total; fields[i].kept.shown = fields[i].kept.total;
+        paintPanel(i);
+      };
+      var wait = function (ms, id) { return new Promise(function (r) { setTimeout(function () { r(id === run); }, ms); }); };
+      var type = function (el, text, id, speed) {
+        el.classList.add('is-typing');
+        return new Promise(function (done) {
+          var n = 0;
+          (function tick() {
+            if (id !== run) { el.classList.remove('is-typing'); return done(false); }
+            el.textContent = text.slice(0, ++n);
+            if (n < text.length) setTimeout(tick, speed);
+            else { el.classList.remove('is-typing'); done(true); }
+          })();
         });
       };
-      var final = function () {
-        burn.forEach(function (i) { cells[i].className = 'is-gone'; });
-        keep.forEach(function (i) { cells[i].className = 'is-kept'; });
-        count.textContent = fmt(kept);
-        label.textContent = 'Your agent asking the same question';
-        state.textContent = 'With Pixel';
-        fig.classList.add('is-done');
-        gather();
+      var fill = function (i, key, el, ms, id) {
+        var f = fields[i][key], target = +el.dataset.count;
+        return new Promise(function (done) {
+          var t0 = null;
+          var frame = function (t) {
+            if (id !== run) return done(false);
+            if (t0 === null) t0 = t;
+            var p = Math.min(1, (t - t0) / ms), e = 1 - Math.pow(1 - p, 2);
+            f.shown = Math.round(f.total * e); el.textContent = fmt(target * e); paint(f);
+            if (p < 1) requestAnimationFrame(frame); else done(true);
+          };
+          requestAnimationFrame(frame);
+        });
       };
-      var run = function () {
-        fig.classList.remove('is-done');
-        replay.hidden = true;
-        cells.forEach(function (c) { c.className = ''; c.style.transform = ''; });
-        count.textContent = fmt(full);
-        label.textContent = startLabel;
-        state.textContent = startState;
-        announce.textContent = '';
-        var t0 = null, dur = 1800;
-        var burnt = 0;
-        keep.forEach(function (i) { cells[i].className = 'is-kept is-waiting'; });
-        var tick = function (now) {
-          if (t0 === null) t0 = now;
-          var p = Math.min(1, (now - t0) / dur);
-          var e = 1 - Math.pow(1 - p, 3);
-          var target = Math.floor(e * burn.length);
-          for (; burnt < target; burnt++) cells[burn[burnt]].className = 'is-gone';
-          count.textContent = fmt(full - (full - kept) * e);
-          if (p < 1) return requestAnimationFrame(tick);
-          keep.forEach(function (i) { cells[i].className = 'is-kept'; });
-          label.textContent = 'Your agent asking the same question';
-          state.textContent = 'With Pixel';
-          fig.classList.add('is-done');
-          announce.textContent = said;
-          setTimeout(gather, 250);
-          setTimeout(function () { replay.hidden = false; }, 1400);
-        };
-        setTimeout(function () { requestAnimationFrame(tick); }, 900);
+      /* Steps, in document order: the coral read, the green command, the
+         "you typed nothing" line, the output lines, the sum. */
+      var play = function (i, chain) {
+        var id = ++run;
+        show(i);
+        var q = parts(i), f = fields[i];
+        q.steps.forEach(function (s) { s.classList.add('is-off'); });
+        q.typed.forEach(function (el) { el.textContent = ''; });
+        q.counts.forEach(function (el) { el.textContent = '0'; });
+        f.waste.shown = 0; f.kept.shown = 0; paintPanel(i);
+        var last = q.steps.length - 1;
+        var ok = function (fn) { return function (go) { return go ? fn() : false; }; };
+        return type(q.typed[0], texts[i][0], id, 28)
+          .then(ok(function () { q.steps[0].classList.remove('is-off'); return wait(200, id); }))
+          .then(ok(function () { return fill(i, 'waste', q.counts[0], 400 + f.waste.total / 2, id); }))
+          .then(ok(function () { return wait(300, id); }))
+          .then(ok(function () { q.steps[1].classList.remove('is-off'); return type(q.typed[1], texts[i][1], id, 24); }))
+          .then(ok(function () { return fill(i, 'kept', q.counts[1], 350, id); }))
+          .then(ok(function () { q.steps[2].classList.remove('is-off'); q.auto.classList.add('is-pop'); return wait(700, id); }))
+          .then(ok(function () {
+            var p = Promise.resolve(true);
+            q.steps.slice(3, last).forEach(function (s) { p = p.then(ok(function () { s.classList.remove('is-off'); return wait(120, id); })); });
+            return p;
+          }))
+          .then(ok(function () { q.steps[last].classList.remove('is-off'); return wait(2600, id); }))
+          .then(function (go) {
+            q.auto.classList.remove('is-pop');
+            if (go && chain && i + 1 < panels.length) return play(i + 1, true);
+          });
       };
-      replay.addEventListener('click', run);
-      var t;
-      addEventListener('resize', function () {
-        clearTimeout(t);
-        t = setTimeout(function () { if (fig.classList.contains('is-done')) gather(); }, 120);
+      tabs.forEach(function (t, i) {
+        t.addEventListener('click', function () { if (still) { show(i); rest(i); } else play(i, false); });
+        t.addEventListener('keydown', function (e) {
+          var d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+          if (!d) return;
+          e.preventDefault();
+          var j = (i + d + tabs.length) % tabs.length;
+          tabs[j].focus(); tabs[j].click();
+        });
       });
-      if (matchMedia('(prefers-reduced-motion: reduce)').matches) return final();
-      // Burn only once the wall is on screen, and after the splash, so nobody misses it.
+      fig.querySelector('[data-session-replay]').addEventListener('click', function () { if (still) rest(cur); else play(cur, false); });
+      var t;
+      addEventListener('resize', function () { clearTimeout(t); t = setTimeout(function () { paintPanel(cur); }, 120); });
+      rest(0);
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { paintPanel(cur); });
+      if (still) return;
       var start = function () {
-        if (!('IntersectionObserver' in window)) return run();
+        if (!('IntersectionObserver' in window)) return play(0, true);
         var seen = new IntersectionObserver(function (e) {
           if (!e[0].isIntersecting) return;
           seen.disconnect();
-          run();
-        }, { threshold: 0.5 });
-        seen.observe(grid);
+          play(0, true);
+        }, { threshold: 0.4 });
+        seen.observe(fig);
       };
       if (document.documentElement.classList.contains('splash')) addEventListener('pixel:splashdone', start, { once: true });
       else start();
