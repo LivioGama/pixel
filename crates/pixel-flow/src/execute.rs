@@ -31,10 +31,19 @@ pub fn execute(flow: &Flow, vars: &HashMap<String, String>) -> ExecResult {
     execute_with(flow, vars, &mut AgentBrowser)
 }
 
+/// The `agent-browser` on PATH, as a [`Browser`]. The one way to drive the
+/// real browser from outside this crate; the concrete type stays private so
+/// the executable it shells out to has exactly one caller.
+pub fn agent_browser() -> impl Browser {
+    AgentBrowser
+}
+
 /// The process behind every step. `execute` drives the `agent-browser` on
 /// PATH; tests script the answers and skip the page-load waits, so every
-/// action arm is checked without a browser.
-pub(crate) trait Browser {
+/// action arm is checked without a browser. Public so a caller that
+/// interleaves its own decisions between steps (`pixel ultraflow`) drives
+/// the same single browser seam.
+pub trait Browser {
     /// Run `agent-browser --session comet <args>` and return its stdout.
     fn run(&mut self, args: &[&str]) -> Result<String, String>;
     /// Give the page time to load or navigate.
@@ -53,6 +62,25 @@ impl Browser for AgentBrowser {
     fn pause(&mut self, duration: Duration) {
         std::thread::sleep(duration);
     }
+}
+
+/// Run one step of `flow`, returning `(executed, log)`. `executed` is false
+/// for a step that ran no browser action (a conditional whose branch was
+/// empty, an unknown action).
+///
+/// `execute` runs a whole flow itself; this is the seam a caller that has to
+/// decide *between* steps uses — `pixel ultraflow` evaluates a
+/// `conditional` with a classify call instead of the text heuristic, and
+/// re-decides a step whose `on_failure` says to.
+pub fn execute_step(
+    step: &FlowStep,
+    vars: &HashMap<String, String>,
+    flow: &Flow,
+    browser: &mut dyn Browser,
+) -> Result<(bool, String), String> {
+    let mut log = String::new();
+    let executed = exec_step(step, 1, vars, flow, &mut log, 0, browser)?;
+    Ok((executed, log))
 }
 
 pub(crate) fn execute_with(
@@ -406,6 +434,19 @@ fn exec_step(
             browser.pause(dur);
             Ok(true)
         }
+        "scroll" => {
+            let spec = substitute(step.value.as_deref().unwrap_or("down"), vars);
+            let (direction, pixels) = parse_scroll(&spec);
+            let pixels = pixels.to_string();
+            log.push_str(&format!(
+                "{indent}agent-browser scroll {direction} {pixels}\n"
+            ));
+            browser
+                .run(&["scroll", direction, &pixels])
+                .map_err(|e| format!("scroll {direction} failed: {e}"))?;
+            browser.pause(SCROLL_SETTLE);
+            Ok(true)
+        }
         "conditional" => {
             let cond = substitute(step.condition.as_deref().unwrap_or("condition"), vars);
             log.push_str(&format!("{indent}# CONDITIONAL: if {cond}\n"));
@@ -642,7 +683,12 @@ fn extract_quoted_strings(s: &str) -> Vec<&str> {
 ///
 /// `url` is the page URL when the caller could read it (`get url`); a URL
 /// condition without one is not met.
-fn evaluate_condition(condition: &str, snapshot: &str, url: Option<&str>) -> bool {
+///
+/// Public as the fallback a caller with a decision engine uses when the
+/// engine cannot answer (`pixel ultraflow` asks classify first, and this is
+/// what it falls back to — a flow's conditions are written in this
+/// vocabulary so both agree).
+pub fn evaluate_condition(condition: &str, snapshot: &str, url: Option<&str>) -> bool {
     let cond_lower = condition.to_lowercase();
     let snap_lower = snapshot.to_lowercase();
 
@@ -741,6 +787,32 @@ fn close_stale_tabs(
         }
     }
     Ok(())
+}
+
+/// How far a `scroll` step moves when its `value` names no pixel amount.
+const DEFAULT_SCROLL_PX: u32 = 800;
+/// Time a `scroll` step gives the page to re-render before the next
+/// observation. Shorter than the navigation waits: a scroll never
+/// navigates.
+const SCROLL_SETTLE: Duration = Duration::from_millis(300);
+
+/// Parse a `scroll` step's `value`: `"<up|down|left|right> [pixels]"`.
+/// The direction defaults to `down` (and so does an unrecognized one); the
+/// pixel amount defaults to [`DEFAULT_SCROLL_PX`].
+fn parse_scroll(spec: &str) -> (&'static str, u32) {
+    let mut parts = spec.split_whitespace();
+    // Case-insensitive: `Up` must not silently scroll the wrong way.
+    let direction = match parts.next().map(str::to_ascii_lowercase).as_deref() {
+        Some("up") => "up",
+        Some("left") => "left",
+        Some("right") => "right",
+        _ => "down",
+    };
+    let pixels = parts
+        .next()
+        .and_then(|p| p.parse::<u32>().ok())
+        .unwrap_or(DEFAULT_SCROLL_PX);
+    (direction, pixels)
 }
 
 /// Parse a wait duration string like "120s", "10s", "load", "500ms".
@@ -1174,6 +1246,65 @@ mod tests {
         assert!(b.calls().is_empty());
         assert_eq!(b.paused, vec![Duration::from_secs(10)]);
         assert!(log.contains("# Waiting 10s"), "{log}");
+    }
+
+    /// A `scroll` step's `value` is `"<direction> [pixels]"`; every part
+    /// defaults, and the direction reaches `agent-browser scroll`.
+    #[test]
+    fn parse_scroll_defaults_the_direction_and_pixel_amount() {
+        assert_eq!(parse_scroll(""), ("down", DEFAULT_SCROLL_PX));
+        assert_eq!(parse_scroll("down"), ("down", DEFAULT_SCROLL_PX));
+        assert_eq!(parse_scroll("sideways"), ("down", DEFAULT_SCROLL_PX));
+        assert_eq!(parse_scroll("Up 400"), ("up", 400), "case-insensitive");
+        assert_eq!(parse_scroll("up"), ("up", DEFAULT_SCROLL_PX));
+        assert_eq!(parse_scroll("left"), ("left", DEFAULT_SCROLL_PX));
+        assert_eq!(parse_scroll("right"), ("right", DEFAULT_SCROLL_PX));
+        assert_eq!(parse_scroll("up 1200"), ("up", 1200));
+        // An unparseable amount is the default, not an error: a discovered
+        // step must still move the page.
+        assert_eq!(parse_scroll("down a-lot"), ("down", DEFAULT_SCROLL_PX));
+        assert_eq!(parse_scroll("up 0"), ("up", 0));
+    }
+
+    #[test]
+    fn scroll_runs_the_direction_and_amount_then_settles() {
+        let s = FlowStep {
+            value: Some("up 1200".into()),
+            ..step("scroll")
+        };
+        let mut b = Scripted::new(vec![]);
+        let (r, log) = run_step(&s, &mut b);
+        assert_eq!(r, Ok(true));
+        assert_eq!(b.calls(), vec![vec!["scroll", "up", "1200"]]);
+        assert_eq!(b.paused, vec![SCROLL_SETTLE]);
+        assert!(log.contains("agent-browser scroll up 1200"), "{log}");
+
+        // A failure is the step's failure.
+        let mut b = Scripted::new(vec![Err("no scroll")]);
+        let (r, _) = run_step(&s, &mut b);
+        assert_eq!(r, Err("scroll up failed: no scroll".to_string()));
+    }
+
+    /// `execute_step` is the seam `pixel ultraflow` drives: it must run one
+    /// step and report whether it executed, without running the flow.
+    #[test]
+    fn execute_step_runs_exactly_the_step_it_is_given() {
+        let flow = flow_with(vec![step("snapshot"), step("snapshot")]);
+        let mut b = Scripted::new(vec![]);
+        let (executed, log) = execute_step(&step("press"), &HashMap::new(), &flow, &mut b).unwrap();
+        assert!(executed);
+        assert_eq!(b.calls(), vec![vec!["press", "Enter"]]);
+        assert!(log.contains("agent-browser press Enter"), "{log}");
+        // A skipped step (unknown action) reports false, not an error.
+        let mut b = Scripted::new(vec![]);
+        let (executed, _) =
+            execute_step(&step("teleport"), &HashMap::new(), &flow, &mut b).unwrap();
+        assert!(!executed);
+        assert!(b.calls().is_empty());
+        // A failing step surfaces its error unchanged.
+        let mut b = Scripted::new(vec![Err("browser died")]);
+        let e = execute_step(&step("snapshot"), &HashMap::new(), &flow, &mut b).unwrap_err();
+        assert_eq!(e, "snapshot failed: browser died");
     }
 
     #[test]

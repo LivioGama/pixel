@@ -339,7 +339,6 @@ pixel 0.5.0 makes the call graph answer questions with proof, reach beyond one r
 | `context` | `pack-context` |
 | `env` | `edit-env` |
 | `excavate` | `dig-history` |
-| `flow` | `replay-flow` |
 | `graph` | `rebuild-graph` |
 | `history` | `commit-history` |
 | `history-search` | `search-history` |
@@ -357,6 +356,7 @@ pixel 0.5.0 makes the call graph answer questions with proof, reach beyond one r
 | `ready` | `prepare-repo` |
 | `reconcile` | `sync-branch` |
 | `release-check` | `check-release` |
+| `replay-flow` | `flow` |
 | `rescue` | `plan-rollback` |
 | `resolve` | `find-code` |
 | `review` | `review-changes` |
