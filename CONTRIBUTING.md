@@ -34,6 +34,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] If binary behavior or installed rules changed: the finished implementation unit completed the rebuild, reinstall, index and doctor checklist in AGENTS.md (see "Local install loop").
 - [ ] Every CodeRabbit finding on the pull request has an answer in its own thread — a fix naming its commit, or the reason it does not apply — and the thread is resolved (see "CodeRabbit reviews").
 - [ ] The work was tracked on [project 3, view 1](https://github.com/users/LivioGama/projects/3/views/1): the PR body opens with `Task <number>`, or with `no task: <reason>` for the declared exceptions (see [`.agents/rules/project-task.md`](.agents/rules/project-task.md)).
+- [ ] When the `coderabbit` CLI is installed and healthy: its local review of the branch converged (no actionable findings left) before the pull request was opened (see [`.agents/rules/coderabbit-cli.md`](.agents/rules/coderabbit-cli.md)). When it is not, or its quota is exhausted, skip this line and open the pull request anyway — never wait out a rate limit.
 
 ## Prerequisites
 
@@ -591,7 +592,11 @@ warnings: Conventional Commits title, description, verification evidence in
 the body (the gate commands and what was not run), and a `changelog.d/`
 fragment for a `feat`/`fix` touching `crates/`. The file is read from the
 branch under review, so a change to it is exercised by the pull request that
-carries it.
+carries it. The same review runs locally before the pull request exists:
+when the `coderabbit` CLI is installed, `coderabbit review --committed
+--base <pr-base> --agent` on the branch (the base the pull request targets)
+and its converged findings are part of opening the pull request
+([`.agents/rules/coderabbit-cli.md`](.agents/rules/coderabbit-cli.md)).
 
 **Its findings are part of the pull request, not noise around it.** Every
 one of them is answered in its own thread before a human is asked to
