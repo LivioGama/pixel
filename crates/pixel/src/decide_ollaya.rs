@@ -549,9 +549,15 @@ mod tests {
         assert_eq!(snapshot["confidence"], json!(0.85));
     }
 
-    /// A single loopback response server that records the first request
-    /// line. It has a deadline so an accidental missing connection fails.
-    fn http_once(status: &str, reply: String) -> (String, std::thread::JoinHandle<String>) {
+    /// A single loopback response server that records the request it
+    /// received. It has a deadline so an accidental missing connection fails
+    /// fast, and it reports its outcome as a `Result` instead of panicking,
+    /// so a harness failure is asserted on the test's own thread with the
+    /// reason attached rather than lost inside a `join` panic payload.
+    fn http_once(
+        status: &str,
+        reply: String,
+    ) -> (String, std::thread::JoinHandle<Result<String, String>>) {
         use std::io::{Read, Write};
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -560,27 +566,91 @@ mod tests {
         let status = status.to_string();
         let server = std::thread::spawn(move || {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
-            while std::time::Instant::now() < deadline {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    std::thread::sleep(Duration::from_millis(10));
-                    continue;
-                };
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut request = [0; 1024];
-                let received = stream.read(&mut request).unwrap();
-                write!(
-                    stream,
-                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
-                    reply.len()
-                )
-                .unwrap();
-                return String::from_utf8_lossy(&request[..received]).into_owned();
+            let (mut stream, _) = loop {
+                if std::time::Instant::now() >= deadline {
+                    return Err("no connection arrived within 5 s".to_string());
+                }
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    // Poll: nothing connected yet.
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                        ) =>
+                    {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => return Err(format!("accept failed: {e}")),
+                }
+            };
+            // Close the listening socket as soon as it has served its one
+            // connection: a just-closed ephemeral port racing the next
+            // section's fresh connect has failed with EINVAL (os error 22)
+            // on macOS, so the port goes back as early as possible.
+            drop(listener);
+            // Whatever the platform's accept semantics (Linux accepts
+            // inherit the listener's non-blocking flag, macOS sockets do
+            // not), and whatever a timed-out read reports (macOS surfaces
+            // SO_RCVTIMEO expiry as WouldBlock, os error 35), normalize to
+            // blocking mode and bound the read with the remaining deadline.
+            stream.set_nonblocking(false).unwrap();
+            let read_timeout = deadline
+                .checked_duration_since(std::time::Instant::now())
+                .filter(|left| !left.is_zero())
+                .ok_or_else(|| "connection arrived but the deadline had passed".to_string())?;
+            stream.set_read_timeout(Some(read_timeout)).unwrap();
+            // Read until the request is complete (headers terminated) or the
+            // buffer is full: a single `read` can return before the whole
+            // request has landed.
+            let mut request = Vec::new();
+            let mut chunk = [0; 1024];
+            loop {
+                match stream.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        request.extend_from_slice(&chunk[..n]);
+                        if request.len() >= 1024
+                            || request.windows(4).any(|window| window == *b"\r\n\r\n")
+                        {
+                            break;
+                        }
+                    }
+                    // The read timeout expired: the client never finished
+                    // sending its request.
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        return Err(
+                            "the client sent no complete request within the deadline".to_string()
+                        );
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(format!("read failed: {e}")),
+                }
             }
-            String::new()
+            write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                reply.len()
+            )
+            .map_err(|e| format!("write failed: {e}"))?;
+            Ok(String::from_utf8_lossy(&request).into_owned())
         });
         (base, server)
+    }
+
+    /// Unwrap the server thread's outcome on the test's own thread so a
+    /// harness failure is reported with its reason instead of `Any { .. }`.
+    fn expect_server(joined: std::thread::Result<Result<String, String>>) -> String {
+        match joined {
+            Ok(Ok(request)) => request,
+            Ok(Err(error)) => panic!("fake ollaya server failed: {error}"),
+            Err(panic) => panic!("fake ollaya server thread panicked: {panic:?}"),
+        }
     }
 
     #[test]
@@ -593,14 +663,16 @@ mod tests {
         };
         let response = http_post(&config, &json!({"model": "winnow:e4b"})).unwrap();
         assert_eq!(response, serde_json::from_str::<Value>(&reply).unwrap());
+        let request = expect_server(server.join());
         assert!(
-            server
-                .join()
-                .unwrap()
-                .starts_with("POST /v1/systemone HTTP/1.1"),
-            "the Ollaya transport must target the TypeSafe endpoint"
+            request.starts_with("POST /v1/systemone HTTP/1.1"),
+            "the Ollaya transport must target the TypeSafe endpoint: {request}"
         );
 
+        // The second listener is bound only after the first server thread is
+        // joined and its listening socket is closed: a fresh connect racing
+        // a just-closed ephemeral port has failed with EINVAL (os error 22)
+        // on macOS.
         let (base, server) = http_once("404 Not Found", "{}".to_string());
         let config = OllayaConfig {
             base: base.clone(),
@@ -612,6 +684,6 @@ mod tests {
             error.contains(&format!("is the ollaya daemon running at {base}?")),
             "{error}"
         );
-        server.join().unwrap();
+        expect_server(server.join());
     }
 }
