@@ -436,7 +436,7 @@ pub(crate) const SUBAGENT_PROMPT_FILE: &str = "subagent-prompt.md";
 pub(crate) const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
 
 /// Pi keeps operational policy in its extension and exposes only this short rule.
-pub(crate) const PI_PROMPT_ASSET: &str = "Use the pixel tool for repository retrieval and repository Git workflows. The extension injects task context and post-edit impact automatically. Policy is advisory by default; `pixel config policy enforce` (or PIXEL_POLICY=enforce) opts into supported retrieval checks, `pixel config policy off` disables them. A prior-pixel-call edit gate applies only while Pixel reports healthy — when Pixel health is unhealthy or unknown, edits stay allowed. Native compositions and unsupported capabilities remain available; a failed Pixel operation allows native tools.\n";
+pub(crate) const PI_PROMPT_ASSET: &str = "Use the pixel tool for repository retrieval and repository Git workflows. The extension injects task context and post-edit impact automatically. Policy is advisory by default; `pixel config policy enforce` (or PIXEL_POLICY=enforce) opts into supported retrieval checks, `pixel config policy off` disables them. A prior-pixel-call edit gate applies only while Pixel reports healthy — when Pixel health is unhealthy or unknown, edits stay allowed. Native compositions and unsupported capabilities remain available; a failed Pixel operation allows native tools.";
 
 const LEGACY_PI_PROMPT_BEGIN: &str = "# Pixel Retrieval Layer\n";
 const LEGACY_PI_PROMPT_END: &str = "All commands accept `[PATH]`, default current directory.\n";
@@ -1113,7 +1113,7 @@ pub(crate) fn resolve_shell_from(
 /// macOS (`dscl . -read /Users/<user> UserShell`), the passwd database
 /// elsewhere (`getent passwd <user>`, then `/etc/passwd`). `None` when the
 /// user name is unknown or nothing answers.
-#[cfg_attr(test, mutants::skip)] // process spawns and /etc reads over the tested parsers
+#[cfg_attr(test, mutants::skip)] // process spawns and /etc reads over the tested parsers; reason: mutation cannot affect observable contract, all inner parsing helpers are tested
 fn account_login_shell() -> Option<String> {
     let user = std::env::var("USER")
         .ok()
