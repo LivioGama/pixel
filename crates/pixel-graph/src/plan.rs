@@ -895,8 +895,16 @@ pub fn detect_prereqs(
     }
     // One import hop in both directions: a route delegating auth to a
     // middleware file, or a page importing the gated component, still flags.
+    // The cap is checked before each push — a single hub with hundreds of
+    // importers cannot push the scan set past PREREQ_FILE_CAP silently.
     for seed in scan.iter().map(|(id, _)| *id).collect::<Vec<_>>() {
+        if scan.len() >= PREREQ_FILE_CAP {
+            break;
+        }
         for import in store.imports_from(seed)? {
+            if scan.len() >= PREREQ_FILE_CAP {
+                break;
+            }
             if let Some(id) = import.resolved_file_id
                 && !seen.contains(&id)
                 && let Some(row) = store.file_by_id(id)?
@@ -905,7 +913,13 @@ pub fn detect_prereqs(
                 scan.push((id, row.path));
             }
         }
+        if scan.len() >= PREREQ_FILE_CAP {
+            break;
+        }
         for import in store.imports_to_file(seed)? {
+            if scan.len() >= PREREQ_FILE_CAP {
+                break;
+            }
             if !seen.contains(&import.file_id)
                 && let Some(row) = store.file_by_id(import.file_id)?
             {
@@ -913,14 +927,18 @@ pub fn detect_prereqs(
                 scan.push((import.file_id, row.path));
             }
         }
-        if scan.len() >= PREREQ_FILE_CAP {
-            break;
-        }
     }
-    scan.truncate(PREREQ_FILE_CAP);
 
     let mut out: Vec<Prereq> = Vec::new();
     let mut emitted: HashSet<(PrereqKind, String, String)> = HashSet::new();
+    // Auth hits share a min-line per (file, detail) so multiple `auth()` or
+    // `getServerSession()` calls in one file produce one Prereq that points
+    // at the topmost occurrence. Without this, the first-seen line wins
+    // and a gate on line 50 can point at line 1 (or vice versa), which
+    // misleads an agent running `pixel plan --done N` to land on the wrong
+    // line.
+    let mut auth_lines: HashMap<(String, String), u32> = HashMap::new();
+    let mut auth_order: Vec<(String, String)> = Vec::new();
     let mut emit = |out: &mut Vec<Prereq>, p: Prereq| {
         if emitted.insert((p.kind, p.file.clone(), p.detail.clone())) {
             out.push(p);
@@ -990,27 +1008,39 @@ pub fn detect_prereqs(
             }
         }
         for (marker, line) in auth_marker_hits(&text) {
-            emit(
-                &mut out,
-                Prereq {
-                    kind: PrereqKind::Auth,
-                    file: path.clone(),
-                    line,
-                    detail: (*marker).to_string(),
-                },
-            );
+            let key = (path.clone(), (*marker).to_string());
+            match auth_lines.get_mut(&key) {
+                Some(existing) if *existing <= line => {}
+                Some(existing) => *existing = line,
+                None => {
+                    auth_lines.insert(key.clone(), line);
+                    auth_order.push(key);
+                }
+            }
         }
         for line in auth_call_hits(&text) {
-            emit(
-                &mut out,
-                Prereq {
-                    kind: PrereqKind::Auth,
-                    file: path.clone(),
-                    line,
-                    detail: "auth()".to_string(),
-                },
-            );
+            let key = (path.clone(), "auth()".to_string());
+            match auth_lines.get_mut(&key) {
+                Some(existing) if *existing <= line => {}
+                Some(existing) => *existing = line,
+                None => {
+                    auth_lines.insert(key.clone(), line);
+                    auth_order.push(key);
+                }
+            }
         }
+    }
+    // Emit auth Prereqs in the order the catalog first saw each (file,
+    // detail), each with its topmost line. Stable across runs because the
+    // scan iterates `scan` in insertion order.
+    for (file, detail) in auth_order {
+        let line = auth_lines[&(file.clone(), detail.clone())];
+        out.push(Prereq {
+            kind: PrereqKind::Auth,
+            file,
+            line,
+            detail,
+        });
     }
     Ok(out)
 }
@@ -2166,6 +2196,60 @@ mod tests {
         assert!(!spec_matches("my-stripe", "stripe"));
     }
 
+    /// Multiple auth hits share one Prereq per (file, detail); the line is
+    /// the *topmost* occurrence, not the first-seen — `--done N` lands on
+    /// the earliest call site so the agent opens the file at the right line.
+    #[test]
+    fn detect_prereqs_keeps_the_topmost_line_for_repeated_auth_signals() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let w = |rel: &str, content: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, content).unwrap();
+        };
+        // The file has getServerSession on lines 5 and 9, and bare auth() on
+        // lines 7 and 11. After merging, getServerSession should point at
+        // line 5 (topmost), auth() at line 7 (topmost). The exact ordering
+        // between the two is fixed by catalog traversal: marker hits
+        // first, then call hits.
+        w(
+            "src/page.tsx",
+            "import './x';\n\
+             const a = 1;\n\
+             const b = 2;\n\
+             const c = 3;\n\
+             const s1 = getServerSession();\n\
+             const s2 = 1;\n\
+             const t = auth();\n\
+             const s3 = 2;\n\
+             const s4 = getServerSession();\n\
+             const s5 = 3;\n\
+             const t2 = auth();\n",
+        );
+        let mut store = GraphStore::open_in_memory().unwrap();
+        let page = file(&mut store, "src/page.tsx");
+        store.insert_import(page, "x", None, &[]).unwrap();
+        let out = detect_prereqs(&store, root, &["src/page.tsx".into()]).unwrap();
+        let auth: Vec<&Prereq> = out.iter().filter(|p| p.kind == PrereqKind::Auth).collect();
+        let marker = auth
+            .iter()
+            .find(|p| p.detail == "getServerSession")
+            .expect("getServerSession prereq");
+        assert_eq!(
+            marker.line, 5,
+            "topmost getServerSession is line 5; got {}",
+            marker.line
+        );
+        let call = auth
+            .iter()
+            .find(|p| p.detail == "auth()")
+            .expect("auth() prereq");
+        assert_eq!(call.line, 7, "topmost auth() is line 7; got {}", call.line);
+        // Dedup: only one Prereq per (file, detail).
+        assert_eq!(auth.len(), 2);
+    }
+
     #[test]
     fn auth_markers_and_bare_auth_calls_need_boundaries() {
         let hits = auth_marker_hits(
@@ -2261,7 +2345,9 @@ mod tests {
     }
 
     /// The scan set is bounded: sixty resolved importers cannot push the
-    /// read set past the file cap.
+    /// read set past the file cap. The cap must hold regardless of whether
+    /// each file emits a signal — it caps *files visited*, not *signals
+    /// emitted*, so the test cannot lean on signal saturation to mask the bug.
     #[test]
     fn detect_prereqs_caps_the_scan_set() {
         let dir = tempfile::tempdir().unwrap();
@@ -2270,15 +2356,43 @@ mod tests {
         w("seed.ts", "// seed\n");
         let mut store = GraphStore::open_in_memory().unwrap();
         let seed = file(&mut store, "seed.ts");
+        // Sixty importers, none with any signal — the cap is reached by
+        // file count, not signal count. A signal-count assertion would pass
+        // even if every importer was silently scanned.
         for i in 0..60 {
             let rel = format!("m{i}.ts");
-            w(&rel, &format!("const k{i} = process.env.VAR_{i};\n"));
+            w(&rel, "// no signals here\n");
             let id = file(&mut store, &rel);
             store.insert_import(id, "./seed", Some(seed), &[]).unwrap();
         }
         let out = detect_prereqs(&store, root, &["seed.ts".into()]).unwrap();
+        assert!(
+            out.is_empty(),
+            "no signals means no detections, but visited files are not directly observable — \
+             pair this with the signal-saturation test below"
+        );
+        // Same fixture, every importer now reads a unique env key: with the
+        // cap enforced, only PREREQ_FILE_CAP files are read; without the
+        // cap, all 60 would be read.
+        for i in 0..60 {
+            let rel = format!("m{i}.ts");
+            w(&rel, &format!("const k{i} = process.env.VAR_{i};\n"));
+        }
+        let out = detect_prereqs(&store, root, &["seed.ts".into()]).unwrap();
         let envs = out.iter().filter(|p| p.kind == PrereqKind::Env).count();
-        assert!(envs <= PREREQ_FILE_CAP, "scanned {envs} files' env reads");
+        // The scan set caps at PREREQ_FILE_CAP total files; one of those is
+        // the seed itself, so the importers seen are at most cap - 1.
+        assert!(
+            envs < PREREQ_FILE_CAP,
+            "scanned {envs} env reads; cap on importers is PREREQ_FILE_CAP - 1"
+        );
+        // And the cap must be exercised, not just respected by accident.
+        // 60 importers, cap 50 ⇒ we visit 49 of them.
+        assert_eq!(
+            envs,
+            PREREQ_FILE_CAP - 1,
+            "60 importers with a cap of {PREREQ_FILE_CAP} must visit exactly cap-1 of them; got {envs}"
+        );
     }
 
     /// The wire contract: kinds serialize to the stable snake_case names the

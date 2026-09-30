@@ -1011,6 +1011,106 @@ fn plan_lists_verification_gates_and_honors_no_gates() {
     assert!(!text.contains("Gate:"), "{text}");
 }
 
+/// Provider and DB detections each become their own gate label end-to-end.
+/// The auth/env gate test above covers two of the four kinds; this one
+/// pins the wording for the remaining two so a refactor of `gates_of`
+/// cannot silently drop them.
+#[test]
+fn plan_lists_provider_and_db_gates_end_to_end() {
+    let dir = fixture("plan-prereqs-providers");
+    std::fs::write(
+        dir.join("src/billing.ts"),
+        "import Stripe from 'stripe';\n\
+         import { sql } from 'drizzle-orm';\n\
+         export function charge() { return Stripe; }\n\
+         export function query() { return sql; }\n",
+    )
+    .unwrap();
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "billing"]);
+
+    let out = pixel_command()
+        .args(["plan", "--query", "dead-code", "--json", "."])
+        .current_dir(&*dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let gates = doc["gates"].as_array().unwrap();
+    let labels: Vec<&str> = gates.iter().filter_map(|g| g["label"].as_str()).collect();
+
+    // Provider gate names the SDK and the env-key prefix the spec promises.
+    assert!(
+        labels
+            .iter()
+            .any(|l| l.starts_with("Gate: Stripe integration")),
+        "missing provider gate: {doc}"
+    );
+    assert!(
+        labels.iter().any(|l| l.contains("STRIPE_* keys")),
+        "provider gate must name the env-key prefix: {doc}"
+    );
+
+    // DB gate names the driver and the spec's "reproduce with real data"
+    // wording. The driver name is taken from the import spec.
+    assert!(
+        labels
+            .iter()
+            .any(|l| l.starts_with("Gate: database-backed state")),
+        "missing db gate: {doc}"
+    );
+    assert!(
+        labels.iter().any(|l| l.contains("drizzle-orm")),
+        "db gate must name the driver: {doc}"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|l| l.contains("reproduce with real data before fixing")),
+        "db gate must use the spec wording: {doc}"
+    );
+
+    // Every gate is `kind: prereq` and `blocking: true`.
+    for g in gates {
+        assert_eq!(g["kind"], "prereq", "{g}");
+        assert_eq!(g["blocking"], true, "{g}");
+    }
+}
+
+/// `--no-gates` is a render toggle for the gate block; it must refuse to
+/// combine with the state-flag trio (`--status`/`--done`/`--undone`/`--prune`)
+/// because those flags take a state-only path that never renders gates. A
+/// silent accept used to be possible before the clap `conflicts_with_all`
+/// lists were updated to include `no_gates`; pin the behaviour so a future
+/// refactor cannot drop the conflict.
+#[test]
+fn plan_rejects_no_gates_combined_with_state_flags() {
+    let out = pixel_command()
+        .args(["plan", "--status", "--no-gates"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "must fail: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("cannot be used with") && stderr.contains("--no-gates"),
+        "stderr must name the conflict: {stderr}"
+    );
+
+    for args in [
+        &["plan", "--done", "1", "--no-gates"][..],
+        &["plan", "--undone", "1", "--no-gates"][..],
+        &["plan", "--prune", "--no-gates"][..],
+    ] {
+        let out = pixel_command().args(args).output().unwrap();
+        assert!(!out.status.success(), "must fail: {out:?} {args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("cannot be used with"),
+            "stderr must name the conflict for {args:?}: {stderr}"
+        );
+    }
+}
+
 /// `search-content` takes the ripgrep flags agents pass by habit instead of
 /// rejecting them: in the recorded demo runs each `--glob` usage error cost
 /// the agent a turn. `-l` lists files, `-g` filters with `.gitignore` rules

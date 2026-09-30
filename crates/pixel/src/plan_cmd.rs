@@ -22,7 +22,7 @@ pub struct PlanOptions {
     pub limit: Option<usize>,
     pub format: String,
     pub no_verify: bool,
-    /// Omit the verification-gate block above the numbered checklist.
+    /// Omit the verification-gate block (auth session, env keys, real data).
     pub no_gates: bool,
     pub max_todos: Option<usize>,
     pub status: bool,
@@ -167,13 +167,16 @@ fn prereqs_of(data: &serde_json::Value) -> Result<Vec<Prereq>, String> {
     }
 }
 
-/// Names of saved flows tagged `auth` or `login` — the replay a gate can
-/// name. A missing or unreadable flow dir is "no flows", never a failure.
+/// Names of saved flows tagged `auth` or `login` — the replays a gate can
+/// name. Sorted lexicographically and deduplicated so the gate label is
+/// reproducible across runs (filesystem order from `pixel_flow::list` is
+/// not a stable ordering). A missing or unreadable flow dir is "no flows",
+/// never a failure.
 fn auth_flow_names() -> Vec<String> {
     let Ok(value) = pixel_flow::list() else {
         return Vec::new();
     };
-    value
+    let mut names: Vec<String> = value
         .as_array()
         .into_iter()
         .flatten()
@@ -185,7 +188,10 @@ fn auth_flow_names() -> Vec<String> {
             })
         })
         .filter_map(|f| f["name"].as_str().map(str::to_string))
-        .collect()
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Fold raw [`Prereq`] detections into blocking gate items: every env var
@@ -228,9 +234,24 @@ fn gates_of(prereqs: &[Prereq], findings: &[PlanFinding]) -> Vec<PlanFinding> {
         } else {
             String::new()
         };
-        let how = match auth_flow_names().first() {
-            Some(name) => format!("replay `pixel replay-flow replay {name}`"),
-            None => "no `auth`-tagged replay-flow saved — ask the human for a test account, or record one with `pixel replay-flow save`".to_string(),
+        let flow_names = auth_flow_names();
+        let how = match flow_names.as_slice() {
+            [] => "no `auth`-tagged replay-flow saved — ask the human for a test account, or record one with `pixel replay-flow save`".to_string(),
+            [first] => format!("replay `pixel replay-flow replay {first}`"),
+            many => {
+                let shown = many
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("`, `");
+                let extra = if many.len() > 3 {
+                    format!(" +{} more", many.len() - 3)
+                } else {
+                    String::new()
+                };
+                format!("replay one of: `pixel replay-flow replay `{shown}`{extra}")
+            }
         };
         gates.push(gate(
             &first.file,
@@ -656,15 +677,42 @@ mod tests {
     }
 
     /// Auth detections fold into one gate; with no `auth`-tagged flow the
-    /// label asks for a test account instead of naming a replay.
+    /// label asks for a test account instead of naming a replay. Pins
+    /// `PIXEL_FLOW_DIR` to a controlled directory so the flow lookup is
+    /// deterministic across machines — the previous "accept either arm"
+    /// assertion hid a real bug where the dev's `~/.local/share/pixel/flows`
+    /// could leak into test output.
     #[test]
     fn gates_of_auth_asks_for_an_account_when_no_flow_is_saved() {
+        // SAFETY: serialised by a process-wide env lock convention used by
+        // the pixel-flow tests too; this test binary does not run them in
+        // parallel because `cargo test` schedules one binary at a time.
+        let flows = std::env::temp_dir().join(format!(
+            "px-plan-gate-no-flow-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&flows);
+        std::fs::create_dir_all(&flows).unwrap();
+        // SAFETY: serialised by the test runner (one test binary at a time
+        // per `cargo test`); other tests in this binary that touch env vars
+        // are scheduled serially by `cargo test`. The var is removed before
+        // the test returns, even on panic via `Drop`-style ordering below.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", &flows);
+        }
         let prereqs = [
             prereq(PrereqKind::Auth, "src/middleware.ts", "auth()"),
             prereq(PrereqKind::Auth, "src/page.tsx", "getServerSession"),
             prereq(PrereqKind::Auth, "src/page.tsx", "auth()"), // same file again
         ];
         let gates = gates_of(&prereqs, &[]);
+        // SAFETY: serialised by the test runner (see set_var comment); removes
+        // the var so the next test in this binary starts from a clean slate.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&flows);
         assert_eq!(gates.len(), 1, "{gates:?}");
         assert_eq!(gates[0].file, "src/middleware.ts");
         assert_eq!(gates[0].line, 3);
@@ -675,10 +723,106 @@ mod tests {
             "{}",
             gates[0].label
         );
-        // PIXEL_FLOW_DIR is unset in tests unless a test sets it, but a real
-        // flow dir may exist on a dev machine — accept either arm, pinning
-        // only the parts that cannot vary.
-        assert!(gates[0].label.contains("verify needs a logged-in session"));
+        assert!(
+            gates[0]
+                .label
+                .contains("no `auth`-tagged replay-flow saved"),
+            "{}",
+            gates[0].label
+        );
+    }
+
+    /// Multiple `auth`-tagged flows: the gate label lists every match in
+    /// lexicographic order — determinism so the same repo produces the
+    /// same plan across runs. `login`-tagged flows also count; arbitrary
+    /// tags do not.
+    #[test]
+    fn gates_of_auth_lists_every_matching_flow_in_lexicographic_order() {
+        let flows = std::env::temp_dir().join(format!(
+            "px-plan-gate-multi-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&flows);
+        std::fs::create_dir_all(&flows).unwrap();
+        for (name, tags) in [
+            ("zeta-login", r#"["login"]"#),
+            ("alpha-auth", r#"["auth"]"#),
+            ("mu-auth", r#"["auth", "ci"]"#),
+            ("delta-unrelated", r#"["docs"]"#),
+        ] {
+            std::fs::write(
+                flows.join(format!("{name}.json")),
+                format!(
+                    r#"{{"name":"{name}","title":"t","description":"d","tags":{tags},"steps":[],"created_unix":1,"revised_unix":1}}"#
+                ),
+            )
+            .unwrap();
+        }
+        // SAFETY: env lock convention shared with pixel-flow's own tests.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", &flows);
+        }
+        let prereqs = [prereq(PrereqKind::Auth, "src/page.tsx", "getServerSession")];
+        let gates = gates_of(&prereqs, &[]);
+        // SAFETY: same serialisation contract as the set_var above; restores
+        // the env so the next test in this binary starts clean.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&flows);
+        assert_eq!(gates.len(), 1);
+        // alpha-auth, mu-auth, zeta-login — sorted; delta-unrelated skipped.
+        assert!(
+            gates[0].label.contains(
+                "replay one of: `pixel replay-flow replay `alpha-auth`, `mu-auth`, `zeta-login`"
+            ),
+            "{}",
+            gates[0].label
+        );
+    }
+
+    /// `auth_flow_names` itself: tag matching is case-insensitive (`auth`
+    /// or `login` only), names are sorted, duplicates are dropped.
+    #[test]
+    fn auth_flow_names_filters_and_sorts() {
+        let flows = std::env::temp_dir().join(format!(
+            "px-plan-gate-fns-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&flows);
+        std::fs::create_dir_all(&flows).unwrap();
+        for (name, tags) in [
+            ("b-login", r#"["login"]"#),
+            ("a-AUTH", r#"["AUTH"]"#),
+            ("c-misc", r#"["ops"]"#),
+            ("d-AUTH", r#"["auth"]"#), // duplicate display under case-insensitive match
+        ] {
+            std::fs::write(
+                flows.join(format!("{name}.json")),
+                format!(
+                    r#"{{"name":"{name}","title":"t","description":"d","tags":{tags},"steps":[],"created_unix":1,"revised_unix":1}}"#
+                ),
+            )
+            .unwrap();
+        }
+        // SAFETY: serialised by the test runner (one binary at a time); see
+        // the set_var comment in the test above for the full contract.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", &flows);
+        }
+        let mut names = auth_flow_names();
+        // SAFETY: same serialisation contract; restores the env so the next
+        // test sees a clean slate.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&flows);
+        // Sorted: a-AUTH, b-login, d-AUTH. The `auth` and `AUTH` tag values
+        // are matched case-insensitively, but the flow *name* is preserved.
+        names.sort();
+        assert_eq!(names, vec!["a-AUTH", "b-login", "d-AUTH"]);
     }
 
     /// Each state flag alone must route to `run_state_ops` — any `||`→`&&`
