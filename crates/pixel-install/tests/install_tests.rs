@@ -1565,17 +1565,39 @@ fn routing_isolated_provider_child() {
                 "the executable path must survive spaces and quotes: {command}"
             );
         }
-        _ => {
-            assert_eq!(
-                first.as_slice(),
-                b"{}",
-                "devin config must stay {{}} — global install wires no devin hooks"
-            );
+        "devin" => {
+            // Devin's own lifecycle protocol: the three lifecycle hooks with
+            // `--provider devin` where the provider decides the dialect (the
+            // post-compaction manifest reader needs none), and no
+            // PostToolUse — the relay is repo-scoped and would double it in
+            // every installed repository.
+            let hooks = value["hooks"].as_object().unwrap();
             assert!(
-                value.get("hooks").is_none(),
-                "no hooks key should be written for devin, got: {value}"
+                hooks.get("PreToolUse").is_none() && hooks.get("PostToolUse").is_none(),
+                "global devin install wires lifecycle only: {value}"
             );
+            for (event, verb) in [
+                ("SessionStart", "run-hook session-start --provider devin"),
+                (
+                    "UserPromptSubmit",
+                    "run-hook prompt-submit --provider devin",
+                ),
+                ("PostCompaction", "run-hook post-compaction"),
+            ] {
+                let groups = hooks[event].as_array().unwrap();
+                assert!(
+                    groups.iter().any(|g| {
+                        g["hooks"].as_array().is_some_and(|h| {
+                            h.iter().any(|hook| {
+                                hook["command"].as_str().is_some_and(|c| c.contains(verb))
+                            })
+                        })
+                    }),
+                    "{event} must register {verb}: {value}"
+                );
+            }
         }
+        _ => unreachable!("unexpected provider {provider}"),
     }
     // No provider gets a ~/.claude/hooks directory from the install.
     assert!(
@@ -5776,4 +5798,197 @@ fn repo_install_should_retire_the_warp_mcp_entry_older_releases_wrote() {
     );
     let report = doctor(&doctor_options).unwrap();
     assert_eq!(check(&report, "repo.warp-mcp").status, CheckStatus::Green);
+}
+
+/// Devin imports Claude's hooks, so its sessions previously received Pixel
+/// only through the imported Claude text. The global install now registers
+/// Devin's own lifecycle protocol — the three lifecycle hooks with
+/// `--provider devin` — in `~/.config/devin/config.json`, but only when
+/// Devin has been used on the machine. The metrics relay stays repo-scoped:
+/// a global one would double the repo-local relay in every installed repo.
+#[test]
+#[cfg(unix)]
+fn global_install_gives_devin_its_own_lifecycle_hooks_only_when_devin_is_in_use() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path();
+    let devin_config = home.join(".config/devin/config.json");
+    fs::create_dir_all(devin_config.parent().unwrap()).unwrap();
+    fs::write(
+        &devin_config,
+        r#"{"agent":{"model":"swe-2-medium"},"hooks":{"SessionStart":[{"hooks":[{"command":"/opt/foreign --source devin","type":"command"}]}]}}"#,
+    )
+    .unwrap();
+    install(&InstallOptions {
+        repo: None,
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .unwrap();
+
+    let value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&devin_config).unwrap()).unwrap();
+    // The foreign session-start hook survives beside Pixel's group.
+    let session = value["hooks"]["SessionStart"].as_array().unwrap();
+    assert!(
+        session.iter().any(|g| {
+            g["hooks"].as_array().is_some_and(|h| {
+                h.iter().any(|hook| {
+                    hook["command"]
+                        .as_str()
+                        .is_some_and(|c| c.contains("foreign"))
+                })
+            })
+        }),
+        "{session:?}"
+    );
+    let has = |event: &str, verb: &str| {
+        value["hooks"][event].as_array().is_some_and(|groups| {
+            groups.iter().any(|g| {
+                g["hooks"].as_array().is_some_and(|h| {
+                    h.iter().any(|hook| {
+                        hook["command"].as_str().is_some_and(|c| {
+                            c.contains(&format!("run-hook {verb} --provider devin"))
+                        })
+                    })
+                })
+            })
+        })
+    };
+    assert!(has("SessionStart", "session-start"));
+    assert!(has("UserPromptSubmit", "prompt-submit"));
+    // Post-compaction reads the repo manifest; it needs no provider argument.
+    assert!(
+        value["hooks"]["PostCompaction"]
+            .as_array()
+            .is_some_and(|groups| {
+                groups.iter().any(|g| {
+                    g["hooks"].as_array().is_some_and(|h| {
+                        h.iter().any(|hook| {
+                            hook["command"]
+                                .as_str()
+                                .is_some_and(|c| c.contains("run-hook post-compaction"))
+                        })
+                    })
+                })
+            }),
+        "{:?}",
+        value["hooks"]["PostCompaction"]
+    );
+    // The relay is repo-scoped: no global PostToolUse entry at all.
+    assert!(
+        value["hooks"].get("PostToolUse").is_none(),
+        "{:?}",
+        value["hooks"].get("PostToolUse")
+    );
+
+    // Idempotent: a second install rewrites nothing.
+    let before = fs::read(&devin_config).unwrap();
+    install(&InstallOptions {
+        repo: None,
+        home: Some(home.to_path_buf()),
+        executable_path: Some(fake_pixel_exe(home)),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .unwrap();
+    let after = fs::read(&devin_config).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&before).unwrap(),
+        serde_json::from_slice::<serde_json::Value>(&after).unwrap()
+    );
+
+    // Without a Devin config dir, the install creates none: a machine that
+    // never ran Devin must not gain a config for it.
+    let devinless = TempDir::new().unwrap();
+    install(&InstallOptions {
+        repo: None,
+        home: Some(devinless.path().to_path_buf()),
+        executable_path: Some(fake_pixel_exe(devinless.path())),
+        claude_executable: Some(fake_claude_exe(devinless.path(), CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .unwrap();
+    assert!(
+        !devinless.path().join(".config/devin").exists(),
+        "no Devin config on a machine without Devin"
+    );
+}
+
+/// The `install.devin-hooks` check judges only what Pixel wrote, in the
+/// crate's own suite (the mutants of the check's match arms are scored
+/// here, not by the CLI suite): a machine without Devin is green-absent, a
+/// Devin config without the hooks is red, foreign hook groups that name
+/// the same verbs are still not Pixel's entries, and a real install turns
+/// the check green.
+#[test]
+fn doctor_devin_hooks_judge_only_what_pixel_wrote() {
+    let options = |home: &std::path::Path| DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: None,
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    };
+    let check = |report: &pixel_install::doctor::DoctorReport| {
+        report
+            .checks
+            .iter()
+            .find(|c| c.id == "install.devin-hooks")
+            .expect("the check ran")
+            .status
+    };
+
+    // No Devin on the machine: green-absent.
+    let dir = TempDir::new().unwrap();
+    let report = doctor(&options(dir.path())).unwrap();
+    assert_eq!(check(&report), CheckStatus::Green, "{report:?}");
+
+    // Devin used, nothing installed: red. The foreign hook groups name the
+    // exact verbs (and the provider argument the two provider-decided
+    // entries carry) without Pixel's binary, so only a real install can
+    // turn the check green.
+    let dir = TempDir::new().unwrap();
+    let config = dir.path().join(".config/devin/config.json");
+    fs::create_dir_all(config.parent().unwrap()).unwrap();
+    fs::write(
+        &config,
+        r#"{"hooks":{
+            "SessionStart":[{"hooks":[{"command":"/opt/foreign run-hook session-start --provider devin","type":"command"}]}],
+            "UserPromptSubmit":[{"hooks":[{"command":"/opt/foreign run-hook prompt-submit --provider devin","type":"command"}]}],
+            "PostCompaction":[{"hooks":[{"command":"/opt/foreign run-hook post-compaction","type":"command"}]}]
+        }}"#,
+    )
+    .unwrap();
+    let report = doctor(&options(dir.path())).unwrap();
+    assert_eq!(check(&report), CheckStatus::Red, "{report:?}");
+    let finding = report
+        .checks
+        .iter()
+        .find(|c| c.id == "install.devin-hooks")
+        .unwrap();
+    let reason = finding.reason.as_deref().unwrap_or_default();
+    for event in [
+        "SessionStart→session-start",
+        "UserPromptSubmit→prompt-submit",
+        "PostCompaction→post-compaction",
+    ] {
+        assert!(reason.contains(event), "{event}: {reason}");
+    }
+
+    // A real install writes the three entries and the check turns green.
+    install(&InstallOptions {
+        repo: None,
+        home: Some(dir.path().to_path_buf()),
+        executable_path: Some(fake_pixel_exe(dir.path())),
+        claude_executable: Some(fake_claude_exe(dir.path(), CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .unwrap();
+    let report = doctor(&options(dir.path())).unwrap();
+    assert_eq!(check(&report), CheckStatus::Green, "{report:?}");
 }

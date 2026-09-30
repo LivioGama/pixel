@@ -1,5 +1,10 @@
 # Measured performance — wins AND losses
 
+**Historical snapshot (2026-08-30):** binary and doctrine changed within that
+day; exact run order is in the session log. These results do not describe the
+current install. The [newer hooks trial](../motion/README.md#the-agent-demo)
+reports no gain on one scoping task, without raw runs archived here.
+
 Two different things get measured, and they must not be conflated:
 
 **Single-op latency** (daemon-warm, small synthetic fixture — [`examples/real-measurements.md`](../examples/real-measurements.md)): individual pixel ops answer in 6–64ms wall-clock. These are op figures, not agent-workflow figures. The CLI also carries a measured ~17ms process-spawn floor for the ~45MB binary on the bench machine (`crates/pixel-bench/benches/m1_latency.rs` comments).
@@ -13,7 +18,7 @@ Two different things get measured, and they must not be conflated:
 | s3-sync (branch sync) | 8.8s | 10.1s | ✅ pixel better |
 | s4-recover (historical code) | 64.8s | 36.4s | ❌ pixel much worse |
 
-Per tenet T1 (no claim without a measurement), that table is the current honest picture: fast ops do not automatically make fast agents. The s2/s4 regressions are exactly what this change set targets — the hard targets read-fence is demoted to advisory (it measured recall 0.60 → 0.19, [`sniper-discovery.md`](sniper-discovery.md)), and the recovery flow is being reworked; per T3, each scenario keeps MANDATORY status only while a re-run shows it non-inferior to baseline.
+Per tenet T1 (no claim without a measurement), that table is the historical picture for that run: fast ops do not automatically make fast agents. The s2/s4 regressions are exactly what this change set targets — the hard targets read-fence is demoted to advisory (it measured recall 0.60 → 0.19, [`sniper-discovery.md`](sniper-discovery.md)), and the recovery flow is being reworked; per T3, each scenario keeps MANDATORY status only while a re-run shows it non-inferior to baseline.
 
 **Known caveat on that table's baseline arm**: its harness stripped pixel hooks but not the installed CLAUDE.md rule text (which mandates pixel by absolute path), and its transcripts were overwritten before a tool_use-level purity check could run — so its baseline purity is **unknown** ([`2026-08-30-session-log.md`](2026-08-30-session-log.md)).
 

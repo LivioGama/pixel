@@ -35,7 +35,7 @@ inputs:
     unit: ""
     help: "Whole reads of a large file to learn what it holds. Short files and targeted line ranges do not count."
   - key: "t"
-    label: "Tokens per full read"
+    label: "Estimated tokens per full read"
     default: 10000
     min: 0
     max: 1000000

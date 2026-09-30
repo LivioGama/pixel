@@ -10,7 +10,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
@@ -79,6 +79,7 @@ const FIX_PREPARE: Option<&str> = Some("pixel prepare-repo {root}");
 pub const CHECKS: &[CheckSpec] = &[
     entry("binary.path", None),
     entry("binary.executable", None),
+    entry("binary.shell-path", None),
     entry("install.agent-prompt", FIX_INSTALL),
     entry("install.subagent-prompt", FIX_INSTALL),
     entry("install.pi-prompt", FIX_INSTALL),
@@ -87,6 +88,7 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("install.opencode-agents-md", FIX_INSTALL),
     entry("install.antigravity", FIX_INSTALL),
     entry("install.claude-hooks", FIX_INSTALL),
+    entry("install.devin-hooks", FIX_INSTALL),
     // The removal command names the orphaned file, so the outcome carries it.
     entry("install.rtk-backup", None),
     entry("install.legacy-wrappers", FIX_INSTALL),
@@ -304,6 +306,16 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         },
     );
 
+    // The agent shells inherit the login shell's environment, and a coding
+    // agent that cannot resolve `pixel` silently works without it (measured
+    // on a machine where only .bashrc put the install on PATH and the
+    // harness ran zsh). Ask the resolved shell itself, the authority on the
+    // profile it loads, so the probe uses the same lookup the profile adds.
+    let shell_override = options.shell.clone();
+    runner.check_status("binary.shell-path", || {
+        shell_path_check(shell_override.as_deref())
+    });
+
     runner.check(
         "install.agent-prompt",
         || -> std::result::Result<DoctorCheckDetail, String> {
@@ -456,10 +468,13 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 ));
             }
             let value = install::read_settings(&path).map_err(|e| e.to_string())?;
+            // A config without a hooks object (Devin's own settings only) is
+            // simply missing every hook, not a malformed install.
             let hooks = value
                 .get("hooks")
                 .and_then(serde_json::Value::as_object)
-                .ok_or_else(|| format!("no hooks object in {}", path.display()))?;
+                .cloned()
+                .unwrap_or_default();
             let has = |event: &str, verb: &str| {
                 hooks
                     .get(event)
@@ -542,6 +557,114 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                 &exe,
                 &crate::routing::pixel_hooks_running_other_binaries(&value, &exe),
             ))
+        },
+    );
+
+    // Devin's own lifecycle protocol. The global install registers it only
+    // when Devin has been used on this machine, and `doctor` judges what
+    // Pixel wrote: with no `~/.config/devin/` the check is green-absent, not
+    // red. A Devin CLI present but never run is a foreign state, not a
+    // broken install.
+    runner.check(
+        "install.devin-hooks",
+        || -> std::result::Result<DoctorCheckDetail, String> {
+            let dir = home.join(crate::config::DEVIN_CONFIG_DIR);
+            if !dir.is_dir() {
+                return Ok(DoctorCheckDetail {
+                    summary: "Devin not in use on this machine (no ~/.config/devin)".into(),
+                    detail: None,
+                });
+            }
+            let path = dir.join(crate::config::DEVIN_CONFIG_FILE);
+            if !path.is_file() {
+                return Err(format!(
+                    "{} not found while {} exists — run `pixel install`",
+                    path.display(),
+                    dir.display()
+                ));
+            }
+            let value = install::read_settings(&path).map_err(|e| e.to_string())?;
+            // A config without a hooks object (Devin's own settings only) is
+            // simply missing every hook, not a malformed install.
+            let hooks = value
+                .get("hooks")
+                .and_then(serde_json::Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let has = |event: &str, verb: &str| {
+                hooks
+                    .get(event)
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|groups| {
+                        groups.iter().any(|group| {
+                            group
+                                .get("hooks")
+                                .and_then(serde_json::Value::as_array)
+                                .is_some_and(|inner| {
+                                    inner.iter().any(|hook| {
+                                        hook.get("command")
+                                            .and_then(serde_json::Value::as_str)
+                                            .is_some_and(|c| {
+                                                c.contains(&format!(
+                                                    "run-hook {verb} --provider devin"
+                                                )) && c.contains("pixel")
+                                            })
+                                    })
+                                })
+                        })
+                    })
+            };
+            let mut missing = Vec::new();
+            if !has("SessionStart", "session-start") {
+                missing.push("SessionStart→session-start");
+            }
+            if !has("UserPromptSubmit", "prompt-submit") {
+                missing.push("UserPromptSubmit→prompt-submit");
+            }
+            // Post-compaction reads the repo manifest; it carries no
+            // provider argument, unlike the other two.
+            if !hooks
+                .get("PostCompaction")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|groups| {
+                    groups.iter().any(|group| {
+                        group
+                            .get("hooks")
+                            .and_then(serde_json::Value::as_array)
+                            .is_some_and(|inner| {
+                                inner.iter().any(|hook| {
+                                    hook.get("command")
+                                        .and_then(serde_json::Value::as_str)
+                                        .is_some_and(|c| {
+                                            c.contains("run-hook post-compaction")
+                                                && c.contains("pixel")
+                                        })
+                                })
+                            })
+                    })
+                })
+            {
+                missing.push("PostCompaction→post-compaction");
+            }
+            if !missing.is_empty() {
+                return Err(format!(
+                    "missing pixel lifecycle hooks in {}: {} — run `pixel install`",
+                    path.display(),
+                    missing.join(", ")
+                ));
+            }
+            let stacked = crate::routing::stacked_pixel_hooks(&value, &exe);
+            if !stacked.is_empty() {
+                return Err(format!(
+                    "pixel hooks registered more than once in {}: {} — run `pixel install`",
+                    path.display(),
+                    stacked.join(", ")
+                ));
+            }
+            Ok(DoctorCheckDetail {
+                summary: format!("devin lifecycle hooks configured in {}", path.display()),
+                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+            })
         },
     );
 
@@ -1353,7 +1476,8 @@ fn rtk_backup_check(orphan: Option<PathBuf>) -> (CheckStatus, DoctorCheckDetail,
     }
 }
 
-struct DoctorCheckDetail {
+#[derive(Debug)]
+pub(crate) struct DoctorCheckDetail {
     summary: String,
     detail: Option<serde_json::Value>,
 }
@@ -1371,6 +1495,176 @@ enum Remedy {
 
 /// Longest stderr excerpt a check reason quotes from a child process.
 const STDERR_EXCERPT_CHARS: usize = 256;
+
+/// Longest the login-shell probe waits for the shell to answer. A login
+/// shell runs its startup files first, and a startup command that stalls
+/// must not park `pixel doctor`; the daemon health probe uses the same
+/// budget.
+const SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Why a bounded probe did not produce a process status.
+#[derive(Debug)]
+enum ProbeFailure {
+    /// The deadline passed before the child exited; the child was killed
+    /// and reaped.
+    Timeout,
+    /// The child could not be spawned.
+    Spawn(std::io::Error),
+}
+
+/// Bounded stand-in for `Command::output()`. `output()` waits for the child
+/// to exit *and* both pipes to reach EOF, so a login shell stalled in a
+/// startup file — or a descendant that inherited the stdout pipe — blocks
+/// the caller with no deadline. This spawns with piped stdout/stderr, reads
+/// each on its own detached thread, polls `try_wait` under `timeout`, and on
+/// expiry kills and reaps the child. The readers are detached on purpose: a
+/// lingering descendant cannot hold the caller past the deadline.
+// mutants: the polling ticks and the deadline comparison are
+// timing-equivalent under mutation; `bounded_output_times_out_on_a_stalled_shell`
+// pins the timeout contract the mutations cannot change.
+#[cfg_attr(test, mutants::skip)]
+fn bounded_output(
+    command: &mut Command,
+    timeout: Duration,
+) -> std::result::Result<std::process::Output, ProbeFailure> {
+    use std::io::Read;
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(ProbeFailure::Spawn)?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let (out_tx, out_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stdout.read_to_end(&mut bytes);
+        let _ = out_tx.send(read.map(|_| bytes));
+    });
+    let (err_tx, err_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let read = stderr.read_to_end(&mut bytes);
+        let _ = err_tx.send(read.map(|_| bytes));
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(ProbeFailure::Timeout);
+            }
+        }
+    };
+    // The child exited; give each reader the rest of the deadline. A
+    // descendant can keep a pipe open, so a reader that misses it yields no
+    // bytes rather than blocking the check.
+    // `Result` here is this crate's alias `Result<T, InstallError>`; the
+    // reader threads send `std::io::Result<Vec<u8>>`, so `.ok()` must name
+    // the io error type or the function pointer does not type-check on MSRV.
+    let stdout = out_rx
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()
+        .and_then(std::result::Result::<Vec<u8>, std::io::Error>::ok)
+        .unwrap_or_default();
+    let stderr = err_rx
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()
+        .and_then(std::result::Result::<Vec<u8>, std::io::Error>::ok)
+        .unwrap_or_default();
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// The `binary.shell-path` check body, with the shell resolved from
+/// `--shell` (or the login shell). Green when the shell answers the lookup
+/// with a path; yellow when it runs but resolves nothing — pixel itself
+/// works, the agent's environment is what is missing — and red when the
+/// shell process cannot run at all. Split out so the three outcomes have
+/// direct unit tests instead of depending on the CLI suite's parse of the
+/// rendered report.
+pub(crate) fn shell_path_check(
+    shell_override: Option<&str>,
+) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+    shell_path_check_within(shell_override, SHELL_PROBE_TIMEOUT)
+}
+
+/// The probe body, with the deadline as a parameter so a test drives the
+/// timeout arm in milliseconds instead of the production five seconds.
+fn shell_path_check_within(
+    shell_override: Option<&str>,
+    timeout: Duration,
+) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+    let shell = install::resolve_shell(shell_override);
+    // Login shell mode: interactive shells load rc files that
+    // non-interactive shells do not, and the PATH is their work.
+    let lookup = match install::shell_kind_from(&shell) {
+        install::ShellKind::Fish => ["-l", "-c", "which pixel"],
+        install::ShellKind::Posix => ["-l", "-c", "command -v pixel"],
+    };
+    let mut command = Command::new(&shell);
+    command.args(lookup);
+    let out = match bounded_output(&mut command, timeout) {
+        Ok(o) if o.status.success() => o,
+        // `command -v` exits 1 without resolving; a spawn failure or a
+        // stalled startup is a different failure (the shell itself is broken).
+        Ok(o) => {
+            return Ok((
+                CheckStatus::Yellow,
+                DoctorCheckDetail {
+                    summary: "the shell pixel is installed for does not resolve it".to_string(),
+                    detail: Some(serde_json::json!({
+                        "shell": shell,
+                        "exit_status": o.status.to_string(),
+                        "stderr": capped(
+                            &one_line(&String::from_utf8_lossy(&o.stderr)),
+                            STDERR_EXCERPT_CHARS,
+                        ),
+                    })),
+                },
+            ));
+        }
+        Err(ProbeFailure::Spawn(e)) => {
+            return Err(format!(
+                "failed to run shell {shell}: {e}; the login shell itself is broken"
+            ));
+        }
+        Err(ProbeFailure::Timeout) => {
+            return Err(format!(
+                "shell {shell} did not answer within {timeout:?}; the login shell itself is broken"
+            ));
+        }
+    };
+    let resolved = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if resolved.is_empty() {
+        return Ok((
+            CheckStatus::Yellow,
+            DoctorCheckDetail {
+                summary: "the shell pixel is installed for does not resolve it".to_string(),
+                detail: Some(serde_json::json!({ "shell": shell })),
+            },
+        ));
+    }
+    Ok((
+        CheckStatus::Green,
+        DoctorCheckDetail {
+            summary: format!("{shell} resolves pixel as {resolved}"),
+            detail: Some(serde_json::json!({
+                "shell": shell,
+                "resolved": resolved,
+            })),
+        },
+    ))
+}
 
 /// Runs the checks the selection keeps and records each outcome.
 struct Runner<'a> {
@@ -2133,8 +2427,8 @@ mod tests {
         age_secs, capped, catalogue_steps, claude_hooks_owner_check, extract_rule_commands,
         fix_for, judge_repair, names_check, normalize_rule_command, one_line,
         probe_daemon_epistemics, render_catalogue, render_repairs, repair_for, repair_plan,
-        rtk_backup_check, run_repair, scenario_mismatches, selected, shell_word, spec,
-        split_home_repairs, validate_selection,
+        rtk_backup_check, run_repair, scenario_mismatches, selected, shell_path_check, shell_word,
+        spec, split_home_repairs, validate_selection,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
@@ -2384,7 +2678,7 @@ mod tests {
             .map(|spec| spec.id)
             .filter(|id| id.starts_with("install."))
             .collect();
-        assert_eq!(home.len(), 10, "the install group as catalogued");
+        assert_eq!(home.len(), 11, "the install group as catalogued");
         let skip = ids(&["install.*"]);
         for spec in CHECKS {
             assert_eq!(
@@ -2560,6 +2854,129 @@ mod tests {
             )
             .as_deref(),
             Some("pixel daemon stop '/r' && pixel daemon start '/r'")
+        );
+    }
+
+    /// The three outcomes of the shell probe, driven through a script the
+    /// test controls: the success guard's two directions and the empty
+    /// stdout case each change exactly one of them.
+    #[test]
+    fn shell_path_check_reports_each_shell_outcome() {
+        let dir =
+            std::env::temp_dir().join(format!("pixel-doctor-shell-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let make_shell = |tag: &str, lookup: &str, body: &str| {
+            let shell = dir.join(tag);
+            std::fs::write(
+                &shell,
+                format!(
+                    "#!/bin/sh\n\
+                     if [ \"$#\" -ne 3 ] || [ \"$1\" != \"-l\" ] || [ \"$2\" != \"-c\" ] || [ \"$3\" != \"{lookup}\" ]; then\n\
+                     \techo \"unexpected lookup args: $*\" >&2\n\
+                     \texit 2\n\
+                     fi\n\
+                     {body}\n"
+                ),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            shell.to_string_lossy().into_owned()
+        };
+        let posix = "command -v pixel";
+
+        let green = make_shell("green", posix, "echo /fake/bin/pixel; exit 0");
+        let (status, detail) = shell_path_check(Some(&green)).unwrap();
+        assert_eq!(status, CheckStatus::Green, "{detail:?}");
+        assert_eq!(
+            detail.detail.as_ref().unwrap()["resolved"],
+            "/fake/bin/pixel"
+        );
+
+        // Exit 1: `command -v` found nothing — the shell works, pixel is not
+        // reachable from it. Yellow, not red: no catalogue command repairs it.
+        // The detail carries the shell's own words (an exit 1 a profile
+        // script printed an error into is diagnosable), which is what tells
+        // this miss apart from an empty-success one.
+        let yellow = make_shell("yellow", posix, "exit 1");
+        let (status, detail) = shell_path_check(Some(&yellow)).unwrap();
+        assert_eq!(status, CheckStatus::Yellow, "{detail:?}");
+        let yellow = detail.detail.unwrap();
+        assert!(yellow["exit_status"].is_string(), "{yellow}");
+
+        // Success with empty stdout is the same miss, not a green check —
+        // and it is not the exit-1 shape either: nothing to report yet.
+        let empty = make_shell("empty", posix, "exit 0");
+        let (status, detail) = shell_path_check(Some(&empty)).unwrap();
+        assert_eq!(status, CheckStatus::Yellow, "{detail:?}");
+        assert_eq!(detail.detail.as_ref().unwrap()["shell"], empty);
+        assert!(
+            detail.detail.as_ref().unwrap()["exit_status"].is_null(),
+            "an empty success has no exit status to report: {detail:?}"
+        );
+
+        // A shell named `fish` is asked fish's own lookup, `which pixel`;
+        // the argument guard fails the probe if the POSIX query is sent.
+        let fish = make_shell("fish", "which pixel", "echo /fake/bin/pixel; exit 0");
+        let (status, detail) = shell_path_check(Some(&fish)).unwrap();
+        assert_eq!(status, CheckStatus::Green, "{detail:?}");
+        assert_eq!(
+            detail.detail.as_ref().unwrap()["resolved"],
+            "/fake/bin/pixel"
+        );
+
+        // A shell the OS cannot exec: red, a different failure from a miss.
+        let err = shell_path_check(Some(dir.join("no-such-shell").to_string_lossy().as_ref()))
+            .expect_err("a spawn failure is red");
+        assert!(err.contains("failed to run shell"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A login shell stuck in its startup files is reported, never waited
+    /// on: the injectable deadline keeps the test at milliseconds where
+    /// production holds the shell to five seconds.
+    #[test]
+    fn shell_path_check_reports_a_shell_that_does_not_answer_in_time() {
+        let dir = std::env::temp_dir().join(format!("pixel-doctor-timeout-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let shell = dir.join("slow-zsh");
+        std::fs::write(&shell, "#!/bin/sh\nsleep 5\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let timeout = std::time::Duration::from_millis(100);
+        let err = super::shell_path_check_within(Some(shell.to_string_lossy().as_ref()), timeout)
+            .expect_err("a stalled shell is red, not a hang");
+        assert!(err.contains("did not answer within"), "{err}");
+        assert!(err.contains(&format!("{timeout:?}")), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stalled shell must not outlive the probe: `bounded_output` returns
+    /// `Timeout` under the deadline instead of `Command::output()`'s
+    /// indefinite wait on a login shell stuck in its startup files.
+    #[test]
+    fn bounded_output_times_out_on_a_stalled_shell() {
+        let started = std::time::Instant::now();
+        let mut command = std::process::Command::new("sh");
+        command.arg("-c").arg("sleep 5");
+        let outcome = super::bounded_output(&mut command, std::time::Duration::from_millis(100));
+        assert!(
+            matches!(&outcome, Err(super::ProbeFailure::Timeout)),
+            "a stalled shell is a timeout, got {outcome:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the deadline must bound the wait, took {:?}",
+            started.elapsed()
         );
     }
 

@@ -323,7 +323,7 @@ fn doctor_fix_should_run_a_shared_repair_once_and_report_the_rerun() {
         [
             "pixel doctor --fix: ran 1 repair(s) — 1 fixed, 0 not converged, 0 failed",
             "  [fixed] pixel install --shell zsh (install.agent-prompt, install.pi-prompt)",
-            "pixel doctor: ran 2 check(s), skipped 24 — 2 green, 0 yellow, 0 red",
+            "pixel doctor: ran 2 check(s), skipped 26 — 2 green, 0 yellow, 0 red",
             "",
         ]
         .join("\n")
@@ -435,4 +435,211 @@ fn doctor_should_pass_a_repo_whose_history_was_never_built_and_leave_it_unbuilt(
         !repo.join(".pixel").join("history.db").exists(),
         "the check must not create history.db"
     );
+}
+
+/// A fake shell makes the probe hermetic: the login shells of a developer
+/// machine carry a system-level PATH (macOS `path_helper`) the test cannot
+/// reset, but `--shell` accepts any executable, and the check runs it with
+/// `-l -c "command -v pixel"`/`which pixel` exactly as it would the real
+/// one. The fixture rejects any other invocation, so a probe that drops the
+/// login flag or changes the query fails the test instead of returning the
+/// programmed outcome anyway; `name` also picks the dialect (`fish` is the
+/// Fish branch).
+fn fake_shell(tag: &str, name: &str, lookup: &str, script: &str) -> Scratch {
+    let dir = Scratch::for_test("doctor-cli-shell", tag);
+    let shell = dir.join(name);
+    std::fs::write(
+        &shell,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$#\" -ne 3 ] || [ \"$1\" != \"-l\" ] || [ \"$2\" != \"-c\" ] || [ \"$3\" != \"{lookup}\" ]; then\n\
+             \techo \"unexpected lookup args: $*\" >&2\n\
+             \texit 2\n\
+             fi\n\
+             {script}\n"
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    dir
+}
+
+fn shell_path_doctor(shell: &Path, repo: &Path) -> Output {
+    pixel_command()
+        .arg("doctor")
+        .arg(repo)
+        .args(["--only", "binary.shell-path", "--json"])
+        .arg("--shell")
+        .arg(shell.as_os_str())
+        .env("CODEX_HOME", std::env::temp_dir().join("doctor-cli-codex"))
+        .env("PIXEL_METRICS", "0")
+        .output()
+        .unwrap()
+}
+
+/// The check reports what the shell resolves, so an agent's shells and the
+/// doctor agree on where `pixel` comes from.
+#[test]
+fn shell_path_should_be_green_when_the_shell_resolves_pixel() {
+    let (_, repo) = fixture("shell-path-green");
+    let shell = fake_shell(
+        "shell-path-green",
+        "fake-zsh",
+        "command -v pixel",
+        "echo /fake/bin/pixel\nexit 0",
+    );
+    let out = shell_path_doctor(shell.join("fake-zsh").as_path(), &repo);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["checks"][0]["status"], "green", "{report}");
+    assert_eq!(report["summary"]["green"], 1, "{report}");
+    assert_eq!(
+        report["checks"][0]["detail"]["resolved"], "/fake/bin/pixel",
+        "{report}"
+    );
+}
+
+/// The Fish branch asks `which pixel`, not the POSIX `command -v`; a fixture
+/// named `fish` exercises it, and its argument guard fails the probe if the
+/// POSIX query is sent instead.
+#[test]
+fn shell_path_should_use_the_fish_lookup_for_a_fish_shell() {
+    let (_, repo) = fixture("shell-path-fish");
+    let shell = fake_shell(
+        "shell-path-fish",
+        "fish",
+        "which pixel",
+        "echo /fake/bin/pixel\nexit 0",
+    );
+    let out = shell_path_doctor(shell.join("fish").as_path(), &repo);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["checks"][0]["status"], "green", "{report}");
+    assert_eq!(
+        report["checks"][0]["detail"]["resolved"], "/fake/bin/pixel",
+        "{report}"
+    );
+}
+
+/// A shell that cannot resolve `pixel` is the silent failure agents live
+/// with: every pixel command is "command not found" inside the harness
+/// while outside it works. Yellow — the binary itself runs, and no
+/// catalogue command repairs a PATH — and `--fail-on yellow` makes it a
+/// gate.
+#[test]
+fn shell_path_should_flag_a_shell_that_cannot_resolve_pixel() {
+    let (_, repo) = fixture("shell-path-yellow");
+    let shell = fake_shell(
+        "shell-path-yellow",
+        "fake-zsh",
+        "command -v pixel",
+        "exit 1",
+    );
+    let out = shell_path_doctor(shell.join("fake-zsh").as_path(), &repo);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["checks"][0]["status"], "yellow", "{report}");
+    assert_eq!(report["summary"]["yellow"], 1, "{report}");
+
+    let strict = pixel_command()
+        .arg("doctor")
+        .arg(&*repo)
+        .arg("--shell")
+        .arg(shell.join("fake-zsh").as_os_str())
+        .args(["--only", "binary.shell-path", "--fail-on", "yellow"])
+        .env("CODEX_HOME", std::env::temp_dir().join("doctor-cli-codex"))
+        .env("PIXEL_METRICS", "0")
+        .output()
+        .unwrap();
+    assert_eq!(strict.status.code(), Some(1), "{strict:?}");
+}
+
+/// A spawn failure of the shell itself is a different failure from "the
+/// shell could not resolve pixel": it is red, not yellow.
+#[test]
+fn shell_path_should_go_red_when_the_shell_cannot_run() {
+    let (_, repo) = fixture("shell-path-red");
+    let shell_dir = Scratch::for_test("doctor-cli-shell", "shell-path-red");
+    let out = shell_path_doctor(shell_dir.join("no-such-shell").as_path(), &repo);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["checks"][0]["status"], "red", "{report}");
+}
+
+/// Devin's lifecycle protocol is judged only where Devin exists: a machine
+/// without `~/.config/devin` is green-absent (`doctor` judges what Pixel
+/// wrote), a Devin config without the hooks is red with the install as its
+/// fix, and after `pixel install` the check is green.
+#[test]
+fn doctor_devin_hooks_absent_dir_is_green_and_missing_hooks_are_red_until_install() {
+    let (home, repo) = fixture("devin-hooks-absent");
+    let out = doctor(&home, &repo, &["--only", "install.devin-hooks", "--json"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["checks"][0]["status"], "green", "{report}");
+
+    // Devin used, never installed: red, the fix is the global install. The
+    // config carries foreign hook groups that name the same verbs — a
+    // foreign entry is not a pixel entry, so the check must still demand
+    // Pixel's own commands.
+    let (home, repo) = fixture("devin-hooks-missing");
+    std::fs::create_dir_all(home.join(".config/devin")).unwrap();
+    let foreign = |event: &str, verb: &str| {
+        format!(
+            r#"{event:?}: [{{"hooks":[{{"command":"/opt/foreign run-hook {verb}","type":"command"}}]}}]"#
+        )
+    };
+    std::fs::write(
+        home.join(".config/devin/config.json"),
+        format!(
+            "{{{},{},{}}}",
+            foreign("SessionStart", "session-start"),
+            foreign("UserPromptSubmit", "prompt-submit"),
+            foreign("PostCompaction", "post-compaction")
+        ),
+    )
+    .unwrap();
+    let out = doctor(&home, &repo, &["--only", "install.devin-hooks"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.contains("missing pixel lifecycle hooks"),
+        "names the missing hooks: {text}"
+    );
+    assert!(text.contains("fix: pixel install --shell zsh"), "{text}");
+
+    // The repair: `pixel install` writes the three lifecycle hooks.
+    let out = doctor_fixing(&home, &repo, &["--only", "install.devin-hooks", "--fix"]);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("[fixed]"), "{text}");
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(home.join(".config/devin/config.json")).unwrap())
+            .unwrap();
+    let has = |event: &str, verb: &str| {
+        value["hooks"][event].as_array().is_some_and(|groups| {
+            groups.iter().any(|g| {
+                g["hooks"].as_array().is_some_and(|h| {
+                    h.iter().any(|hook| {
+                        hook["command"]
+                            .as_str()
+                            .is_some_and(|c| c.contains(&format!("run-hook {verb}")))
+                    })
+                })
+            })
+        })
+    };
+    assert!(
+        has("SessionStart", "session-start --provider devin"),
+        "{value}"
+    );
+    assert!(
+        has("UserPromptSubmit", "prompt-submit --provider devin"),
+        "{value}"
+    );
+    assert!(has("PostCompaction", "post-compaction"), "{value}");
 }

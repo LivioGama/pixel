@@ -37,6 +37,14 @@ struct PostCompactionPayload {
 /// payload from stdin. Never returns an `Err` as exit 1 — every failure
 /// path is a silent exit 0 (compaction proceeds normally).
 pub fn run(provider: Option<crate::guard::Provider>) -> ! {
+    // An imported Claude entry re-injects the Claude session packet keyed by
+    // the payload's session id — under an importing host that id belongs to
+    // the other harness, so the entry either injects nothing or, on an id
+    // collision, another session's evidence. Devin's own entry (no provider
+    // argument) reads the repo manifest instead.
+    if crate::prompt_submit::imported_claude_entry(provider) {
+        std::process::exit(0);
+    }
     if crate::env_flag_off("PIXEL_POST_COMPACTION") {
         std::process::exit(0);
     }

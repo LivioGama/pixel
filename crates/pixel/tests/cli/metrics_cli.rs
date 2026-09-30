@@ -1468,3 +1468,71 @@ fn list_signatures_compares_the_measured_file_with_its_stdout_answer() {
     assert_eq!(metrics["native_workflow_bytes"], file_bytes);
     assert_eq!(metrics["answer_bytes"], answer_bytes);
 }
+
+/// An imported Claude metrics entry running beside Devin's own relay would
+/// emit the Claude contract into a host that never asked for it and double
+/// the native `--provider devin` relay's output, so the entry exits before
+/// reading stdin when the process carries an importing-config marker. The
+/// same entry in a real Claude session still relays.
+#[test]
+fn an_imported_claude_metrics_entry_is_silent_in_the_importing_host() {
+    use std::io::Write;
+    let fixture = Fixture::new();
+    let home = fake_home(&fixture);
+    // The relay correlates the payload to a recorded invocation by cwd +
+    // argv: record one first.
+    let warmup = fixture
+        .command()
+        .args(["repo-state", ".", "--json"])
+        .env("HOME", &home)
+        .output()
+        .unwrap();
+    assert!(warmup.status.success(), "{warmup:?}");
+
+    let run = |marker: bool| {
+        let payload = json!({
+            "tool_name": "shell",
+            "tool_input": {"command": "pixel repo-state . --json"},
+            "cwd": fixture.0.display().to_string(),
+        });
+        let mut command = fixture.command();
+        command
+            .args(["run-hook", "metrics", "--provider", "claude"])
+            .env("HOME", &home)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if marker {
+            command.env("DEVIN_PROJECT_DIR", fixture.0.as_os_str());
+        } else {
+            command.env_remove("DEVIN_PROJECT_DIR");
+        }
+        let mut child = command.spawn().unwrap();
+        child
+            .stdin
+            .as_mut()
+            .unwrap()
+            .write_all(payload.to_string().as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    };
+
+    // A real Claude session gets the advisory contract.
+    let claude = run(false);
+    assert!(
+        claude.status.success(),
+        "{}",
+        String::from_utf8_lossy(&claude.stderr)
+    );
+    let doc: Value = serde_json::from_slice(&claude.stdout).unwrap();
+    assert!(
+        doc["hookSpecificOutput"]["additionalContext"].is_string(),
+        "{doc}"
+    );
+
+    // The imported copy inside Devin: silent, stdin unread.
+    let imported = run(true);
+    assert!(imported.status.success(), "{imported:?}");
+    assert!(imported.stdout.is_empty(), "{imported:?}");
+    assert!(imported.stderr.is_empty(), "{imported:?}");
+}

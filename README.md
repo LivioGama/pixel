@@ -21,9 +21,12 @@
   <img src="docs/examples/pixel-scope-comparison.webp" width="800" alt="The same task without Pixel and with it: the agent wanders the repository, or starts from a ranked list of files" />
 </p>
 
+The animation illustrates a workflow; it is not a timed agent comparison.
+[Agent trials and their limits](https://pixel-cli.dev/benchmarks/#on-whole-agent-tasks) include a newer Opus trial with hooks that found no speed gain on one task.
+
 ## Why
 
-- **79.7 to 97.2% less read** (median 94.5%) to learn what a large file contains, measured on eight well-known files (Hugging Face Transformers, FastAPI, Next.js, LangChain, Django, CPython, VS Code, Tokio), with no second model reading on the agent's behalf. [The files](https://pixel-cli.dev/benchmarks/#well-known-files)
+- **79.7 to 97.2% less read volume** (median 94.5%): whole files versus signatures on eight pinned large files with Pixel 0.5.0; tokens estimated as UTF-8 bytes ÷ 4, not session cost. Files: Hugging Face Transformers, FastAPI, Next.js, LangChain, Django, CPython, VS Code and Tokio; no second model reading on the agent's behalf. [The files](https://pixel-cli.dev/benchmarks/#well-known-files)
 - **Measured against GitNexus** on the same 29 blast-radius cases and machine: callers found at a tie (0.86 against 0.84), a 153 ms median answer against 432 ms, and ~4,160 tokens of context per turn against ~19,700. GitNexus wins on Cypher queries, taint analysis and Ruby callers. Pixel is MIT; GitNexus is PolyForm Noncommercial. [The cases](docs/bench/vs-gitnexus.md)
 - **Evidence with boundaries.** Every answer says whether it is complete, capped or stale; a static call graph never claims it saw every caller.
 - **Local and deterministic.** The index lives in `.pixel/` at the repository root and never leaves the machine; no telemetry. Only Git remotes, the optional `pixel classify` (the one model-backed command) and `pixel web-search`, a one-time embedding model download, and a once-a-day release check made only for a person at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) use the network.

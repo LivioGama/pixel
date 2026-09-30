@@ -2,8 +2,8 @@
 
 What reaches an agent that needs to know what a large file contains. The
 baseline reads the whole file; the Pixel arm runs `pixel list-signatures
-<file>`, the file's skeleton (one line per definition, with its line). Both
-sides count UTF-8 bytes divided by four, as the "Reading code" table on
+<file>`, the file's skeleton (one line per definition, with its line). The measured quantities are file and signatures-output UTF-8 byte volumes.
+Both sides estimate tokens from those bytes divided by four, rounded down, as the "Reading code" table on
 `/benchmarks/` and shunt's benchmark do. No second model, no agent run.
 
 - **Command:** `scripts/bench-read-savings.sh` (downloads each file at its
@@ -60,8 +60,15 @@ gap in Pixel's JavaScript support, not a result.
 - The spread is real: files dense with small methods (VS Code's
   `textModel.ts`, 217 signatures in 2,745 lines) save the least, because
   the skeleton itself is long.
-- This counts what the agent reads, not what a session costs: the agent may
-  still open part of the file afterwards, which `pixel token-savings`
-  measures on real sessions instead.
+- This compares two outputs for an outline question, not equivalent inputs
+  for every coding task. Bodies, comments and subsequent reads are omitted;
+  signature counts only provide a coarse parse check (LangChain: 65 versus
+  69 declarations). Eight selected large files are not a representative
+  repository or agent-workflow sample.
+- Tokens are estimates, not tokenizer or provider usage. No agent duration
+  or billed cost is measured. `pixel token-savings` records local Pixel
+  output volumes and workflow estimates, not every later agent read.
+- These archived Pixel 0.5.0 rows support the file/outline comparison only;
+  they are not a remeasurement of the current release.
 - The landing page's token wall shows the Transformers row; its caption
   quotes the range and median of the kept rows.
