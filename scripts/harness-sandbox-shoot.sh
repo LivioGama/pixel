@@ -1,40 +1,34 @@
 #!/usr/bin/env bash
 # harness-sandbox-shoot.sh — one command: sandbox up, latest pixel, four
-# harnesses shooting the same natural prompt, four videos on the pull request.
+# harnesses shooting one natural prompt, four videos on the PR, live 2x2
+# grid, auto-attached.
 #
 #   scripts/harness-sandbox-shoot.sh [PR] [prompt]
+#   SKIP_SHOOT=1 scripts/harness-sandbox-shoot.sh 415   # re-render + republish only
 #
-# The sandbox is the OrbStack VM `pixel` (a real Linux box, no cargo: the
-# released pixel comes from the linuxbrew tap). Antigravity is shot on the
-# Mac — its login lives in the macOS Keychain, which the VM cannot read —
-# against a local clone of the same repository. Both sides share one tmux
-# server (OrbStack shares /tmp), so the live grid and the sessions interleave.
+# The sandbox is the OrbStack VM `pixel` (pluggable later: Rivet AgentOS,
+# Docker Sandbox). Antigravity is shot on the Mac — its login lives in the
+# macOS Keychain, which the VM cannot read — against a local clone of the
+# same repo. One tmux server serves both sides (OrbStack shares /tmp).
 #
-# The prompt is a plain build task with no tool hints and no mention of
-# pixel: the point is measuring pixel discovery — whether each harness,
-# with pixel installed, reaches for pixel on its own. Trust/consent dialogs
-# are pre-accepted by config where a CLI has one (Claude's bypass warning,
-# idempotent json edit); Antigravity's workspace-trust dialog has no config
-# form, so its tmux start keys press Enter.
-#
-# Sandbox swap-in point: Rivet AgentOS (WASM isolates, agent packages for
-# Claude/Codex/pi) would replace the VM backend, but the CLIs need real home
-# configs and native binaries — OrbStack stays the default until a shoot
-# runs inside AgentOS.
+# The prompt carries no tool hints and no mention of pixel: the video
+# measures pixel discovery. Trust/consent dialogs are pre-accepted by config
+# where a CLI has one (Claude's bypass warning); Antigravity's workspace
+# trust dialog has no config form, so its start keys press Enter.
 
 set -u
 
 PR="${1:-}"
 PROMPT="${2:-Create the \"story\" feature}"
 VM="pixel"
-SHOOT4="/Users/livio/Downloads/shoot4"   # shared via OrbStack's /tmp-like mounts
+SHOOT4="/Users/livio/Downloads/shoot4"
 OUTDIR="$SHOOT4"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RECORDER="$SCRIPT_DIR/harness-recorder.sh"
 REPO_ORIGIN="git@github.com:LivioGama/facebook-clone.git"
 AGY_MAC_REPO="${AGY_MAC_REPO:-$HOME/Documents/facebook-clone-agy}"
-GRID_MARKER_BEGIN="<!-- sandbox-grid:begin -->"
-GRID_MARKER_END="<!-- sandbox-grid:end -->"
+GRID_BEGIN="<!-- sandbox-grid:begin -->"
+GRID_END="<!-- sandbox-grid:end -->"
 
 die() { echo "harness-sandbox-shoot: $*" >&2; exit 2; }
 command -v orb >/dev/null 2>&1 || die "orb not found (OrbStack)"
@@ -42,7 +36,7 @@ command -v gh >/dev/null 2>&1 || die "gh not found"
 command -v agg >/dev/null 2>&1 || die "agg not found (brew install agg)"
 command -v tmux >/dev/null 2>&1 || die "tmux not found (brew install tmux)"
 
-# ── 1. Sandbox up: VM running, recording tools in, pixel latest + install ──
+# ── 1. Sandbox up: VM running, tools in, pixel latest + install ────────────
 orb start "$VM" 2>/dev/null || true
 orb -m "$VM" bash -lc '
     command -v tmux >/dev/null 2>&1 || /home/linuxbrew/.linuxbrew/bin/brew install -q tmux
@@ -66,7 +60,7 @@ d["projects"]["/home/livio/facebook-clone-claude-code"]["bypassPermissionsModeAc
 json.dump(d, open(p, "w"))
 PY
 ' || die "sandbox prep failed"
-echo "harness-sandbox-shoot: sandbox ready (pixel $($VM-shell pixel --version 2>/dev/null || orb -m $VM bash -lc 'pixel --version'))"
+echo "harness-sandbox-shoot: sandbox ready ($(orb -m $VM bash -lc 'pixel --version' | head -1))"
 
 # ── 2. Repos: one per harness, pre-indexed off camera ──────────────────────
 orb -m "$VM" bash -lc 'for d in /home/livio/facebook-clone-claude-code /home/livio/facebook-clone-codex /home/livio/facebook-clone-devin; do
@@ -77,43 +71,45 @@ if [ ! -d "$AGY_MAC_REPO/.git" ]; then
 fi
 pixel build-index "$AGY_MAC_REPO" >/dev/null 2>&1 || true
 
-# ── 3. Shoot: four recorders in parallel ───────────────────────────────────
+# ── 3. Shoot: four recorders in parallel (SKIP_SHOOT=1 reuses casts) ───────
 mkdir -p "$OUTDIR"
-for spec in "claude|/home/livio/facebook-clone-claude-code|vm" \
-            "codex|/home/livio/facebook-clone-codex|vm" \
-            "pi|/home/livio/facebook-clone-devin|vm" \
-            "agy|$AGY_MAC_REPO|mac"; do
-    provider="${spec%%|*}"
-    rest="${spec#*|}"
-    repo="${rest%%|*}"
-    host="${rest##*|}"
-    if [ "$host" = "vm" ]; then
-        orb -m "$VM" bash -lc "cd /Users/livio/Downloads && env IS_SANDBOX=1 \
-            HARNESS_PROMPT_FULL=\"$PROMPT\" HARNESS_OUTDIR=/Users/livio/Downloads/shoot4 \
-            HARNESS_INTERACTIVE_MAX=300 HARNESS_INTERACTIVE_TMUX=1 \
-            PATH=/home/linuxbrew/.linuxbrew/bin:/home/livio/.local/bin:\$PATH \
-            bash /Users/livio/Downloads/harness-recorder.sh \
-            --provider $provider --repo $repo --scenario rns --interactive" \
-            > "$OUTDIR/shoot-$provider.log" 2>&1 &
-    else
-        HARNESS_PROMPT_FULL="$PROMPT" HARNESS_OUTDIR="$OUTDIR" \
-            HARNESS_INTERACTIVE_MAX=300 HARNESS_INTERACTIVE_IDLE=90 \
-            HARNESS_INTERACTIVE_TMUX=1 \
-            bash "$RECORDER" \
-            --provider "$provider" --repo "$repo" --scenario rns --interactive \
-            > "$OUTDIR/shoot-$provider.log" 2>&1 &
-    fi
-done
-echo "harness-sandbox-shoot: four shoots running (claude, codex, pi in the VM; agy on the Mac)"
-wait
-echo "harness-sandbox-shoot: all shoots landed"
+if [ -z "${SKIP_SHOOT:-}" ]; then
+    for spec in "claude|/home/livio/facebook-clone-claude-code|vm" \
+                "codex|/home/livio/facebook-clone-codex|vm" \
+                "pi|/home/livio/facebook-clone-devin|vm" \
+                "agy|$AGY_MAC_REPO|mac"; do
+        provider="${spec%%|*}"
+        rest="${spec#*|}"
+        repo="${rest%%|*}"
+        host="${rest##*|}"
+        if [ "$host" = "vm" ]; then
+            orb -m "$VM" bash -lc "cd /Users/livio/Downloads && env IS_SANDBOX=1 \
+                HARNESS_PROMPT_FULL=\"$PROMPT\" HARNESS_OUTDIR=/Users/livio/Downloads/shoot4 \
+                HARNESS_INTERACTIVE_MAX=300 HARNESS_INTERACTIVE_TMUX=1 \
+                PATH=/home/linuxbrew/.linuxbrew/bin:/home/livio/.local/bin:\$PATH \
+                bash /Users/livio/Downloads/harness-recorder.sh \
+                --provider $provider --repo $repo --scenario rns --interactive" \
+                > "$OUTDIR/shoot-$provider.log" 2>&1 &
+        else
+            HARNESS_PROMPT_FULL="$PROMPT" HARNESS_OUTDIR="$OUTDIR" \
+                HARNESS_INTERACTIVE_MAX=300 HARNESS_INTERACTIVE_IDLE=90 \
+                HARNESS_INTERACTIVE_TMUX=1 \
+                bash "$RECORDER" \
+                --provider "$provider" --repo "$repo" --scenario rns --interactive \
+                > "$OUTDIR/shoot-$provider.log" 2>&1 &
+        fi
+    done
+    echo "harness-sandbox-shoot: four shoots running (claude, codex, pi in the VM; agy on the Mac)"
+    wait
+    echo "harness-sandbox-shoot: all shoots landed"
+fi
 
 # ── 4. Videos: cast seconds → agg speed, ≤15 s each ────────────────────────
 for provider in claude codex pi agy; do
     cast="$OUTDIR/harness-$provider-rns.cast"
     [ -s "$cast" ] || { echo "  missing cast: $provider" >&2; continue; }
     secs=$(python3 -c "
-import json, sys
+import json
 last = 0.0
 for line in open('$cast'):
     try: e = json.loads(line)
@@ -128,44 +124,74 @@ print(max(1, round(last)))")
     echo "  $provider: ${secs}s cast → gif at speed $speed"
 done
 
-# ── 5. Live 2x2 grid tmux (detached; watch with `tmux attach -t shoot-grid`)
-/opt/homebrew/bin/tmux kill-session -t shoot-grid 2>/dev/null || true
-/opt/homebrew/bin/tmux new-session -d -s shoot-grid -n grid \
+# ── 5. Live 2x2 grid tmux (detached; the script attaches at the end) ───────
+tmux kill-session -t shoot-grid 2>/dev/null || true
+tmux new-session -d -s shoot-grid -n grid \
     "orb -m $VM bash -lc 'cd /home/livio/facebook-clone-claude-code && exec claude --dangerously-skip-permissions \"$PROMPT\"'"
-/opt/homebrew/bin/tmux split-window -h -t shoot-grid \
+tmux split-window -h -t shoot-grid \
     "orb -m $VM bash -lc 'cd /home/livio/facebook-clone-codex && exec codex'"
-/opt/homebrew/bin/tmux split-window -v -t shoot-grid.0 \
+tmux split-window -v -t shoot-grid.0 \
     "orb -m $VM bash -lc 'cd /home/livio/facebook-clone-devin && exec pi \"$PROMPT\"'"
-/opt/homebrew/bin/tmux split-window -v -t shoot-grid.1 \
-    "cd '$AGY_MAC_REPO' && exec bash -c '\"$HOME/.local/bin/agy\" -i=\"$PROMPT\" --dangerously-skip-permissions'"
-/opt/homebrew/bin/tmux select-layout -t shoot-grid tiled
-echo "  live grid ready: tmux attach -t shoot-grid"
+tmux split-window -v -t shoot-grid.1 \
+    "cd '$AGY_MAC_REPO' && exec bash -c '$HOME/.local/bin/agy -i=\"$PROMPT\" --dangerously-skip-permissions'"
+tmux select-layout -t shoot-grid tiled
+echo "  live grid running"
 
 # ── 6. Publish: GIFs to the media branch, counts into the PR description ──
 if [ -n "$PR" ]; then
-    (cd "$SCRIPT_DIR/.." && git fetch -q origin harness-recordings-media 2>/dev/null) || true
-    base=$(git -C "$SCRIPT_DIR/.." rev-parse -q --verify FETCH_HEAD || true)
-    if [ -z "$base" ]; then
-        git -C "$SCRIPT_DIR/.." push -q origin "HEAD:refs/heads/harness-recordings-media"
-        git -C "$SCRIPT_DIR/.." fetch -q origin harness-recordings-media
-        base=$(git -C "$SCRIPT_DIR/.." rev-parse -q --verify FETCH_HEAD)
-    fi
+    git fetch -q origin harness-recordings-media 2>/dev/null || {
+        git push -q origin "HEAD:refs/heads/harness-recordings-media"
+        git fetch -q origin harness-recordings-media
+    }
+    base=$(git rev-parse -q --verify FETCH_HEAD)
     export GIT_INDEX_FILE="$OUTDIR/media-index"
-    git -C "$SCRIPT_DIR/.." read-tree "$(git -C "$SCRIPT_DIR/.." rev-parse "$base^{tree}")"
+    git read-tree "$(git rev-parse "$base^{tree}")"
     for provider in claude codex pi agy; do
         gif="$OUTDIR/harness-$provider-rns.gif"
         [ -s "$gif" ] || continue
-        blob=$(git -C "$SCRIPT_DIR/.." hash-object -w "$gif")
-        git -C "$SCRIPT_DIR/.." update-index --add --cacheinfo 100644,$blob,recordings/grid/$provider-rns.gif
+        blob=$(git hash-object -w "$gif")
+        git update-index --add --cacheinfo 100644,$blob,recordings/grid/$provider-rns.gif
     done
-    tree=$(git -C "$SCRIPT_DIR/.." write-tree)
+    tree=$(git write-tree)
     unset GIT_INDEX_FILE
-    commit=$(git -C "$SCRIPT_DIR/.." -c user.email=pixel-recorder@local -c user.name=pixel-recorder \
+    commit=$(git -c user.email=pixel-recorder@local -c user.name=pixel-recorder \
         commit-tree "$tree" -p "$base" -m "sandbox grid: story-feature shoots for PR #$PR")
-    git -C "$SCRIPT_DIR/.." push -q origin "$commit:refs/heads/harness-recordings-media" \
-        || die "media push failed"
+    git push -q origin "$commit:refs/heads/harness-recordings-media" || die "media push failed"
     echo "  media branch updated"
-    gh pr edit "$PR" --body-file "$OUTDIR/pr-body.md" 2>/dev/null \
-        || echo "  (write $OUTDIR/pr-body.md with the grid and rerun the edit)"
+
+    gh pr view "$PR" --json body -q .body > "$OUTDIR/pr-body-current.md" 2>/dev/null || true
+    python3 - "$PR" "$OUTDIR" "$GRID_BEGIN" "$GRID_END" << 'PY'
+import json, subprocess, sys
+pr, outdir, begin_m, end_m = sys.argv[1:5]
+body = subprocess.run(["gh", "pr", "view", pr, "--json", "body", "-q", ".body"],
+                      capture_output=True, text=True).stdout
+rows = ""
+for p in ("claude", "codex", "pi", "agy"):
+    m = json.load(open(f"{outdir}/meta-{p}-rns.json"))
+    rows += f"| {p} | {m['pixel_calls']} | {round(m['wall_ms'] / 1000)}s |\n"
+grid = "\n".join([
+    begin_m,
+    "## 🎥 Pixel discovery — sandbox grid (one natural prompt, no tool hints)",
+    "",
+    "| harness | pixel calls | wall |",
+    "| --- | --- | --- |",
+    rows.rstrip(),
+    "",
+    "| Claude + pi | Codex + Antigravity |",
+    "| --- | --- |",
+    "| ![claude](https://raw.githubusercontent.com/LivioGama/pixel/harness-recordings-media/recordings/grid/claude-rns.gif) ![pi](https://raw.githubusercontent.com/LivioGama/pixel/harness-recordings-media/recordings/grid/pi-rns.gif) | ![codex](https://raw.githubusercontent.com/LivioGama/pixel/harness-recordings-media/recordings/grid/codex-rns.gif) ![agy](https://raw.githubusercontent.com/LivioGama/pixel/harness-recordings-media/recordings/grid/agy-rns.gif) |",
+    end_m,
+])
+i, j = body.find(begin_m), body.find(end_m)
+if i >= 0 and j > i:
+    body = body[:i] + grid + "\n" + body[j + len(end_m):]
+else:
+    body = body.rstrip() + "\n\n---\n\n" + grid + "\n"
+open(f"{outdir}/pr-body.md", "w").write(body)
+PY
+    gh pr edit "$PR" --body-file "$OUTDIR/pr-body.md" || die "pr edit failed"
+    echo "  PR description updated"
 fi
-echo "harness-sandbox-shoot: done — metas in $OUTDIR, grid on the media branch"
+
+echo "harness-sandbox-shoot: done — attaching the live grid"
+exec tmux attach -t shoot-grid
