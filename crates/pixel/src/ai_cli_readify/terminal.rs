@@ -16,6 +16,7 @@
 
 use std::{
     io::{self, Read, Write},
+    os::fd::AsRawFd,
     path::Path,
     process::{Child, ChildStdout, Command, ExitStatus, Stdio},
     sync::LazyLock,
@@ -40,6 +41,16 @@ pub(crate) const CTRL_C: &[u8] = b"\x03";
 /// for minutes must not grow the buffer without limit while the only thing
 /// ever matched is the last screenful.
 const SCREEN_CAP_CHARS: usize = 65_536;
+
+/// How many `read`s one [`ScriptTerminal::pump`] makes before it hands the
+/// driver back its clock.
+///
+/// A child that streams without pausing keeps the pty readable for as long as
+/// it runs, so a drain that follows the output rather than a count never
+/// returns and leaves the launch budget with nothing to measure. Stopping
+/// mid-screen costs nothing: the next pump continues from where this one
+/// stopped.
+const PUMP_READS: usize = 16;
 
 /// What to send when a prompt appears.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,6 +220,13 @@ impl ScriptTerminal {
         }
         let mut child = command.spawn()?;
         let stdout = child.stdout.take().expect("stdout was piped");
+        if let Err(e) = set_nonblocking_reads(&stdout) {
+            // The child is running and no caller owns it yet: it must not
+            // outlive a terminal that was never handed over.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
         Ok(Self {
             child,
             stdout,
@@ -230,10 +248,14 @@ impl ScriptTerminal {
     /// Everything the child has written since the last call, appended to the
     /// running screen.
     ///
-    /// Non-blocking: `script` holds the pty open, so a blocking read here
-    /// would wait for the child to exit rather than for the next screen.
+    /// The read end is non-blocking and one call drains at most [`PUMP_READS`]
+    /// chunks, so the call always returns: `script` holds the pty open for the
+    /// child's whole life, and a driver waiting in `read(2)` waits for a child
+    /// that may have nothing to say and no reason to stop, with its budget
+    /// left with nothing to measure. A `WouldBlock` read is the end of this
+    /// screen rather than a failure.
     pub(crate) fn pump(&mut self) -> io::Result<&str> {
-        loop {
+        for _ in 0..PUMP_READS {
             match self.stdout.read(&mut self.read_buf) {
                 Ok(0) => break,
                 Ok(n) => {
@@ -289,6 +311,31 @@ impl Drop for ScriptTerminal {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// Put the read end of the child's output pipe in non-blocking mode, so a
+/// read returns the moment the child has nothing buffered rather than waiting
+/// for its next word.
+///
+/// The mode belongs to the descriptor, so it is a one-time property of the
+/// terminal rather than something every read asks for; [`ScriptTerminal::pump`]
+/// takes the resulting `WouldBlock` as the end of the current screen.
+#[cfg_attr(test, mutants::skip)] // one syscall on a descriptor the process owns; the prompt-return contract is tested against real children
+fn set_nonblocking_reads(stdout: &ChildStdout) -> io::Result<()> {
+    // SAFETY: `stdout` owns this process's read end of the pty pipe for the
+    // whole call, and `F_GETFL` only reads that descriptor's status flags.
+    let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the same open descriptor, still owned by `stdout` throughout;
+    // `F_SETFL` writes back the flag word read above with `O_NONBLOCK` added
+    // and touches nothing else.
+    let set = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if set < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// What a driven launch ended as.
@@ -614,5 +661,91 @@ mod tests {
     fn shell_quoting_survives_an_apostrophe() {
         assert_eq!(shell_quote("it's"), r"'it'\''s'");
         assert_eq!(shell_quote("plain"), "'plain'");
+    }
+
+    /// Drive a real child through the terminal the driver reads, on a thread
+    /// so that a call which never comes back fails a timeout here instead of
+    /// hanging the whole suite.
+    fn drive_a_real_child(argv: &[&str], budget: Duration) -> (LaunchOutcome, Duration) {
+        let argv: Vec<String> = argv.iter().map(ToString::to_string).collect();
+        let cwd = std::env::current_dir().expect("the test process has a working directory");
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let terminal = ScriptTerminal::spawn(&argv, &cwd, &[]).expect("script must start");
+            let terminal = std::cell::RefCell::new(terminal);
+            let started = Instant::now();
+            let outcome = drive_until_settled(
+                || {
+                    terminal
+                        .borrow_mut()
+                        .pump()
+                        .map(str::to_string)
+                        .unwrap_or_default()
+                },
+                |keys| {
+                    let _ = terminal.borrow_mut().send(keys);
+                },
+                false,
+                budget,
+                &mut Instant::now,
+            );
+            let _ = tx.send((outcome, started.elapsed()));
+        });
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("the driver must come back instead of waiting on the child")
+    }
+
+    #[test]
+    fn a_child_that_says_nothing_and_never_exits_ends_the_drive_at_its_budget() {
+        // `sleep` writes nothing and outlives the budget by a wide margin, so
+        // the launch has to end on the clock rather than on the child's next
+        // word or on its exit.
+        let (outcome, elapsed) = drive_a_real_child(&["sleep", "30"], Duration::from_millis(500));
+        assert!(!outcome.clean, "{outcome:?}");
+        assert_eq!(
+            outcome.blocker,
+            Some("no verified interface before the launch budget ran out")
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "a 500 ms budget took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_child_that_never_stops_writing_ends_the_drive_at_its_budget() {
+        // A stream the reader can never catch up with is the other shape that
+        // holds a pump open; the driver still gets back to its own clock, and
+        // the screen it read is the one it reports.
+        let (outcome, elapsed) = drive_a_real_child(&["yes"], Duration::from_millis(500));
+        assert!(!outcome.screen.is_empty(), "{outcome:?}");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "a 500 ms budget took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn a_child_the_driver_gave_up_on_is_reaped_with_the_terminal() {
+        // The terminal owns the teardown, and the launch budget ends with the
+        // child still running: a child killed but never waited on would sit as
+        // a zombie for the life of the process.
+        let argv = ["sleep".to_string(), "30".to_string()];
+        let cwd = std::env::current_dir().expect("the test process has a working directory");
+        let pid = {
+            let terminal = ScriptTerminal::spawn(&argv, &cwd, &[]).expect("script must start");
+            terminal.child.id()
+        };
+        let pid = libc::pid_t::try_from(pid).expect("a pid fits in a pid_t");
+        // SAFETY: the pid named a child of this test a moment ago and the
+        // terminal has since waited on it; signal 0 delivers nothing and only
+        // asks whether the process is still there.
+        let gone = unsafe { libc::kill(pid, 0) };
+        assert_eq!(gone, -1, "the child outlived the terminal that owned it");
+        assert_eq!(
+            io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH),
+            "the child is a zombie rather than gone"
+        );
     }
 }
