@@ -100,6 +100,12 @@ pub(crate) enum ProbeFailure {
     /// network. The name is a constant in this module, so this arm means the
     /// constant is stale.
     NoModel,
+    /// 2xx, and the body carried no completion. The only arm that comes from
+    /// a success status: the provider is up and took the request, and it did
+    /// not answer the question the probe asked. Counted as ready, it would
+    /// be selected and `--apply` would point four agents' configs at a
+    /// provider that serves nothing.
+    EmptyCompletion,
     /// 5xx — the provider is up and failing.
     Server,
     /// The request never produced a status: DNS, TLS, connect or read.
@@ -119,6 +125,9 @@ impl ProbeFailure {
             // "(HTTP {status})".
             Self::Upstream => "request refused",
             Self::NoModel => "model not found (404)",
+            // Names no status: this arm is always a 2xx, and the detail
+            // appends the one it really saw.
+            Self::EmptyCompletion => "no completion",
             Self::Server => "provider error (5xx)",
             Self::Transport => "unreachable",
         }
@@ -217,18 +226,29 @@ pub(crate) fn probe(provider: Provider, base: &str, key: &str, timeout: Duration
         .read_to_string()
         .unwrap_or_default();
     if (200..300).contains(&status) {
-        let reply = reply_text(&text);
-        return ProbeOutcome::ready(provider, reply);
+        return match reply_text(&text) {
+            Some(reply) => ProbeOutcome::ready(provider, reply),
+            // A 200 whose body carries no completion is the provider being
+            // up and not answering. It is a failure with the same detail
+            // shape as the rest, so the body it did send stays readable.
+            None => {
+                let failure = ProbeFailure::EmptyCompletion;
+                let line = detail(&text, status, &failure);
+                ProbeOutcome::failed(provider, failure, line)
+            }
+        };
     }
     let failure = classify_status(status);
     let detail = detail(&text, status, &failure);
     ProbeOutcome::failed(provider, failure, detail)
 }
 
-/// The assistant's reply from an OpenAI-shaped body, or a note that the body
-/// carried none. An empty completion on a 200 is reported, not silently
-/// counted as ready.
-fn reply_text(body: &str) -> String {
+/// The assistant's reply from an OpenAI-shaped body, or `None` when the body
+/// carried none. The caller turns that `None` into [`ProbeFailure::
+/// EmptyCompletion`]: a 200 is not the provider answering the question, and a
+/// probe that read one as ready would be reporting its own request, not the
+/// provider.
+fn reply_text(body: &str) -> Option<String> {
     let reply = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|v| {
@@ -241,8 +261,8 @@ fn reply_text(body: &str) -> String {
                 .map(str::to_string)
         });
     match reply {
-        Some(text) if !text.trim().is_empty() => text.trim().to_string(),
-        _ => "(200 with no completion)".to_string(),
+        Some(text) if !text.trim().is_empty() => Some(text.trim().to_string()),
+        _ => None,
     }
 }
 
@@ -449,15 +469,25 @@ mod tests {
 
     #[test]
     fn a_200_with_no_completion_is_not_counted_as_ready() {
+        // The provider is up and took the request; it did not answer it.
+        // `ready` is what `selected` reads, so a 200 with nothing in it
+        // would be the provider `--apply` points four agents at.
         let outcome = probe_against(200, r#"{"choices":[]}"#);
-        assert!(outcome.ready, "a 200 is the provider being up");
-        assert_eq!(outcome.detail, "(200 with no completion)");
+        assert!(!outcome.ready, "{outcome:?}");
+        assert_eq!(outcome.failure, Some(ProbeFailure::EmptyCompletion));
+        assert!(
+            outcome.detail.starts_with("no completion") && outcome.detail.contains("HTTP 200"),
+            "the detail names the condition and the status it really saw: {}",
+            outcome.detail
+        );
     }
 
     #[test]
     fn a_200_with_an_empty_completion_is_not_counted_as_ready() {
         let outcome = probe_against(200, r#"{"choices":[{"message":{"content":"  "}}]}"#);
-        assert_eq!(outcome.detail, "(200 with no completion)", "{outcome:?}");
+        assert!(!outcome.ready, "{outcome:?}");
+        assert_eq!(outcome.failure, Some(ProbeFailure::EmptyCompletion));
+        assert!(outcome.detail.starts_with("no completion"), "{outcome:?}");
     }
 
     #[test]

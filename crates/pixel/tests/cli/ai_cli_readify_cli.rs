@@ -9,12 +9,17 @@
 
 use crate::support::{neutral_home, pixel_command};
 
-/// Run the command with a HOME of its own and every provider key removed, so
-/// nothing it does depends on the machine it runs on.
+/// Run the command with a HOME of its own, every provider key removed and a
+/// PATH that reaches no agent binary, so nothing it does depends on the
+/// machine it runs on. The two `--approve` tests below set the same PATH for
+/// the same reason; here it is on every run, because an agent binary the
+/// developer happens to have installed changes what an ordinary run reports.
 fn readify(args: &[&str]) -> std::process::Output {
     let mut command = pixel_command();
     command.args(args);
-    command.env("HOME", neutral_home());
+    command
+        .env("HOME", neutral_home())
+        .env("PATH", empty_path());
     for key in [
         "OLLAMA_API_KEY",
         "ANTHROPIC_API_KEY",
@@ -168,11 +173,16 @@ fn apply_writes_nothing_when_no_provider_answered() {
     // written into, and the files are read back afterwards rather than
     // trusted. `neutral_home` is shared, so the check is that the run added
     // nothing rather than that the directory is empty.
+    // The paths are the ones `--apply` would write, not rough names for
+    // them: a `codex/config.toml` that no code ever touches is missing from
+    // every HOME, so asserting on it passes without proving anything.
     let home = neutral_home();
-    let before: Vec<std::path::PathBuf> = ["codex/config.toml", "claude/settings.json"]
-        .iter()
-        .map(|rel| home.join(rel))
-        .collect();
+    let before: Vec<std::path::PathBuf> = [
+        home.join(".codex/config.toml"),
+        home.join(".claude/settings.json"),
+        home.join(".gemini/antigravity-cli/settings.json"),
+    ]
+    .to_vec();
     for path in &before {
         assert!(
             !path.exists(),
@@ -278,7 +288,7 @@ fn the_approve_flag_clears_only_the_gate_it_can_reach_with_no_binary_on_path() {
     // written holds no file at all, and Claude's holds the facts its two
     // dialogs ask about, keyed on the workspace.
     assert!(
-        !neutral_home().join("codex/config.toml").exists(),
+        !neutral_home().join(".codex/config.toml").exists(),
         "--approve cleared no Codex gate, so it must have written none"
     );
     let written: serde_json::Value = serde_json::from_str(

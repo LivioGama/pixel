@@ -38,10 +38,11 @@ pub(crate) mod terminal;
 
 use std::{
     io::{self, Read},
+    os::{fd::AsRawFd, unix::process::CommandExt as _},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::Mutex,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
@@ -117,6 +118,15 @@ pub(crate) struct Report {
     pub(crate) agents: Vec<AgentRow>,
     /// Config files rewritten by `--apply`.
     pub(crate) applied: Vec<String>,
+    /// Configs `--apply` was asked to rewrite and refused, each line the
+    /// writer's own reason and the file it names.
+    ///
+    /// Separate from an empty [`Report::applied`] for the reason
+    /// [`Report::verified_only`] exists: a run that wrote nothing because it
+    /// was not asked, and a run that wrote nothing because every write was
+    /// turned away, must not read alike — the second is a failure that
+    /// otherwise passes for a quiet success.
+    pub(crate) refused: Vec<String>,
     /// What `--apply` would have done, when it was not given.
     pub(crate) pending: Vec<String>,
     /// Configs verified but never written, with the file named so the
@@ -224,11 +234,24 @@ fn probe_providers(timeout: Duration) -> (ProviderRow, Option<Provider>) {
     })
 }
 
+/// How often the capture drains the pipes and looks at the child.
+const CAPTURE_POLL: Duration = Duration::from_millis(20);
+
+/// How many reads one drain takes before the capture looks at the child
+/// again. A child that is writing continuously would otherwise hold this loop
+/// — and the deadline check behind it — for as long as it keeps writing.
+const CAPTURE_READS: usize = 64;
+
 /// Run one command, capture its output, and bound it by `timeout`.
 ///
-/// The two pipes are drained by their own threads because a child that fills
-/// one while the parent is still polling `try_wait` would deadlock, and a
-/// probe that hangs is exactly the failure this has to survive.
+/// The pipes are drained here, against the same clock as the child, and read
+/// non-blocking. A drain that waits for end-of-file waits for every process
+/// that inherited the write end to close it, and one that never does — a
+/// wrapper that backgrounds a helper, which is what several of these agents
+/// do — holds the probe open past its own exit and past the timeout it was
+/// given. The child is put in its own process group so the deadline can end
+/// the descendants that inherited the pipes along with it, instead of leaving
+/// them running against a pipe nobody reads.
 #[cfg_attr(test, mutants::skip)] // a spawn-and-drain adapter; its callers are tested against a fake
 fn run_capture(argv: &[String], timeout: Duration) -> io::Result<(bool, String)> {
     let mut child = Command::new(&argv[0])
@@ -237,39 +260,87 @@ fn run_capture(argv: &[String], timeout: Duration) -> io::Result<(bool, String)>
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_remove("ANTHROPIC_API_KEY")
+        .process_group(0)
         .spawn()?;
     let mut stdout = child.stdout.take().expect("stdout was piped");
     let mut stderr = child.stderr.take().expect("stderr was piped");
-    let (out, err) = std::thread::scope(|scope| {
-        let out = scope.spawn(move || {
-            let mut buffer = String::new();
-            let _ = stdout.read_to_string(&mut buffer);
-            buffer
-        });
-        let err = scope.spawn(move || {
-            let mut buffer = String::new();
-            let _ = stderr.read_to_string(&mut buffer);
-            buffer
-        });
-        (
-            out.join().unwrap_or_default(),
-            err.join().unwrap_or_default(),
-        )
-    });
-    let deadline = std::time::Instant::now() + timeout;
+    set_nonblocking(&stdout)?;
+    set_nonblocking(&stderr)?;
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let deadline = Instant::now() + timeout;
     let status = loop {
+        drain(&mut stdout, &mut out);
+        drain(&mut stderr, &mut err);
         match child.try_wait()? {
             Some(status) => break Some(status),
-            None if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
+            None if Instant::now() >= deadline => {
+                kill_group(&child);
                 let _ = child.wait();
                 break None;
             }
-            None => std::thread::sleep(Duration::from_millis(20)),
+            None => std::thread::sleep(CAPTURE_POLL),
         }
     };
+    // Whatever the child wrote between the last drain and its exit is still
+    // in the pipe: the write end is closed now, so one more read finds it.
+    drain(&mut stdout, &mut out);
+    drain(&mut stderr, &mut err);
     let success = status.is_some_and(|s| s.success());
-    Ok((success, format!("{out}\n{err}")))
+    Ok((
+        success,
+        format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&err)
+        ),
+    ))
+}
+
+/// Take everything `reader` has buffered right now, and return as soon as it
+/// has none, so the caller's next look at the child is on time. End of file
+/// and any read fault both end the drain: a pipe that has been closed has
+/// nothing more to give, and a pipe that failed is not going to recover
+/// inside this probe.
+fn drain<R: Read>(reader: &mut R, into: &mut Vec<u8>) {
+    let mut buf = [0u8; 8_192];
+    for _ in 0..CAPTURE_READS {
+        match reader.read(&mut buf) {
+            Ok(0) | Err(_) => return,
+            Ok(n) => into.extend_from_slice(&buf[..n]),
+        }
+    }
+}
+
+/// Put the read end of the child's output pipe in non-blocking mode, the way
+/// the pty driver does: without it the first read of a silent child is the
+/// one that waits for the timeout.
+#[cfg_attr(test, mutants::skip)] // one syscall on a descriptor the process owns
+fn set_nonblocking<R: AsRawFd>(stdout: &R) -> io::Result<()> {
+    // SAFETY: `stdout` owns this process's read end of the pipe for the whole
+    // call, and `F_GETFL` only reads that descriptor's status flags.
+    let flags = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the same open descriptor, still owned by `stdout` throughout;
+    // `F_SETFL` writes back the flag word read above with `O_NONBLOCK` added
+    // and touches nothing else.
+    let set = unsafe { libc::fcntl(stdout.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) };
+    if set < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// End the child and everything it started in its group, so a descendant that
+/// inherited the output pipes cannot outlive the probe that timed out.
+#[cfg_attr(test, mutants::skip)] // one signal to a group the child owns
+fn kill_group(child: &Child) {
+    // SAFETY: `child` is running, so its pid is a live group leader —
+    // `process_group(0)` made it one — and `kill` only takes a pid and a
+    // signal.
+    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
 }
 
 /// Probe one agent against one provider.
@@ -458,14 +529,23 @@ where
 }
 
 /// Rewrite each requested agent's config to point at `provider`, returning
-/// what was written.
+/// what was written and what was refused.
 ///
 /// Only the agents the run asked for are touched, and only those whose config
 /// this command owns: `rewrites_config` is the single place that decides the
 /// second half, so adding a fifth agent cannot quietly start writing to a
 /// file nobody sanctioned.
-fn write_configs(home: &std::path::Path, provider: Provider, agents: &[Agent]) -> Vec<String> {
+///
+/// A writer's refusal is a result, not a non-event: a settings file holding
+/// an `env` this command cannot merge into is left exactly as it was found,
+/// and the caller has to be able to say so.
+fn write_configs(
+    home: &std::path::Path,
+    provider: Provider,
+    agents: &[Agent],
+) -> (Vec<String>, Vec<String>) {
     let mut written = Vec::new();
+    let mut refused = Vec::new();
     for agent in agents {
         if !agent.rewrites_config() {
             continue;
@@ -478,11 +558,12 @@ fn write_configs(home: &std::path::Path, provider: Provider, agents: &[Agent]) -
             // so a new agent cannot arrive without a writer beside it.
             Agent::Devin => continue,
         };
-        if let Ok(line) = result {
-            written.push(line);
+        match result {
+            Ok(line) => written.push(line),
+            Err(reason) => refused.push(format!("{}: {reason}", agent.name())),
         }
     }
-    written
+    (written, refused)
 }
 
 pub(crate) fn run(options: &Options) -> Result<Report, String> {
@@ -502,10 +583,17 @@ pub(crate) fn run(options: &Options) -> Result<Report, String> {
     );
     let auth_chain = auth_chain_for(options, &rows, winner);
     let home = home_dir()?;
-    let (applied, pending) = match (winner, options.apply) {
-        (Some(provider), true) => (write_configs(&home, provider, &agents), Vec::new()),
-        (Some(provider), false) => (Vec::new(), planned_configs(&home, provider, &agents)),
-        (None, _) => (Vec::new(), Vec::new()),
+    let (applied, pending, refused) = match (winner, options.apply) {
+        (Some(provider), true) => {
+            let (written, refused) = write_configs(&home, provider, &agents);
+            (written, Vec::new(), refused)
+        }
+        (Some(provider), false) => (
+            Vec::new(),
+            planned_configs(&home, provider, &agents),
+            Vec::new(),
+        ),
+        (None, _) => (Vec::new(), Vec::new(), Vec::new()),
     };
     let approvals = options
         .approve
@@ -515,6 +603,7 @@ pub(crate) fn run(options: &Options) -> Result<Report, String> {
         selected: winner.map(Provider::name),
         agents: rows,
         applied,
+        refused,
         pending,
         verified_only: verified_only(&home, &agents),
         approvals,
@@ -716,6 +805,10 @@ pub(crate) fn print_report(report: &Report) {
     print!("{}", section("applied", &report.applied));
     print!(
         "{}",
+        section("refused — left as they were", &report.refused)
+    );
+    print!(
+        "{}",
         section("would apply (re-run with --apply)", &report.pending)
     );
     print!("{}", section("verified only", &report.verified_only));
@@ -784,6 +877,52 @@ mod tests {
         dir
     }
 
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn a_capture_ends_when_the_child_exits_even_if_a_descendant_holds_the_pipe() {
+        // `sh -c 'sleep 5 & exit 0'` exits at once and leaves the background
+        // `sleep` holding the write end it inherited. A drain that waits for
+        // end of file waits for that `sleep`, which is not the probe's
+        // business and is five seconds past the answer it already has.
+        let started = Instant::now();
+        let (success, output) = run_capture(
+            &argv(&["sh", "-c", "echo ready; sleep 5 & exit 0"]),
+            Duration::from_secs(5),
+        )
+        .expect("a shell runs");
+        assert!(success, "the child exited 0: {output:?}");
+        assert!(
+            output.contains("ready"),
+            "what the child wrote before exiting is still captured: {output:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the capture waited for a descendant that held the pipe: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn a_capture_that_reaches_its_deadline_kills_the_child_and_says_so() {
+        // The child itself never exits. The deadline has to end it rather
+        // than wait for it, and the outcome has to read as a failure: a
+        // probe that reported success here would report the timeout itself
+        // as the agent answering.
+        let started = Instant::now();
+        let (success, _) =
+            run_capture(&argv(&["sh", "-c", "sleep 30"]), Duration::from_millis(300))
+                .expect("a shell runs");
+        assert!(!success, "a child that never exited did not succeed");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the deadline did not end the child: {:?}",
+            started.elapsed()
+        );
+    }
+
     #[test]
     fn a_report_prints_a_section_only_when_it_has_something_in_it() {
         // The three lists are each absent rather than printed empty: a run
@@ -801,12 +940,13 @@ mod tests {
     #[test]
     fn applying_writes_every_agent_that_owns_a_config_and_spares_the_verified_one() {
         let home = scratch("apply");
-        let written = write_configs(&home, Provider::Ollama, &Agent::ALL);
+        let (written, refused) = write_configs(&home, Provider::Ollama, &Agent::ALL);
         assert_eq!(
             written.len(),
             3,
             "one line per rewritten config: {written:?}"
         );
+        assert!(refused.is_empty(), "nothing was refused here: {refused:?}");
         for path in [
             codex_config(&home),
             claude_settings(&home),
@@ -817,6 +957,41 @@ mod tests {
         assert!(
             !devin_config(&home).exists(),
             "Devin's config is verified, never rewritten"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn a_config_a_writer_refuses_is_reported_rather_than_counted_as_written() {
+        // Claude's settings carry an `env` this writer merges into. A user
+        // who has a string there is left exactly as they were — and the run
+        // has to say so, because `--apply` returning a shorter `applied`
+        // list with no reason is a refusal that reads as a quiet success.
+        let home = scratch("apply-refused");
+        let claude = claude_settings(&home);
+        std::fs::create_dir_all(claude.parent().expect("a parent")).expect("scratch");
+        std::fs::write(&claude, r#"{"env":"a string, not an object"}"#).expect("fixture");
+        let (written, refused) = write_configs(&home, Provider::Ollama, &Agent::ALL);
+        assert_eq!(written.len(), 2, "the other two were written: {written:?}");
+        assert_eq!(refused.len(), 1, "one refusal, named: {refused:?}");
+        assert!(refused[0].starts_with("claude"), "{refused:?}");
+        assert!(
+            refused[0].contains(&claude.display().to_string()),
+            "the refusal names the file it left alone: {refused:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&claude).expect("still there"),
+            r#"{"env":"a string, not an object"}"#,
+            "a refused config is untouched, not half-written"
+        );
+        let printed = section("refused — left as they were", &refused);
+        assert!(
+            printed.starts_with("\nrefused — left as they were\n"),
+            "the report prints the refusal under its own header: {printed:?}"
+        );
+        assert!(
+            printed.contains(&refused[0]),
+            "and carries the writer's own reason: {printed:?}"
         );
         let _ = std::fs::remove_dir_all(&home);
     }
@@ -1167,6 +1342,7 @@ mod tests {
             selected: None,
             agents: Vec::new(),
             applied: Vec::new(),
+            refused: Vec::new(),
             pending: Vec::new(),
             verified_only: Vec::new(),
             approvals: None,
@@ -1189,6 +1365,7 @@ mod tests {
             selected: Some("ollama"),
             agents: vec![row(true)],
             applied: Vec::new(),
+            refused: Vec::new(),
             pending: Vec::new(),
             verified_only: Vec::new(),
             approvals: None,

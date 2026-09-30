@@ -9,7 +9,8 @@
 
 use std::{
     fs,
-    io::{self},
+    io::{self, Write as _},
+    os::unix::fs::OpenOptionsExt as _,
     path::Path,
 };
 
@@ -121,16 +122,64 @@ fn read_or(path: &Path, missing: &str) -> Result<String, String> {
 }
 
 /// Write `text` through a temp file and a rename, creating the directory.
-/// The temp name carries the real extension so a tool watching the directory
-/// does not try to parse a half-written file.
-fn write_atomically(path: &Path, extension: &str, text: String) -> Result<(), String> {
+///
+/// The temp is created with the destination's own mode, or `0600` when there
+/// is no destination yet. `fs::write` would take the mode from the umask, and
+/// the rename then hands that mode to the destination: an agent settings file
+/// the user had narrowed to `0600` would come back `0644`, and the keys and
+/// hooks in it would be readable by every account on the machine. A mode is
+/// not this command's to widen, and a file it creates may hold the user's own
+/// credentials, so the narrower default is the one it chooses.
+///
+/// The temp's name is unique per writer ([`temp_for`]), so two runs against
+/// the same config cannot take the file out from under each other.
+fn write_atomically(path: &Path, text: String) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
-    let tmp = path.with_extension(extension);
-    fs::write(&tmp, text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    let tmp = temp_for(path);
+    // `create_new`: the temp name is unique to this writer, so a file that
+    // is already there is a leftover from a crashed run rather than
+    // something to write through. Refusing it is loud; writing through it
+    // would leave the old document's tail on the end of the new one.
+    let mut temp = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(mode_for(path))
+        .open(&tmp)
+        .map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    temp.write_all(text.as_bytes())
+        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    drop(temp);
     fs::rename(&tmp, path)
         .map_err(|e| format!("rename {} into {}: {e}", tmp.display(), path.display()))
+}
+
+/// The mode a rewrite of `path` carries: the one it already has, so a rename
+/// cannot widen it, and `0600` for a file this command is the first to create.
+fn mode_for(path: &Path) -> u32 {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::metadata(path).map_or(0o600, |meta| meta.permissions().mode())
+}
+
+/// Distinguishes two writers of the same path inside one process.
+static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The temp path a write to `path` goes through.
+///
+/// Unique per writer rather than fixed: two callers writing the same file
+/// would otherwise share `<path>.tmp`, and the first `rename` takes it out
+/// from under the second, which then reports a rename that failed on a file
+/// it wrote itself. Two tests in one binary are enough to hit that, and two
+/// concurrent processes are the same race with a longer window. The name
+/// keeps the real one inside it (`.claude.json.<pid>.<n>.tmp`) so a watcher
+/// looking for `*.json` does not try to parse a half-written document.
+pub(crate) fn temp_for(path: &Path) -> std::path::PathBuf {
+    let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{}.{seq}.tmp", std::process::id()));
+    path.with_file_name(name)
 }
 
 /// Point Codex at `provider`: the model, the provider name, and the
@@ -166,7 +215,7 @@ pub(crate) fn write_codex(path: &Path, provider: Provider) -> Result<String, Str
             )
         })?;
     providers.insert(MODEL_PROVIDER_NAME, Item::Table(route));
-    write_atomically(path, "toml.pixel-tmp", doc.to_string())?;
+    write_atomically(path, doc.to_string())?;
     Ok(format!(
         "model={} via {} in {}",
         provider.model(),
@@ -220,7 +269,7 @@ pub(crate) fn write_claude(path: &Path, provider: Provider) -> Result<String, St
         Value::String(DEFAULT_CLAUDE_MODEL.to_string()),
     );
     let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
-    write_atomically(path, "json.pixel-tmp", format!("{text}\n"))?;
+    write_atomically(path, format!("{text}\n"))?;
     Ok(format!(
         "ANTHROPIC_BASE_URL={GATEWAY_URL}, {DEFAULT_CLAUDE_MODEL} in the model slots, via {} in {}; export ANTHROPIC_AUTH_TOKEN=\"${GATEWAY_TOKEN_ENV}\" and {CLAUDE_CUSTOM_HEADERS_ENV}=\"{}\" in your shell — a settings file expands neither",
         provider.name(),
@@ -243,7 +292,7 @@ pub(crate) fn write_antigravity(path: &Path, provider: Provider) -> Result<Strin
         Value::String(GATEWAY_URL.to_string()),
     );
     let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
-    write_atomically(path, "json.pixel-tmp", format!("{text}\n"))?;
+    write_atomically(path, format!("{text}\n"))?;
     Ok(format!(
         "AGY_LLM_GATEWAY_URL={GATEWAY_URL} via {} in {}",
         provider.name(),
@@ -556,5 +605,69 @@ mod tests {
             devin_config(home.path()),
             home.path().join(DEVIN_CONFIG_FILE)
         );
+    }
+
+    /// The mode of `path`, permission bits only.
+    fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn a_rewrite_does_not_widen_a_file_the_user_narrowed() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // The settings file holds whatever the user put in it, and a rename
+        // carries the temp's mode onto the destination. `fs::write` takes
+        // that mode from the umask, so a `0600` file would come back `0644`
+        // and every other account on the machine could read it.
+        let home = Scratch::new();
+        let path = claude_settings(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{\"env\":{\"KEEP\":\"mine\"}}").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_claude(&path, Provider::Ollama).unwrap();
+
+        assert_eq!(mode_of(&path), 0o600, "the rewrite widened the file");
+        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            value["env"]["KEEP"], "mine",
+            "preserving the mode must not have cost the contents"
+        );
+    }
+
+    #[test]
+    fn a_file_this_command_creates_is_readable_by_its_owner_alone() {
+        // Nothing recorded a mode for a file that did not exist. `0644` is
+        // the umask default and this is a config an agent reads back, so the
+        // narrower choice is the one that cannot leak.
+        let home = Scratch::new();
+        let path = codex_config(home.path());
+        write_codex(&path, Provider::Ollama).unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    #[test]
+    fn a_shorter_rewrite_replaces_the_whole_document() {
+        // The rename replaces the file rather than writing into it, so a
+        // document shorter than the one it replaces must not leave the
+        // previous one's tail behind. `model` is the fixture because the
+        // writer overwrites it with a short literal: `developer_
+        // instructions` survives the merge by design and would prove
+        // nothing about the tail.
+        let home = Scratch::new();
+        let path = codex_config(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, format!("model = \"{}\"\n", "x".repeat(4096))).unwrap();
+        write_codex(&path, Provider::Ollama).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(
+            !text.contains("xxx"),
+            "a tail of the previous document survived the rewrite: {text}"
+        );
+        let doc: DocumentMut = text.parse().expect("the file still parses");
+        assert_eq!(doc["model"].as_str(), Some("deepseek-v4.1-flash"));
     }
 }

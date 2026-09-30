@@ -339,8 +339,17 @@ fn drain_screen<R: Read>(reader: &mut R, screen: &mut String, buf: &mut [u8]) ->
                 let chunk = String::from_utf8_lossy(&buf[..n]);
                 screen.push_str(&chunk);
                 if screen.chars().count() > SCREEN_CAP_CHARS {
-                    let drop = screen.len() - SCREEN_CAP_CHARS;
-                    screen.drain(..drop);
+                    // The cap is a character count, so the cut has to be
+                    // one. `screen.len() - SCREEN_CAP_CHARS` is a byte
+                    // count: it lands inside a character as soon as the
+                    // screen ends in a three-byte one, and `drain` panics
+                    // off a boundary instead of trimming. Walking back
+                    // `SCREEN_CAP_CHARS` characters from the end gives the
+                    // offset of the first character to keep, which is a
+                    // boundary by construction.
+                    if let Some((at, _)) = screen.char_indices().rev().nth(SCREEN_CAP_CHARS - 1) {
+                        screen.drain(..at);
+                    }
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
@@ -805,6 +814,47 @@ mod tests {
         let screen = drain(&mut reader).expect("a full read buffer is not an error");
         assert_eq!(screen.chars().count(), SCREEN_CAP_CHARS);
         assert_eq!(screen.len(), 2 * SCREEN_CAP_CHARS);
+    }
+
+    #[test]
+    fn a_screen_of_three_byte_characters_past_the_cap_is_not_cut_inside_one() {
+        // The cap counts characters while `len()` counts bytes, so the cut
+        // has to be a character count too. `é` is two bytes, and `len() -
+        // cap` lands on a boundary by accident for it, so the two-byte case
+        // above cannot see this one: `€` is three, and 65536 is not a
+        // multiple of three. This screen is 21840 three-byte characters
+        // followed by six full buffers of `x`; the first trim happens on the
+        // sixth of those, with `len() - cap` at 49136 — inside the
+        // three-byte run, two bytes past a boundary, which is exactly where
+        // a byte-indexed drain panics instead of trimming.
+        let mut reads = 0;
+        let mut reader = ScriptedReader(|buf: &mut [u8]| {
+            reads += 1;
+            match reads {
+                1..=8 => {
+                    for (i, byte) in buf[..2730 * 3].iter_mut().enumerate() {
+                        *byte = match i % 3 {
+                            0 => 0xe2,
+                            1 => 0x82,
+                            _ => 0xac,
+                        };
+                    }
+                    Ok(2730 * 3)
+                }
+                9..=14 => {
+                    buf.fill(b'x');
+                    Ok(buf.len())
+                }
+                _ => Ok(0),
+            }
+        });
+        let screen = drain(&mut reader).expect("a full read buffer is not an error");
+        assert_eq!(screen.chars().count(), SCREEN_CAP_CHARS);
+        assert_eq!(
+            screen.len(),
+            98_304,
+            "16384 three-byte characters and 49152 bytes of `x`"
+        );
     }
 
     /// Drive a real child through the terminal the driver reads, on a thread

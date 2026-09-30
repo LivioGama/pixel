@@ -34,7 +34,7 @@ use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item};
 
 use super::Agent;
-use super::config::{CLAUDE_ONBOARDING_FILE, codex_config};
+use super::config::{CLAUDE_ONBOARDING_FILE, codex_config, temp_for};
 use super::rpc::{self, MergeStrategy};
 
 /// The Codex config key the `config/batchWrite` RPC addresses hook trust by.
@@ -384,38 +384,30 @@ pub(crate) fn claude_trusted(config: &Value, workspace: &str) -> Result<Option<V
 /// rename keeps a reader from seeing half a document, and the temp file
 /// carries the real extension so a watcher does not try to parse it.
 fn write_private(path: &Path, value: &Value) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt as _;
 
     let text = serde_json::to_string_pretty(value)
         .map_err(|e| format!("cannot serialise {}: {e}", path.display()))?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
+    // `0600` at creation rather than a chmod after the write: the chmod
+    // leaves the temp readable at whatever the umask allowed for as long as
+    // the write takes, and this file is Claude's own state. The mode is set
+    // before a byte of it exists on disk.
     let tmp = temp_for(path);
-    fs::write(&tmp, format!("{text}\n")).map_err(|e| format!("write {}: {e}", tmp.display()))?;
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
-        .map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
+    let mut temp = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    temp.write_all(format!("{text}\n").as_bytes())
+        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    drop(temp);
     fs::rename(&tmp, path)
         .map_err(|e| format!("rename {} into {}: {e}", tmp.display(), path.display()))
-}
-
-/// Distinguishes two writers of the same path inside one process.
-static TEMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// The temp path a write to `path` goes through.
-///
-/// Unique per writer rather than fixed: two callers writing the same file
-/// would otherwise share `<path>.tmp`, and the first `rename` takes it out
-/// from under the second, which then reports a rename that failed on a file
-/// it wrote itself. Two tests in one binary are enough to hit that, and two
-/// concurrent processes are the same race with a longer window. The real
-/// extension stays in the name so a watcher watching `.claude.json` does not
-/// try to parse a half-written document.
-fn temp_for(path: &Path) -> std::path::PathBuf {
-    let seq = TEMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{}.{seq}.tmp", std::process::id()));
-    path.with_file_name(name)
 }
 
 #[cfg(test)]
