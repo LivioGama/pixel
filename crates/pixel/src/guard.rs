@@ -7020,7 +7020,30 @@ mod tests {
         );
         assert!(utf16_len(&tail) <= 400);
         let cut = fit_prompt(&prompt, 40, "/p");
-        assert!(utf16_len(&cut) <= 40 && cut.starts_with("# Title"), "{cut}");
+        assert_eq!(utf16_len(&cut), 40, "the cut uses the whole budget: {cut}");
+        assert!(cut.starts_with("# Title"), "{cut}");
+    }
+
+    /// The freshness line and its blank line are reserved before fitting:
+    /// a prompt exactly that much under the limit is kept whole, and one
+    /// unit more is fitted, so prompt plus freshness never pass the limit.
+    #[test]
+    fn claude_session_start_reserves_the_freshness_line_exactly() {
+        let block = fresh_repo_block();
+        let freshness = index_freshness_line(&block["pixel"]["repo"]).unwrap();
+        let budget = CLAUDE_INLINE_CONTEXT_LIMIT - utf16_len(&freshness) - 2;
+        let exact = "a".repeat(budget);
+        let out = session_start_envelope(&block, Some(&exact), Some(Provider::Claude));
+        assert_eq!(context_of(&out), format!("{exact}\n\n{freshness}"));
+        let over = "a".repeat(budget + 1);
+        let out = session_start_envelope(&block, Some(&over), Some(Provider::Claude));
+        let context = context_of(&out);
+        assert!(
+            utf16_len(context) <= CLAUDE_INLINE_CONTEXT_LIMIT,
+            "{}",
+            utf16_len(context)
+        );
+        assert!(context.ends_with(&freshness));
     }
 
     #[test]
