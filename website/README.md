@@ -42,7 +42,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 ## Where things live
 
 - `layouts/index.html`: the landing page, in this order: promise and token wall,
-  concrete scoping example, try on your repository (`#your-number`), local
+  reading problem and concrete scoping example with evidence, try on your repository (`#your-number`), local
   operation (`#how`), compatibility (`#agents`), limits and FAQ (`#faq`),
   installation (`#install`). The hero and navigation share one action:
   try Pixel on your repo. Installation stays in one terminal with Script,
@@ -62,7 +62,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   `#alternatives`, `#decisions`, `#teams`, `#jobs` and `#savings` link to
   their destinations (and navigate directly when JavaScript is enabled).
   Keep `#scope`, `#your-number`, `#how`, `#agents`, `#faq` and `#install`;
-  old `#problem`, `#results` and `#tasks` land on the demonstration.
+  old `#problem`, `#results` and `#tasks` land on the demonstration and its evidence.
 - At rest until the first scroll: the scroll-driven effects (the
   `data-reveal` fades, the assembling titles, the counting numbers) prime
   only what is still below the fold when the visitor first scrolls
@@ -135,22 +135,16 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   `crates/pixel/tests/cli/docs_drift.rs` reads the pages and this file for
   `pixel …` commands, and fails when `static/llms.txt` ("Answers") misses a
   page or states another question than its `title`. Linked from the footer.
-- `data/voices.toml`: quotes from people who run Pixel, shown under the
-  Proof chapter's ledger. Nothing renders while the file holds no entry.
-  The invite for more sits under the Install block instead (an empty
-  list of quotes should not be what the Proof chapter points at, and the
-  report needs a few sessions anyway): it links a "Show and tell"
-  discussion prefilled with what a quote needs (repository, agent, the
-  `pixel token-savings` report, consent to be quoted); a reply moves to
-  this file only with its author's written yes.
-  Each entry is a real, named person who agreed in writing to be quoted;
-  the file's header lists the fields and the rules. A figure in a quote is
-  theirs, measured on their code, and says so in `measured`.
+- `data/voices.toml`: reserved for real, named people who agreed in writing
+  to be quoted. It is currently empty and no quote block renders. Keep the
+  consent and measurement rules in its header for any future use.
 - The nav's GitHub star count shows only from `gh_stars_min` in
   `hugo.toml` up: a small count beside the brand argues against the page.
 - `data/objections.toml`: the "Fair questions" chapter, and the home's
   `FAQPage` JSON-LD, from one list (`layouts/partials/objections.html`
-  renders it for both, so the markup never says what the page does not).
+  renders it for both, with `home = true`, so the markup never says what
+  the page does not). Entries marked `comparison = true` render on `/vs/`
+  instead, through the same partial with `comparisons = true`.
   Answers are HTML paragraphs; a figure that lives elsewhere is a
   placeholder (`{big.full}`, `{langs.count}`, `{bench}`…, listed at the top
   of the file) the partial fills in, and an unknown one fails the build.
@@ -182,8 +176,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   full read is replaced by signatures. Dollars value hypothetical input reduction
   at the chosen uncached price, not invoice savings; the observed range is not a
   confidence interval. The page links the agent trials' limitations instead. The page is labelled an estimate
-  everywhere, including `static/llms.txt`; it is linked from the home's
-  CTO card, `/benchmarks/`'s "Measure it on your own code" box and the
+  everywhere, including `static/llms.txt`; it is linked from `/teams/`, `/benchmarks/`'s "Measure it on your own code" box and the
   footer, not from the nav.
 - `content/benchmarks.md` opens on "Measure it on your own code": three
   commands, each run on a fresh clone of a third-party repository before it
@@ -217,11 +210,11 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   groups `/for/` by wiring, and the build fails on an agent with no page or
   an unknown wiring. No figure on a page unless it is on `/benchmarks/` for
   that agent: today only Claude Code's.
-- `data/scope.toml`: the real `pixel scope-task` run the hero grid replays.
+- `data/scope.toml`: the real `pixel scope-task` run the demonstration board replays.
   Refresh the task, the index size and every position together.
 - `data/read_savings.toml`: the well-known files `scripts/bench-read-savings.sh`
   measures (method in `docs/bench/read-savings.md`). The token wall, its
-  caption's range and median and the `/benchmarks/` table
+  evidence paragraph’s range and median, the `/benchmarks/` table
   (`layouts/shortcodes/read-savings.html`) and the `/savings/` estimate all read it: re-run the script
   and replace the rows, never one number by hand (the kept rows' count, range and median are computed once, in `layouts/partials/kept-rates.html`), then re-render the share
   card (`og/render.sh`), whose figures come from the wall's row.
@@ -287,14 +280,6 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 - `layouts/partials/icon.html`: the pixel icons, 8x8 bitmaps drawn in
   `currentColor`. Add one as a new row list; call it with
   `(dict "name" "star" "size" 16)`.
-- The agent demo never starts on its own: its poster is
-  `pixel-agent-demo-start.jpg`, the recording's first frame, which
-  `docs/motion/scripts/render.sh` writes beside the last-frame poster.
-- The dock (`[data-dock]`, end of `layouts/index.html`): the brew command
-  pinned to the bottom of the viewport once the hero has scrolled away,
-  hidden again while the Install or closing block, which carry the same
-  command, is on screen. Nothing is stored, so it returns on every visit;
-  without JavaScript it never shows.
 - `layouts/partials/splash.html`: the home's splash (pixels landing into
   the brand square, then the wordmark), about two seconds, skippable.
   `partials/head.html` decides it before the first paint: home only, once

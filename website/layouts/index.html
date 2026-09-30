@@ -10,6 +10,7 @@
   {{ $s := hugo.Data.scope }}
   {{/* The token wall's file and the spread its caption quotes: data/read_savings.toml, the well-known files scripts/bench-read-savings.sh measures. */}}
   {{ $big := partial "wall-row.html" . }}
+  {{ $r := partial "kept-rates.html" . }}
   {{ $bench := "benchmarks/" | relURL }}
   {{/* The supported agents, shown by the hero's line and the Compatibility grid, from data/agents.toml (which also feeds /for/ and the /docs/ wiring table). Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
   {{ $agents := hugo.Data.agents.agent }}
@@ -36,10 +37,11 @@
         {{ $rest := sub (len $agents) (len $named) }}
         <span>For {{ range $i, $a := $named }}{{ if $i }}, {{ end }}{{ $a.name }}{{ end }} and <a class="link" href="#agents" aria-label="{{ $rest }} more coding agents">{{ $rest }} more</a></span>
       </p>
-      <h1 class="hero__title hero__title--long"><span>A local code index.</span> <span class="glow">A map for your agent.</span></h1>
-      <p class="hero__lede">Pixel gives coding agents the symbols, signatures and callers they need to find their way through your repository, with fewer whole-file reads.</p>
+      <h1 class="hero__title hero__title--long"><span>Your agent reads whole files.</span> <span class="glow">Pixel hands it the map.</span></h1>
+      <p class="hero__lede"><strong>To find one function, your coding agent may open a whole file.</strong> Pixel is a local code index it asks for signatures, callers and starting files instead. It gets a map of your repo, then reads the relevant code.</p>
       <div class="hero__cta"><a class="button" href="#your-number">Try Pixel on your repo</a></div>
-      <p class="hero__trust">Free and MIT · macOS on Apple Silicon and Linux · no account · no binary telemetry</p>
+      <p class="hero__script">Before you install: <a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">read the script</a>. No <code>sudo</code>; it checks the archive’s checksum and writes the binary to <code>~/.local/bin/pixel</code>. <a class="link" href="#install">Homebrew and agent-assisted setup</a> are available too.</p>
+      <p class="hero__trust">Free and MIT · macOS on Apple Silicon and Linux · no account, no binary telemetry · <code>pixel uninstall</code> undoes the agent setup</p>
       </div>
 
       <figure class="wall" data-wall data-full="{{ $big.full }}" data-pixel="{{ $big.pixel }}" data-per="25">
@@ -65,12 +67,19 @@
 
     {{/* ---------- scope ---------- */}}
     <section class="section wrap" id="scope" aria-labelledby="scope-title">
-      <span id="problem"></span><span id="results"></span><span id="tasks"></span><span id="savings"></span>
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Demo</span></p>
+      <span id="problem"></span><span id="savings"></span>
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Why Pixel</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="scope-title">Find the files. <span class="glow">Then read the code.</span></h2>
-        <p class="scope__lede">Ask which files a change touches. Pixel suggests starting points; your agent checks the relevant code before editing.</p>
+        <h2 id="scope-title">Finding its way <span class="glow">takes context.</span></h2>
+        <p class="scope__lede">A search finds a match. Your agent still has to understand the file around it, find the callers and decide where to start.</p>
       </header>
+      <ul class="pains" data-reveal="stagger">
+        <li class="pains__card"><p class="pains__tag">Context</p><h3>The question was one function.</h3><p>A whole-file read brings unrelated lines into the agent’s context. An outline shows what the file holds first.</p></li>
+        <li class="pains__card"><p class="pains__tag">Time</p><h3>You watch it search.</h3><p>Search, open, read, then open the next file. Pixel gives the agent starting points it can check against the code.</p></li>
+        <li class="pains__card"><p class="pains__tag">Impact</p><h3>A match is only the beginning.</h3><p>Signatures, callers and related files help the agent understand a change before it edits.</p></li>
+      </ul>
+      <h3 class="vs__kicker">Here’s what the map looks like.</h3>
+      <p class="ledger__fine">You describe a task. The agent asks Pixel which files to start with, then checks the relevant bodies. These are suggestions, not a complete list of everything the change might touch.</p>
       {{/* Recorded scoping example; installation teaches supported agents when to ask Pixel. */}}
       <figure class="board" data-board data-p1="{{ delimit $s.p1 "," }}" data-files="{{ $s.files }}">
         <div class="board__chat">
@@ -92,6 +101,8 @@
         </figcaption>
       </figure>
       <p class="board__note" data-reveal>A recorded <code>pixel scope-task</code> run on Pixel’s repository, commit <a class="link" href="{{ site.Params.github_url }}/tree/7e8dda5">7e8dda5</a>, 23 September 2026: {{ len $s.p0 }} starting files out of {{ $s.files }} indexed files. This illustrates scoping, not task time or cost.</p>
+      <h3 class="vs__kicker" id="tasks">Less to read. Task outcomes vary.</h3>
+      <p class="ledger__fine" id="results">On {{ $r.count }} pinned large files, signatures reduced read volume by {{ lang.FormatNumber 1 $r.min }} to {{ lang.FormatNumber 1 $r.max }}% (median {{ lang.FormatNumber 1 $r.median }}%). This compares whole files with outlines, estimating tokens as UTF-8 bytes ÷ 4. <a class="link" href="{{ $bench }}#well-known-files">The files, method and parsing limits</a>.</p>
       <p class="ledger__fine">Less output does not guarantee a faster agent: an Opus trial with install hooks found no speed gain on its scoping task. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">Evidence and limits</a></p>
     </section>
 
@@ -100,8 +111,8 @@
     <section class="section wrap" id="your-number" aria-labelledby="yours-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Try</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="yours-title">Try it <span class="glow">on your own repo.</span></h2>
-        <p>Compare your files with their outlines before starting an agent session.</p>
+        <h2 id="yours-title">Don’t trust our numbers. <span class="glow">Get yours.</span></h2>
+        <p>Try Pixel on your own repo. Start with a local file/outline comparison: no account and no agent session needed.</p>
       </header>
       <ol class="yours" data-reveal="stagger">
         <li class="yours__step">
@@ -119,7 +130,7 @@
           <p>For agents wired by this command, restart the agent and give it a task. <a class="link" href="{{ "for/" | relURL }}">Check your agent’s setup</a>; <code>pixel action-log</code> shows whether it called Pixel.</p>
         </li>
       </ol>
-      <p class="numbers__more"><a class="link" href="{{ $bench }}#measure-it-on-your-own-code">Inspect one file or check volumes after a few sessions</a></p>
+      <p class="numbers__more">For one file, run <code>pixel list-signatures &lt;file&gt;</code>. After a few sessions, <code>pixel token-savings</code> shows local volumes and estimates. <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">What each report measures</a>.</p>
     </section>
 
     {{/* ---------- how it works ---------- */}}
@@ -175,7 +186,7 @@
     <section class="section wrap section--center" id="faq" aria-labelledby="faq-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Limits &amp; FAQ</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="faq-title">What to <span class="glow">expect.</span></h2>
+        <h2 id="faq-title"><span class="glow">Fair</span> questions.</h2>
       </header>
       <p class="ledger__fine">Outlines help you navigate, and static graphs miss some dynamic calls. Lower read volume is not a promise of lower task time or billed cost.</p>
       <div class="faq" data-reveal="stagger">
