@@ -78,9 +78,9 @@ contain `auth` or `login` (exact match on lowercased tag). First match names
 the replay command in the item text. No match → the item says so:
 
 ```
-BLOCKED: <file> is auth-gated — verify via `pixel replay-flow replay client-login`
+BLOCKED: <file> is auth-gated — verify via `pixel flow run client-login`
 BLOCKED: <file> is auth-gated — no login flow saved; ask the human for a test
-         account or record one via `pixel replay-flow save`
+         account or record one via `pixel flow save`
 ```
 
 That second line is the feature: the plan *asks for the account* because the
@@ -111,7 +111,7 @@ still numbers them for `--done`):
 
 ```
 Prerequisites — verification gates:
-- [ ] Gate: auth-gated code (app/billing/page.tsx) — replay `pixel replay-flow replay client-login`
+- [ ] Gate: auth-gated code (app/billing/page.tsx) — run `pixel flow run client-login`
 - [ ] Gate: env keys required: STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET (crates/pay/src/stripe.rs)
 - [ ] Gate: DB-backed state (crates/pay/src/db.rs) — reproduce with real data before fixing
 
@@ -149,7 +149,7 @@ not "none needed"; the spec text and item wording both say so.
 ## Tests
 
 - auth-gated fixture file + no saved flows → BLOCKED "ask the human" item.
-- same + a flow tagged `auth` → item names `pixel replay-flow replay <name>`.
+- same + a flow tagged `auth` → item names `pixel flow run <name>`.
 - `import Stripe from "stripe"` + `process.env.STRIPE_SECRET_KEY` → one env
   item listing the var, deduped across two files reading it.
 - middleware one hop away (route imports `auth.ts`) still flags.

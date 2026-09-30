@@ -136,7 +136,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel list-branches` | One-call read-only branch inventory: ahead/behind, merged, stale, unpushed — the deterministic "did you push everything?" answer |
 | `pixel edit-env` | Additive-only, key-level .env mutations with snapshots and restore. |
 | `pixel plan` | Deterministic todo list generation from code analysis; emits blocking verification gates (auth session, env keys, provider keys, real DB state) detected in the plan's file set; persists findings in `.pixel/plan.json` so `--status`/`--done N`/`--undone N`/`--prune` track execution state across re-plans without the daemon |
-| `pixel replay-flow` | Save, retrieve, list, revise, and replay proven agent-browser paths (auth flows, config flows) so the agent follows a deterministic shortcut instead of re-discovering the UI from scratch every time |
+| `pixel flow` | Save, retrieve, list, revise, and run proven agent-browser paths (auth flows, config flows) so the agent follows a deterministic shortcut instead of re-discovering the UI from scratch every time |
 | `pixel help` | Print this message or the help of the given subcommand(s). |
 
 ## On-disk state

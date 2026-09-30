@@ -68,7 +68,7 @@ pixel commit --files <f1> --files <f2> -m "msg" --request-id "id"   # only when 
 | `pixel web-search "<term>"` | a term the index cannot know |
 | `pixel review-changes` | structured staged/unstaged diff |
 | `pixel recall …` | past agent sessions — see below |
-| `pixel replay-flow replay\|get "<name>"` / `pixel list-errors last` | saved UI flows / captured errors |
+| `pixel flow run\|get "<name>"` / `pixel list-errors last` | saved UI flows / captured errors |
 | `pixel classify "<text>" --label a --label b` | a bounded decision: probability per label + `predicted:` — see below |
 
 History and git ops — use instead of raw `git`. The ops that write
@@ -122,7 +122,7 @@ model — `--criterion` is where the definition goes.
 - **Plan `Gate:` items are verification gates.** A gate says verification
   *needs* the resource (logged-in session, env keys, real DB state) — do not
   mark the verify item done while a gate is undone. An auth gate without a
-  saved `auth`-tagged `replay-flow` means: ask the human for a test account
+  saved `auth`-tagged flow means: ask the human for a test account
   or record one.
 - **Never commit or push unprompted.** `pixel commit` only on an explicit
   request; push only with separate authorization.

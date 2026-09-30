@@ -1,6 +1,6 @@
-//! pixel-flow — deterministic browser flow replay for LLM agents.
+//! pixel-flow — deterministic browser flow runtime for LLM agents.
 //!
-//! Saves, retrieves, lists, revises, and replays proven agent-browser paths
+//! Saves, retrieves, lists, revises, and runs proven agent-browser paths
 //! (auth flows, config flows) so the agent follows a deterministic shortcut
 //! instead of re-discovering the UI from scratch every time.
 //!
@@ -8,7 +8,7 @@
 //! — no SQLite, no daemon. Simple, inspectable, human-editable.
 
 pub mod execute;
-pub mod replay;
+pub mod run;
 pub mod store;
 pub mod types;
 
@@ -47,7 +47,7 @@ pub enum FlowAction {
         from_file: Option<PathBuf>,
     },
     /// Emit ready-to-run agent-browser commands with variable substitution.
-    Replay {
+    Run {
         name: String,
         vars: HashMap<String, String>,
         dry_run: bool,
@@ -82,11 +82,11 @@ pub fn flow(action: &FlowAction) -> Result<Value, String> {
             description,
             from_file,
         } => revise_flow(name, title, description, from_file),
-        FlowAction::Replay {
+        FlowAction::Run {
             name,
             vars,
             dry_run,
-        } => replay_flow(name, vars, *dry_run),
+        } => run_flow(name, vars, *dry_run),
         FlowAction::Execute { name, vars } => execute_flow(name, vars),
         FlowAction::Delete { name } => delete_flow(name),
         FlowAction::Show { name } => show_flow(name),
@@ -109,7 +109,7 @@ fn save_flow(
 ) -> Result<Value, String> {
     if exists(name) {
         return Err(format!(
-            "flow '{}' already exists — use `pixel replay-flow revise {}` to update it",
+            "flow '{}' already exists — use `pixel flow revise {}` to update it",
             slugify(name),
             slugify(name)
         ));
@@ -305,9 +305,9 @@ fn revise_flow(
     }))
 }
 
-fn replay_flow(name: &str, vars: &HashMap<String, String>, dry_run: bool) -> Result<Value, String> {
+fn run_flow(name: &str, vars: &HashMap<String, String>, dry_run: bool) -> Result<Value, String> {
     let flow = load(name)?;
-    let output = replay::replay(&flow, vars)?;
+    let output = run::run(&flow, vars)?;
     Ok(json!({
         "name": flow.name,
         "dry_run": dry_run,
@@ -418,7 +418,7 @@ mod tests {
         let again = save_flow("Login Flow", "Other", "", &[], &None, &from_file).unwrap_err();
         assert_eq!(
             again,
-            "flow 'login-flow' already exists — use `pixel replay-flow revise login-flow` to update it"
+            "flow 'login-flow' already exists — use `pixel flow revise login-flow` to update it"
         );
         assert_eq!(
             load("Login Flow").unwrap().title,

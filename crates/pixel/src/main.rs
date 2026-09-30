@@ -1286,11 +1286,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Save, retrieve, list, revise, and replay proven agent-browser paths
+    /// Save, retrieve, list, revise, and run proven agent-browser paths
     /// (auth flows, config flows) so the agent follows a deterministic
     /// shortcut instead of re-discovering the UI from scratch every time.
-    #[command(alias = "flow")]
-    ReplayFlow {
+    #[command(alias = "replay-flow")]
+    Flow {
         #[command(subcommand)]
         cmd: FlowCmd,
     },
@@ -1447,7 +1447,7 @@ enum FlowCmd {
     /// command sequence for the agent to execute.
     ///
     /// Use `--execute` to actually run the commands via agent-browser.
-    Replay {
+    Run {
         name: String,
         /// Variable substitution: `--var key=value`. Repeat per var.
         #[arg(long = "var")]
@@ -1458,7 +1458,7 @@ enum FlowCmd {
         #[arg(long)]
         account: Option<String>,
         /// Actually execute the flow by running agent-browser commands.
-        /// Without this flag, replay only prints the command sequence.
+        /// Without this flag, run only prints the command sequence.
         #[arg(long, conflicts_with = "dry_run")]
         execute: bool,
         /// Print commands without marking as executed (default is still
@@ -7518,14 +7518,14 @@ fn run_command(
                 json,
             })
         }
-        Command::ReplayFlow { cmd } => {
+        Command::Flow { cmd } => {
             use pixel_flow::FlowAction;
             let json = match &cmd {
                 FlowCmd::Save { json, .. }
                 | FlowCmd::Get { json, .. }
                 | FlowCmd::List { json, .. }
                 | FlowCmd::Revise { json, .. }
-                | FlowCmd::Replay { json, .. }
+                | FlowCmd::Run { json, .. }
                 | FlowCmd::Delete { json, .. }
                 | FlowCmd::Show { json, .. } => *json,
             };
@@ -7560,7 +7560,7 @@ fn run_command(
                     description,
                     from_file,
                 },
-                FlowCmd::Replay {
+                FlowCmd::Run {
                     name,
                     vars,
                     account,
@@ -7603,7 +7603,7 @@ fn run_command(
                             vars: var_map,
                         }
                     } else {
-                        FlowAction::Replay {
+                        FlowAction::Run {
                             name,
                             vars: var_map,
                             dry_run,
@@ -7627,11 +7627,11 @@ fn run_command(
             if json {
                 return print_data(&data, true);
             }
-            // For replay and show, the output field contains human-readable
+            // For run and show, the output field contains human-readable
             // text — print it directly to stdout. For everything else, use
             // the standard print_data path (JSON or pretty).
             match &action {
-                FlowAction::Replay { .. } | FlowAction::Show { .. } => {
+                FlowAction::Run { .. } | FlowAction::Show { .. } => {
                     if let Some(output) = data.get("output").and_then(|v| v.as_str()) {
                         println!("{output}");
                         Ok(())

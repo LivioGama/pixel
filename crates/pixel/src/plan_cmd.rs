@@ -236,8 +236,8 @@ fn gates_of(prereqs: &[Prereq], findings: &[PlanFinding]) -> Vec<PlanFinding> {
         };
         let flow_names = auth_flow_names();
         let how = match flow_names.as_slice() {
-            [] => "no `auth`-tagged replay-flow saved — ask the human for a test account, or record one with `pixel replay-flow save`".to_string(),
-            [first] => format!("replay `pixel replay-flow replay {first}`"),
+            [] => "no `auth`-tagged flow saved — ask the human for a test account, or record one with `pixel flow save`".to_string(),
+            [first] => format!("run `pixel flow run {first}`"),
             many => {
                 let shown = many
                     .iter()
@@ -250,7 +250,7 @@ fn gates_of(prereqs: &[Prereq], findings: &[PlanFinding]) -> Vec<PlanFinding> {
                 } else {
                     String::new()
                 };
-                format!("replay one of: `pixel replay-flow replay `{shown}`{extra}")
+                format!("run one of: `pixel flow run `{shown}`{extra}")
             }
         };
         gates.push(gate(
@@ -810,9 +810,7 @@ mod tests {
             gates[0].label
         );
         assert!(
-            gates[0]
-                .label
-                .contains("no `auth`-tagged replay-flow saved"),
+            gates[0].label.contains("no `auth`-tagged flow saved"),
             "{}",
             gates[0].label
         );
@@ -860,9 +858,9 @@ mod tests {
         assert_eq!(gates.len(), 1);
         // alpha-auth, mu-auth, zeta-login — sorted; delta-unrelated skipped.
         assert!(
-            gates[0].label.contains(
-                "replay one of: `pixel replay-flow replay `alpha-auth`, `mu-auth`, `zeta-login`"
-            ),
+            gates[0]
+                .label
+                .contains("run one of: `pixel flow run `alpha-auth`, `mu-auth`, `zeta-login`"),
             "{}",
             gates[0].label
         );
