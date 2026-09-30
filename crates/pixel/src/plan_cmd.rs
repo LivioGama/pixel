@@ -676,6 +676,92 @@ mod tests {
         );
     }
 
+    /// Boundary on the "first N + +M more" labels: with exactly N items
+    /// the gate must NOT append ` +N more` (or ` +0 more`). Each branch
+    /// uses `len() > N` and a `>=` mutant would flip that to a positive
+    /// extra. Without these assertions, the previous test fixtures all
+    /// sat comfortably below the cap and the bug survived.
+    #[test]
+    fn gates_of_boundary_does_not_emit_zero_more() {
+        // Three auth files (cap 3) — no "+more".
+        let auth3 = [
+            prereq(PrereqKind::Auth, "src/a.ts", "auth()"),
+            prereq(PrereqKind::Auth, "src/b.ts", "auth()"),
+            prereq(PrereqKind::Auth, "src/c.ts", "auth()"),
+        ];
+        let gates = gates_of(&auth3, &[]);
+        assert_eq!(gates.len(), 1);
+        assert!(
+            !gates[0].label.contains("more"),
+            "exactly 3 files must not append `more`: {}",
+            gates[0].label
+        );
+
+        // Four auth files (cap 3) — "+1 more" IS expected, sanity check.
+        let auth4 = [
+            prereq(PrereqKind::Auth, "src/a.ts", "auth()"),
+            prereq(PrereqKind::Auth, "src/b.ts", "auth()"),
+            prereq(PrereqKind::Auth, "src/c.ts", "auth()"),
+            prereq(PrereqKind::Auth, "src/d.ts", "auth()"),
+        ];
+        let gates = gates_of(&auth4, &[]);
+        assert!(
+            gates[0].label.contains(" +1 more"),
+            "4 files must append +1 more: {}",
+            gates[0].label
+        );
+
+        // Twelve env keys (cap 12) — no "+more".
+        let envs12: Vec<Prereq> = (0..12)
+            .map(|i| prereq(PrereqKind::Env, "src/x.rs", &format!("KEY_{i:02}")))
+            .collect();
+        let gates = gates_of(&envs12, &[]);
+        assert_eq!(gates.len(), 1);
+        assert!(
+            !gates[0].label.contains("more"),
+            "exactly 12 env keys must not append `more`: {}",
+            gates[0].label
+        );
+
+        // Thirteen env keys (cap 12) — "+1 more" IS expected.
+        let envs13: Vec<Prereq> = (0..13)
+            .map(|i| prereq(PrereqKind::Env, "src/x.rs", &format!("KEY_{i:02}")))
+            .collect();
+        let gates = gates_of(&envs13, &[]);
+        assert!(
+            gates[0].label.contains(" +1 more"),
+            "13 env keys must append +1 more: {}",
+            gates[0].label
+        );
+
+        // Three db drivers (cap 3) — no "+more".
+        let dbs3 = [
+            prereq(PrereqKind::Db, "src/x.rs", "drizzle-orm"),
+            prereq(PrereqKind::Db, "src/x.rs", "prisma"),
+            prereq(PrereqKind::Db, "src/x.rs", "sqlx"),
+        ];
+        let gates = gates_of(&dbs3, &[]);
+        assert!(
+            !gates[0].label.contains("more"),
+            "exactly 3 db drivers must not append `more`: {}",
+            gates[0].label
+        );
+
+        // Four db drivers (cap 3) — "+1 more" IS expected.
+        let dbs4 = [
+            prereq(PrereqKind::Db, "src/x.rs", "drizzle-orm"),
+            prereq(PrereqKind::Db, "src/x.rs", "prisma"),
+            prereq(PrereqKind::Db, "src/x.rs", "sqlx"),
+            prereq(PrereqKind::Db, "src/x.rs", "rusqlite"),
+        ];
+        let gates = gates_of(&dbs4, &[]);
+        assert!(
+            gates[0].label.contains(" +1 more"),
+            "4 db drivers must append +1 more: {}",
+            gates[0].label
+        );
+    }
+
     /// Auth detections fold into one gate; with no `auth`-tagged flow the
     /// label asks for a test account instead of naming a replay. Pins
     /// `PIXEL_FLOW_DIR` to a controlled directory so the flow lookup is
