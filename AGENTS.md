@@ -97,7 +97,7 @@ With a mise or Homebrew `pixel`, the home install (the Claude hooks in `~/.claud
 
 1. `pixel self-update --dev --repo . --build "cargo build --profile dev-release -p pixel-cli"`.
 2. Track A: `pixel-dev build-index --history .`. Track B: `pixel-dev install --repo .` (the repo-local files only).
-3. `pixel-dev doctor . --fix --fail-on yellow --skip 'install.*'`: the `install.*` checks judge the home install, which is the managed binary's, and with them selected `--fix` would run the global install through `pixel-dev`.
+3. `pixel-dev doctor . --fix --fail-on yellow --skip 'install.*'`: the `install.*` checks judge the home install, which is the managed binary's. A side build's `--fix` never runs a home-install repair (it prints `left pixel install … to the managed pixel`): a `rule.*` check still flagged after it means this build's CLI no longer accepts the deployed rules, a change to the home install.
 
 Only when the unit changes what the home install writes (`crates/pixel-install/`, the prompts in `crates/pixel-install/assets/` or `rules/`, a hook) does the global install belong to the check: run `pixel-dev install` and the full `pixel-dev doctor . --fix --fail-on yellow`, then hand the machine back with `pixel install` and `pixel doctor . --fail-on yellow` through the managed binary, and report both. Using `pixel-dev` is expected here: do not narrate it.
 

@@ -217,6 +217,64 @@ fn a_stale_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
     assert!(text.contains("agent-prompt.md is stale"), "{text}");
 }
 
+/// A `pixel-dev` `--fix` leaves every home-install repair to the managed
+/// pixel, including the `pixel install` that `rule.*` carries once
+/// `install.*` is skipped: an empty home stays empty, the check keeps its
+/// `fix:` line and colour, and stderr says which command was left.
+#[test]
+fn a_side_build_doctor_fix_should_leave_the_home_install_alone() {
+    let (home, repo) = fixture("side-build-fix");
+    let bin = home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let side_build = bin.join("pixel-dev");
+    std::fs::hard_link(env!("CARGO_BIN_EXE_pixel"), &side_build)
+        .or_else(|_| std::fs::copy(env!("CARGO_BIN_EXE_pixel"), &side_build).map(drop))
+        .unwrap();
+    let out = std::process::Command::new(&side_build)
+        .arg("doctor")
+        .arg(&*repo)
+        .args([
+            "--shell",
+            "zsh",
+            "--skip",
+            "install.*",
+            "--only",
+            "rule.*",
+            "--fix",
+        ])
+        .env("HOME", &*home)
+        .env("CODEX_HOME", home.join(".codex"))
+        .env("PIXEL_METRICS", "0")
+        .env("PIXEL_DAEMON_AUTO_START", "0")
+        .env_remove("XDG_CONFIG_HOME")
+        .current_dir(crate::support::neutral_cwd())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    assert!(
+        stderr.contains("pixel doctor --fix: left pixel install --shell zsh to the managed pixel"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("running pixel install"), "{stderr}");
+    for written in [
+        ".claude/settings.json",
+        ".local/share/pixel/agent-prompt.md",
+        ".codex/config.toml",
+    ] {
+        assert!(!home.join(written).exists(), "{written} written: {stderr}");
+    }
+    assert!(
+        stdout.contains("[yellow] rule.parity") && stdout.contains("fix: pixel install"),
+        "{stdout}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "yellow stays under the default red gate: {out:?}"
+    );
+}
+
 /// `doctor` with `XDG_CONFIG_HOME` removed, so the `pixel install` a `--fix`
 /// runs writes nothing outside the scratch home.
 fn doctor_fixing(home: &Path, repo: &Path, args: &[&str]) -> Output {
