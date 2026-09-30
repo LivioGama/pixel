@@ -60,7 +60,7 @@
           <span class="key key--waste">{{ lang.FormatNumberCustom 0 $big.full }} estimated tokens, whole file</span>
           <span class="key key--kept">{{ lang.FormatNumberCustom 0 $big.pixel }} estimated tokens, signatures</span>
           {{/* One file is an example, so the caption gives the spread over every kept file, with the link to the table and the excluded one. */}}
-          <span class="wall__unit">One square is 25 estimated tokens (UTF-8 bytes ÷ 4), not billed tokens. Across <a class="link" href="{{ $bench }}#well-known-files">{{ $r.count }} well-known files</a>, the outline is {{ lang.FormatNumber 1 ($r.min) }} to {{ lang.FormatNumber 1 ($r.max) }}% less (median {{ lang.FormatNumber 1 $r.median }}%).</span>
+          <span class="wall__unit">One square is 25 estimated tokens (UTF-8 bytes ÷ 4), not billed tokens. With Pixel 0.5.0, across <a class="link" href="{{ $bench }}#well-known-files">{{ $r.count }} pinned well-known files</a>, the outline is {{ lang.FormatNumber 1 ($r.min) }} to {{ lang.FormatNumber 1 ($r.max) }}% less (median {{ lang.FormatNumber 1 $r.median }}%).</span>
           <button class="wall__replay" type="button" data-wall-replay hidden>Replay</button>
         </figcaption>
       </figure>

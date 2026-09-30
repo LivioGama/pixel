@@ -20,7 +20,6 @@
 }}
 {{ $out := slice }}
 {{ $entries := hugo.Data.objections.objection }}
-{{ if .home }}{{ $entries = where $entries "comparison" "ne" true }}{{ end }}
 {{ if .comparisons }}{{ $entries = where hugo.Data.objections.objection "comparison" true }}{{ end }}
 {{ range $entries }}
   {{ $paras := slice }}
