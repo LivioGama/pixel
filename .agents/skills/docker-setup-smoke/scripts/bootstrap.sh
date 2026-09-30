@@ -1,9 +1,6 @@
 #!/bin/sh
 set -eu
-apt-get update -qq
-apt-get install -y -qq curl ca-certificates git python3 >/dev/null
-useradd -m -s /bin/bash tester
-chown tester:tester /evidence
+sh /checks/prepare.sh
 case "$(uname -m)" in
     aarch64) target=aarch64-unknown-linux-musl ;;
     x86_64) target=x86_64-unknown-linux-musl ;;
@@ -17,9 +14,6 @@ curl --fail --silent --show-error --location --max-time 120 "$url.sha256" -o "$a
 sha256sum --check "$archive.sha256"
 mkdir unpack
 tar -xzf "$archive" -C unpack
-# Expand HOME in the login user's shell, not the root bootstrap shell.
-# shellcheck disable=SC2016
-su - tester -c 'mkdir -p "$HOME/.local/bin"'
 install -o tester -g tester -m 755 "unpack/pixel-${PIXEL_RELEASE}-${target}/bin/pixel" /home/tester/.local/bin/pixel
 /home/tester/.local/bin/pixel --version
 test "$(/home/tester/.local/bin/pixel -V)" = "pixel ${PIXEL_RELEASE#v}"
