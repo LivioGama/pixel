@@ -1,0 +1,1 @@
+**install:** SessionStart now accepts `--provider claude|codex|devin`; Codex's hook output schema is `deny_unknown_fields`, so the structured `pixel` block is dropped there and only the additionalContext contract is emitted. ([#468](https://github.com/LivioGama/pixel/pull/468))

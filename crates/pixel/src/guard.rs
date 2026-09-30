@@ -82,11 +82,15 @@ fn deployed_agent_prompt() -> Option<String> {
 /// ones included) cost ~860 tokens per session and no recorded agent run
 /// used a command only it named, so the prompt gets one line of index
 /// freshness instead.
-pub fn session_start_output(pixel_block: &Value) -> Value {
-    session_start_envelope(pixel_block, deployed_agent_prompt().as_deref())
+pub fn session_start_output(pixel_block: &Value, provider: Option<Provider>) -> Value {
+    session_start_envelope(pixel_block, deployed_agent_prompt().as_deref(), provider)
 }
 
-fn session_start_envelope(pixel_block: &Value, agent_prompt: Option<&str>) -> Value {
+fn session_start_envelope(
+    pixel_block: &Value,
+    agent_prompt: Option<&str>,
+    provider: Option<Provider>,
+) -> Value {
     let context = match agent_prompt {
         Some(prompt) => {
             let mut context = prompt.trim_end().to_string();
@@ -98,7 +102,16 @@ fn session_start_envelope(pixel_block: &Value, agent_prompt: Option<&str>) -> Va
         }
         None => serde_json::to_string_pretty(pixel_block).unwrap_or_default(),
     };
-    let mut output = pixel_block.clone();
+    // Codex's hook output schema is `deny_unknown_fields`: any field beside
+    // the universal keys and `hookSpecificOutput` — the structured `pixel`
+    // block included — makes the whole output invalid. Emit the contract
+    // alone there; other providers ignore unknown fields, so they keep the
+    // block for consumers that parse it.
+    let mut output = if provider == Some(Provider::Codex) {
+        serde_json::json!({})
+    } else {
+        pixel_block.clone()
+    };
     output["hookSpecificOutput"] = serde_json::json!({
         "hookEventName": "SessionStart",
         "additionalContext": context,
@@ -4905,7 +4918,7 @@ mod tests {
             "repo": {"index_commit": "5855ef57b69f793bcdb4a2ce1e3499f9a0613253",
                      "graph_present": true, "facts_fresh": true},
         }});
-        let out = session_start_envelope(&block, Some("# Pixel doctrine\nuse pixel\n\n"));
+        let out = session_start_envelope(&block, Some("# Pixel doctrine\nuse pixel\n\n"), None);
         assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart");
         let context = out["hookSpecificOutput"]["additionalContext"]
             .as_str()
@@ -4923,7 +4936,7 @@ mod tests {
     #[test]
     fn session_start_envelope_without_a_repo_probe_is_the_prompt_alone() {
         let block = serde_json::json!({"pixel": {"capabilities": ["search-content"]}});
-        let out = session_start_envelope(&block, Some("# Pixel doctrine\n"));
+        let out = session_start_envelope(&block, Some("# Pixel doctrine\n"), None);
         assert_eq!(
             out["hookSpecificOutput"]["additionalContext"],
             "# Pixel doctrine"
@@ -4984,11 +4997,31 @@ mod tests {
     #[test]
     fn session_start_envelope_without_prompt_still_emits_the_block() {
         let block = serde_json::json!({"pixel": {"capabilities": []}});
-        let out = session_start_envelope(&block, None);
+        let out = session_start_envelope(&block, None, None);
         let context = out["hookSpecificOutput"]["additionalContext"]
             .as_str()
             .unwrap();
         // Without a deployed prompt the block is the only guidance left.
         assert_eq!(context, serde_json::to_string_pretty(&block).unwrap());
+    }
+
+    #[test]
+    fn session_start_envelope_codex_drops_unknown_fields() {
+        // Codex's SessionStart output schema is deny_unknown_fields: the
+        // structured `pixel` block would fail the whole hook response.
+        let block = serde_json::json!({"pixel": {
+            "capabilities": ["search-content"],
+            "repo": {"index_commit": "5855ef57b69f793bcdb4a2ce1e3499f9a0613253",
+                     "graph_present": true, "facts_fresh": true},
+        }});
+        let out = session_start_envelope(&block, Some("# Pixel doctrine\n"), Some(Provider::Codex));
+        assert!(out.get("pixel").is_none(), "{out}");
+        assert_eq!(out["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        assert!(
+            out["hookSpecificOutput"]["additionalContext"]
+                .as_str()
+                .unwrap()
+                .contains("Pixel index: commit 5855ef57b69f")
+        );
     }
 }

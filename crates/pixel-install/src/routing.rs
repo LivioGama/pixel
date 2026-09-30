@@ -148,6 +148,9 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
                 "guard --provider claude --delegate-rtk",
                 "composed-guard --provider codex",
                 "session-start",
+                "session-start --provider claude",
+                "session-start --provider codex",
+                "session-start --provider devin",
                 "prompt-submit",
                 "prompt-submit --provider claude",
                 "post-compaction",
@@ -602,14 +605,21 @@ fn configure_scoped(
             .as_array_mut()
             .ok_or_else(|| format!("{event} is not an array"))?;
         // Claude's task runtime is session-scoped. Make that provider choice
-        // explicit at the lifecycle boundary without changing Codex/Devin's
-        // established hook command shape.
-        let provider_arg = if provider == Provider::Claude
-            && matches!(verb, "prompt-submit" | "post-compaction" | "post-tool-use")
-        {
-            " --provider claude"
-        } else {
-            ""
+        // explicit at the lifecycle boundary. Session-start carries the
+        // provider for every host: Codex's hook output schema denies unknown
+        // fields, and the hook needs the flag to drop the `pixel` block.
+        let provider_arg = match verb {
+            "session-start" => match provider {
+                Provider::Claude => " --provider claude",
+                Provider::Codex => " --provider codex",
+                Provider::Devin => " --provider devin",
+            },
+            "prompt-submit" | "post-compaction" | "post-tool-use"
+                if provider == Provider::Claude =>
+            {
+                " --provider claude"
+            }
+            _ => "",
         };
         groups.push(hook_group(
             format!("{} run-hook {verb}{provider_arg}", quoted_executable(exe)),

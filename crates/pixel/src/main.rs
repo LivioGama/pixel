@@ -1538,6 +1538,11 @@ enum HookCmd {
     SessionStart {
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Provider whose hook-response contract to emit under. Codex's
+        /// output schema denies unknown fields, so the structured `pixel`
+        /// block is dropped there.
+        #[arg(long, value_enum)]
+        provider: Option<guard::Provider>,
     },
     /// `pixel hook prompt-submit "$@"` — task boundary detector.
     /// Reads the UserPromptSubmit payload from stdin, embeds the prompt
@@ -7021,7 +7026,7 @@ fn run_command(
                 }
                 std::process::exit(0);
             }
-            HookCmd::SessionStart { path } => {
+            HookCmd::SessionStart { path, provider } => {
                 let root = discover_root(&path)?;
                 // Advertise the commands the agent types, read from the
                 // parser itself so the block cannot name one that does not
@@ -7096,7 +7101,7 @@ fn run_command(
                 // hookSpecificOutput.additionalContext — the doctrine reaches
                 // every `claude` process, not just wrapper-launched shells.
                 write_stdout(
-                    &serde_json::to_string_pretty(&guard::session_start_output(&block))
+                    &serde_json::to_string_pretty(&guard::session_start_output(&block, provider))
                         .map_err(|e| e.to_string())?,
                 )?;
                 Ok(())

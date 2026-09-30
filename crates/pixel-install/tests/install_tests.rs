@@ -4395,7 +4395,7 @@ fn fake_exe_named(home: &std::path::Path, name: &str) -> std::path::PathBuf {
 /// runs that hook several times on every prompt, edit or session.
 fn lifecycle_counts(settings: &serde_json::Value) -> Vec<(&'static str, usize)> {
     [
-        ("SessionStart", "run-hook session-start"),
+        ("SessionStart", "run-hook session-start --provider claude"),
         ("SessionStart", "run-hook post-compaction --provider claude"),
         (
             "UserPromptSubmit",
@@ -4417,7 +4417,7 @@ fn lifecycle_counts(settings: &serde_json::Value) -> Vec<(&'static str, usize)> 
 }
 
 const ONE_EACH: [(&str, usize); 4] = [
-    ("run-hook session-start", 1),
+    ("run-hook session-start --provider claude", 1),
     ("run-hook post-compaction --provider claude", 1),
     ("run-hook prompt-submit --provider claude", 1),
     ("run-hook post-tool-use --provider claude", 1),
