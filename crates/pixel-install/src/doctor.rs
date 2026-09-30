@@ -2134,15 +2134,7 @@ mod tests {
         fix_for, judge_repair, names_check, normalize_rule_command, one_line,
         probe_daemon_epistemics, render_catalogue, render_repairs, repair_for, repair_plan,
         rtk_backup_check, run_repair, scenario_mismatches, selected, shell_word, spec,
-        validate_selection,
-    };
-    use super::{
-        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary,
-        PLACEHOLDER_DUMMY, Remedy, Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL,
-        age_secs, capped, catalogue_steps, extract_rule_commands, fix_for, judge_repair,
-        names_check, normalize_rule_command, one_line, probe_daemon_epistemics, render_catalogue,
-        render_repairs, repair_for, repair_plan, rtk_backup_check, run_repair, scenario_mismatches,
-        selected, shell_word, spec, split_home_repairs, validate_selection,
+        split_home_repairs, validate_selection,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
