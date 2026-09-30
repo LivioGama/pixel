@@ -62,7 +62,10 @@ sh .agents/skills/docker-setup-smoke/scripts/run.sh --agents --source main
    `no code graph yet, building it (first run only)` on stderr, reports coverage
    (`indexed: python 4/4`) and file counts; the second run does not rebuild.
 6. `pixel doctor --fail-on yellow` fails in a never-prepared repository, every
-   `[red]` line is followed by a `fix:` line, and after `--fix` doctor passes.
+   `[red]` line is followed by a `fix:` line, and after `--fix` no check is red.
+   The only yellow allowed then is `install.codex-hook-review` /
+   `repo.codex-hook-review` naming `/hooks`: Codex runs a hook only after the
+   user reviews it, which no command can do for them.
 7. Project install keeps `AGENTS.md` user instructions and is repeatable;
    disabled classify fails with empty stdout and the disabled diagnostic;
    project uninstall restores `AGENTS.md` byte for byte.

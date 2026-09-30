@@ -85,6 +85,8 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("install.pi-prompt", FIX_INSTALL),
     entry("install.codex-config", FIX_INSTALL),
     entry("install.codex-metrics-hook", FIX_INSTALL),
+    // Only the user can review a hook (`/hooks` in Codex); the outcome says so.
+    entry("install.codex-hook-review", None),
     entry("install.opencode-agents-md", FIX_INSTALL),
     entry("install.antigravity", FIX_INSTALL),
     entry("install.claude-hooks", FIX_INSTALL),
@@ -96,6 +98,7 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("rule.scenarios", FIX_INSTALL),
     entry("repo.codex-config", FIX_REPO_INSTALL),
     entry("repo.codex-hooks", FIX_REPO_INSTALL),
+    entry("repo.codex-hook-review", None),
     entry("repo.devin-hooks", FIX_REPO_INSTALL),
     entry("repo.warp-mcp", FIX_REPO_INSTALL),
     entry("repo.pixel-first", FIX_REPO_INSTALL),
@@ -422,6 +425,10 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             })
         },
     );
+    runner.check_status("install.codex-hook-review", || {
+        let hooks_path = codex_home.join(crate::codex_config::HOOKS_FILE);
+        codex_hook_review(&codex_home, &hooks_path, &exe)
+    });
 
     runner.check(
         "install.opencode-agents-md",
@@ -952,6 +959,11 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             }
         });
 
+        runner.check_status("repo.codex-hook-review", || {
+            let hooks_path = root.join(".codex").join(crate::codex_config::HOOKS_FILE);
+            codex_hook_review(&codex_home, &hooks_path, &exe)
+        });
+
         runner.check_status("repo.devin-hooks", || {
             let path = root.join(crate::routing::DEVIN_LOCAL_CONFIG);
             let value = if path.is_file() {
@@ -1363,6 +1375,28 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
 /// `repo.pi-guard`: where the repository's pi guard stands. A guard left in
 /// `.pi/agent/` by an older release is yellow, since pi never loads it there;
 /// a foreign file at the guard's path fails the check.
+/// `install.codex-hook-review` / `repo.codex-hook-review`: Pixel's hooks in
+/// one Codex `hooks.json` that Codex skips until the user reviews them.
+fn codex_hook_review(
+    codex_home: &Path,
+    hooks_path: &Path,
+    exe: &Path,
+) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+    let review = crate::codex_config::pixel_hook_review(codex_home, hooks_path, exe)?;
+    let (status, summary) = crate::codex_config::hook_review_outcome(&review, hooks_path);
+    Ok((
+        status,
+        DoctorCheckDetail {
+            summary,
+            detail: Some(serde_json::json!({
+                "hooks": hooks_path.display().to_string(),
+                "pixel": review.pixel,
+                "unreviewed": review.unreviewed,
+            })),
+        },
+    ))
+}
+
 fn pi_guard_check(
     root: &Path,
     state: crate::pi_project::GuardState,
@@ -2678,7 +2712,7 @@ mod tests {
             .map(|spec| spec.id)
             .filter(|id| id.starts_with("install."))
             .collect();
-        assert_eq!(home.len(), 11, "the install group as catalogued");
+        assert_eq!(home.len(), 12, "the install group as catalogued");
         let skip = ids(&["install.*"]);
         for spec in CHECKS {
             assert_eq!(
