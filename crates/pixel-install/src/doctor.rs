@@ -1609,6 +1609,23 @@ pub struct Repair {
     pub checks: Vec<String>,
 }
 
+/// `plan` split into the repairs a `--fix` runs and those it leaves to the
+/// managed `pixel`. A side build (`side_build`) never runs one that rewrites
+/// the home install — a `pixel install` step without `--repo`: that install
+/// is the managed binary's, and running it through `pixel-dev` would move
+/// every repository's hooks and prompts onto the side build. The checks it
+/// targets keep their `fix:` line and their colour.
+#[must_use]
+pub fn split_home_repairs(plan: Vec<Repair>, side_build: bool) -> (Vec<Repair>, Vec<Repair>) {
+    plan.into_iter().partition(|repair| {
+        !side_build
+            || !repair.steps.iter().any(|argv| {
+                argv.first().is_some_and(|verb| verb == "install")
+                    && !argv.iter().any(|arg| arg == "--repo")
+            })
+    })
+}
+
 /// The repairs `--fix` runs for `report`: one per distinct catalogue command
 /// among the flagged checks, in catalogue order (home install, repo install,
 /// daemon, index), so a command shared by twelve checks runs once. A check
@@ -2119,6 +2136,14 @@ mod tests {
         rtk_backup_check, run_repair, scenario_mismatches, selected, shell_word, spec,
         validate_selection,
     };
+    use super::{
+        CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary,
+        PLACEHOLDER_DUMMY, Remedy, Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL,
+        age_secs, capped, catalogue_steps, extract_rule_commands, fix_for, judge_repair,
+        names_check, normalize_rule_command, one_line, probe_daemon_epistemics, render_catalogue,
+        render_repairs, repair_for, repair_plan, rtk_backup_check, run_repair, scenario_mismatches,
+        selected, shell_word, spec, split_home_repairs, validate_selection,
+    };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
 
@@ -2616,6 +2641,31 @@ mod tests {
 
     /// Twelve checks share `pixel install`: the plan runs it once, lists
     /// every check it repairs, and keeps the report's order.
+    /// A side build's `--fix` keeps every repair but the home install's: a
+    /// `pixel install` step without `--repo`, even inside a chain, is left to
+    /// the managed pixel, while the managed pixel itself runs everything.
+    #[test]
+    fn split_home_repairs_should_leave_the_home_install_to_the_managed_pixel() {
+        let repair = |command: &str, steps: &[&[&str]]| Repair {
+            command: command.into(),
+            steps: argv(steps),
+            checks: ids(&["x"]),
+        };
+        let home = repair("pixel install", &[&["install", "--shell", "fish"]]);
+        let chained = repair(
+            "pixel daemon stop && pixel install",
+            &[&["daemon", "stop", "/r"], &["install"]],
+        );
+        let repo = repair("pixel install --repo /r", &[&["install", "--repo", "/r"]]);
+        let prepare = repair("pixel prepare-repo /r", &[&["prepare-repo", "/r"]]);
+        let plan = vec![home.clone(), chained.clone(), repo.clone(), prepare.clone()];
+        assert_eq!(
+            split_home_repairs(plan.clone(), true),
+            (vec![repo, prepare], vec![home, chained])
+        );
+        assert_eq!(split_home_repairs(plan.clone(), false), (plan, vec![]));
+    }
+
     #[test]
     fn repair_plan_should_run_each_command_once_in_report_order() {
         let install: &[&[&str]] = &[&["install"]];

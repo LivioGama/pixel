@@ -7093,6 +7093,14 @@ fn run_command(
             let mut outcomes = None;
             if fix {
                 let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                let (plan, left) =
+                    pixel_install::doctor::split_home_repairs(plan.clone(), is_side_build(&exe));
+                for repair in &left {
+                    eprintln!(
+                        "pixel doctor --fix: left {} to the managed pixel: a pixel-dev side build does not rewrite the home install",
+                        repair.command
+                    );
+                }
                 let runs: Vec<_> = plan
                     .iter()
                     .map(|repair| {
