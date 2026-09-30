@@ -1292,6 +1292,20 @@ fn project_backup_dirs(repo: &Path) -> Vec<PathBuf> {
     ]
 }
 
+/// Whether `name` ends the way [`config::backup_if_changing`] names a copy:
+/// `.pixel-bak.<nanos>-<seq>`, both numbers in digits. Anything looser would
+/// put a file of the user's (`notes.pixel-bak.txt`) in the `rm` command.
+fn is_backup_name(name: &str) -> bool {
+    name.rsplit_once(BACKUP_MARKER)
+        .and_then(|(_, suffix)| suffix.split_once('-'))
+        .is_some_and(|(nanos, seq)| is_digits(nanos) && is_digits(seq))
+}
+
+/// A non-empty run of ASCII digits.
+fn is_digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+}
+
 /// The backups present in `dirs` (not recursive), sorted and without
 /// duplicates: two entries of `dirs` may name the same directory.
 fn find_backups(dirs: &[PathBuf]) -> Vec<PathBuf> {
@@ -1303,7 +1317,7 @@ fn find_backups(dirs: &[PathBuf]) -> Vec<PathBuf> {
             path.is_file()
                 && path
                     .file_name()
-                    .is_some_and(|name| name.to_string_lossy().contains(BACKUP_MARKER))
+                    .is_some_and(|name| is_backup_name(&name.to_string_lossy()))
         })
         .collect();
     found.sort();
@@ -1665,6 +1679,28 @@ mod backup_tests {
                 b.join("settings.json.pixel-bak.2-0")
             ]
         );
+    }
+
+    /// Only the name `backup_if_changing` writes is a backup: a file of the
+    /// user's that merely contains the marker must never reach the `rm`.
+    #[test]
+    fn is_backup_name_accepts_only_the_suffix_pixel_writes() {
+        assert!(is_backup_name(
+            "settings.json.pixel-bak.1790778294642045925-1"
+        ));
+        assert!(is_backup_name("a.pixel-bak.x.pixel-bak.12-0"));
+        for name in [
+            "notes.pixel-bak.txt",
+            "settings.json.pixel-bak.",
+            "settings.json.pixel-bak.12",
+            "settings.json.pixel-bak.12-",
+            "settings.json.pixel-bak.-3",
+            "settings.json.pixel-bak.12-3a",
+            "settings.json.pixel-bak.1a-3",
+            "settings.json",
+        ] {
+            assert!(!is_backup_name(name), "{name}");
+        }
     }
 
     #[test]
