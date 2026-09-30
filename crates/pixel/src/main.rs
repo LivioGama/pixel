@@ -3961,12 +3961,19 @@ fn run_search_one(
     }
     // Epistemics surfacing for search's line-oriented output (which prints
     // matches, not the whole response object): when the answer is a bounded
-    // partial, say so on stderr with the named caps.
+    // partial, say so on stderr with the named caps — minus the caps a
+    // truncation warning above already stated.
     if let Some(e) = data.get("epistemics")
         && e.get("lower_bound").and_then(Value::as_bool) == Some(true)
         && let Some(basis) = e.get("basis").and_then(Value::as_str)
+        && let Some(note) = bounded_result_note(
+            basis,
+            page.truncated || page.cap_fired,
+            limit,
+            data.get("byte_cap").and_then(Value::as_u64).unwrap_or(0),
+        )
     {
-        eprintln!("note: bounded result — {basis}");
+        eprintln!("note: bounded result — {note}");
     }
     if stats && let Some(s) = data.get("stats") {
         eprintln!(
@@ -5462,6 +5469,47 @@ mod update_close_tests {
         assert!(!read_only(&["list-errors", "gc"]));
         assert!(read_only(&["list-branches"]));
         assert!(!read_only(&["list-branches", "--fetch"]));
+    }
+}
+
+/// The bounded-result note for search's line output, with the caps the
+/// `⚠ results truncated` line already stated removed: the daemon restates
+/// the row and byte caps inside `basis`, and the same bound on two stderr
+/// lines reads as two problems. Every other named cap (credential hiding,
+/// the ranked-pool cap) carries information the warning does not and stays.
+/// `None` when nothing unique remains.
+fn bounded_result_note(
+    basis: &str,
+    truncation_warned: bool,
+    row_limit: u64,
+    byte_cap: u64,
+) -> Option<String> {
+    if !truncation_warned {
+        return Some(basis.to_string());
+    }
+    // Each truncation cap is composed from this same response's fields, so
+    // the exact strings reconstruct from `row_limit` and `byte_cap`; a cap
+    // whose numbers differ is from another shape and must survive. Each cap
+    // is stripped with its own `"; "` joiner, so the caps around it stay
+    // separated; the last cap has none, which the final trim covers.
+    let (tier, caps) = basis.split_once("; caps: ")?;
+    let mut rest = caps.to_string();
+    for fired in [
+        format!(
+            "match list truncated at row limit {row_limit}; more matches exist — continue via next_offset"
+        ),
+        format!("output truncated by the {byte_cap}-byte response cap; continue via next_offset"),
+    ] {
+        // With its `"; "` joiner first, so a middle cap leaves no gap; the
+        // bare form covers the last cap, which has no joiner to take.
+        rest = rest.replace(&format!("{fired}; "), "");
+        rest = rest.replace(&fired, "");
+    }
+    let rest = rest.trim_matches(|c| c == ';' || c == ' ').trim();
+    if rest.is_empty() {
+        None
+    } else {
+        Some(format!("{tier}; caps: {rest}"))
     }
 }
 
@@ -9486,8 +9534,8 @@ mod prompt_asset_parity {
 #[cfg(test)]
 mod renamed_command_tests {
     use super::{
-        Cli, checks_deployed_prompts, logged_args, rename_note, renamed_invocation,
-        stale_prompt_note,
+        Cli, bounded_result_note, checks_deployed_prompts, logged_args, rename_note,
+        renamed_invocation, stale_prompt_note,
     };
     use clap::CommandFactory;
     use std::collections::BTreeSet;
@@ -9716,6 +9764,65 @@ mod renamed_command_tests {
             "{both}"
         );
         assert_eq!(both.lines().count(), 1, "{both}");
+    }
+
+    #[test]
+    fn bounded_result_note_keeps_the_basis_when_no_truncation_was_warned() {
+        // Without a ⚠ line above it, the cap text inside the note is the
+        // only place the bound is named; it must stay.
+        let row = "text index; caps: match list truncated at row limit 100; more matches exist — continue via next_offset";
+        assert_eq!(
+            bounded_result_note(row, false, 100, 65_536).as_deref(),
+            Some(row)
+        );
+        let credential = "text index; caps: 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches";
+        assert_eq!(
+            bounded_result_note(credential, false, 100, 65_536).as_deref(),
+            Some(credential)
+        );
+    }
+
+    #[test]
+    fn bounded_result_note_drops_only_the_caps_the_warning_named() {
+        let basis = "text index; caps: output truncated by the 65536-byte response cap; continue via next_offset; match list truncated at row limit 100; more matches exist — continue via next_offset; 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches";
+        assert_eq!(
+            bounded_result_note(basis, true, 100, 65_536).as_deref(),
+            Some(
+                "text index; caps: 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches"
+            )
+        );
+    }
+
+    #[test]
+    fn bounded_result_note_is_dropped_when_the_warning_said_everything() {
+        let row = "text index; caps: match list truncated at row limit 100; more matches exist — continue via next_offset";
+        assert_eq!(bounded_result_note(row, true, 100, 65_536), None);
+        let byte = "text index; caps: output truncated by the 65536-byte response cap; continue via next_offset";
+        assert_eq!(bounded_result_note(byte, true, 100, 65_536), None);
+        assert_eq!(bounded_result_note("text index", true, 100, 65_536), None);
+    }
+
+    #[test]
+    fn bounded_result_note_keeps_a_cap_whose_numbers_do_not_match() {
+        // The strip keys on the exact cap text the daemon composed from this
+        // response's own limit and byte cap; anything else is a different
+        // cap and must survive.
+        let row = "text index; caps: match list truncated at row limit 100; more matches exist — continue via next_offset";
+        assert_eq!(
+            bounded_result_note(row, true, 200, 65_536).as_deref(),
+            Some(row)
+        );
+    }
+
+    #[test]
+    fn bounded_result_note_closes_the_gap_a_stripped_middle_cap_leaves() {
+        let basis = "text index; caps: 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches; match list truncated at row limit 100; more matches exist — continue via next_offset; ranked candidate pool capped at 10000 matches; ranking never saw candidates beyond the cap";
+        assert_eq!(
+            bounded_result_note(basis, true, 100, 65_536).as_deref(),
+            Some(
+                "text index; caps: 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches; ranked candidate pool capped at 10000 matches; ranking never saw candidates beyond the cap"
+            )
+        );
     }
 
     #[test]
