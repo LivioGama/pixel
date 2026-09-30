@@ -36,6 +36,14 @@ UPLOAD=0
 PROMPT_FILE=""
 IDLE_LIMIT="2.0"
 VIDEO_MAX_SECONDS="${HARNESS_VIDEO_MAX_SECONDS:-15}"
+# --interactive records the real TUI (colors, spinner) instead of headless
+# mode. The TUI does not exit when the task ends, so the runner watches the
+# cast file: no screen updates for HARNESS_INTERACTIVE_IDLE seconds (the
+# spinner redraws while the agent works, so silence means done), or
+# HARNESS_INTERACTIVE_MAX seconds hard cap, whichever first.
+INTERACTIVE=0
+INTERACTIVE_IDLE="${HARNESS_INTERACTIVE_IDLE:-10}"
+INTERACTIVE_MAX="${HARNESS_INTERACTIVE_MAX:-300}"
 
 usage() {
     sed -n '/^# harness-recorder.sh/,/^# Exit codes/p' "$0" | sed 's/^# \{0,1\}//'
@@ -57,6 +65,7 @@ while [ $# -gt 0 ]; do
         --post) POST_PR="${2:-}"; shift 2 ;;
         --post=*) POST_PR="${1#*=}"; shift ;;
         --upload) UPLOAD=1; shift ;;
+        --interactive) INTERACTIVE=1; shift ;;
         --video-max-seconds) VIDEO_MAX_SECONDS="${2:-}"; shift 2 ;;
         --video-max-seconds=*) VIDEO_MAX_SECONDS="${1#*=}"; shift ;;
         --prompt-file) PROMPT_FILE="${2:-}"; shift 2 ;;
@@ -72,14 +81,15 @@ done
 [ -n "$PROVIDER" ] || die "--provider is required (claude|codex)"
 [ -n "$REPO" ] || REPO="$(pwd)"
 case "$PROVIDER" in
-    claude | codex) ;;
-    *) die "--provider must be claude or codex, got '$PROVIDER'" ;;
+    claude | codex | agy | pi) ;;
+    *) die "--provider must be claude, codex, agy or pi, got '$PROVIDER'" ;;
 esac
 REPO=$(cd "$REPO" 2>/dev/null && pwd) || die "repo not found: $REPO"
 [ -d "$REPO/.git" ] || [ -f "$REPO/.git" ] || die "$REPO is not a git repository"
 command -v asciinema >/dev/null 2>&1 || die "asciinema not found: brew install asciinema"
 command -v python3 >/dev/null 2>&1 || die "python3 not found"
-[ "$MAKE_GIF" -eq 1 ] && ! command -v agg >/dev/null 2>&1 && die "--gif: agg not found: brew install agg"
+# agg is only needed at render time; the recording itself can happen on a
+# machine without it (the .cast is rendered into a GIF elsewhere).
 case "$SCENARIO" in
     locate | scope | sync | recover | rns) ;;
     *) die "unknown scenario: $SCENARIO (locate|scope|sync|recover|rns)" ;;
@@ -206,25 +216,61 @@ case "$PROVIDER" in
     claude)
         # The user's real settings (pixel hooks installed) the way
         # pixel-demo.sh builds its pixel arm: deployed agent prompt + subagent
-        # prompt, --verbose so stream-json emits tool events.
+        # prompt, --verbose so stream-json emits tool events. Headless (-p)
+        # unless --interactive, which runs the real TUI.
         AGENT_PROMPT="${AGENT_PROMPT:-$HOME/.local/share/pixel/agent-prompt.md}"
         [ -s "$AGENT_PROMPT" ] || AGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-agent-prompt.md"
         SUBAGENT_PROMPT="${SUBAGENT_PROMPT:-$HOME/.local/share/pixel/subagent-prompt.md}"
         [ -s "$SUBAGENT_PROMPT" ] || SUBAGENT_PROMPT="$ROOT/crates/pixel-install/assets/pixel-subagent-prompt.md"
         [ -s "$AGENT_PROMPT" ] || die "agent prompt missing (run: pixel install)"
         command -v claude >/dev/null 2>&1 || die "claude not on PATH"
-        RUNNER_CMD="$(q claude -p --dangerously-skip-permissions \
-            --output-format stream-json --verbose \
-            --append-system-prompt-file "$AGENT_PROMPT" \
-            --append-subagent-system-prompt-file "$SUBAGENT_PROMPT") < $(printf '%q' "$PROMPT_FILE")"
+        if [ "$INTERACTIVE" -eq 1 ]; then
+            RUNNER_CMD="$(q claude --dangerously-skip-permissions \
+                --append-system-prompt-file "$AGENT_PROMPT" \
+                --append-subagent-system-prompt-file "$SUBAGENT_PROMPT" \
+                "$PROMPT_TEXT")"
+        else
+            RUNNER_CMD="$(q claude -p --dangerously-skip-permissions \
+                --output-format stream-json --verbose \
+                --append-system-prompt-file "$AGENT_PROMPT" \
+                --append-subagent-system-prompt-file "$SUBAGENT_PROMPT") < $(printf '%q' "$PROMPT_FILE")"
+        fi
         ;;
     codex)
         command -v codex >/dev/null 2>&1 || die "codex not on PATH"
-        RUNNER_CMD="$(q codex exec --dangerously-bypass-approvals-and-sandbox \
-            --skip-git-repo-check -C "$REPO" "$PROMPT_TEXT")"
+        if [ "$INTERACTIVE" -eq 1 ]; then
+            RUNNER_CMD="$(q codex --dangerously-bypass-approvals-and-sandbox \
+                "$PROMPT_TEXT")"
+        else
+            RUNNER_CMD="$(q codex exec --dangerously-bypass-approvals-and-sandbox \
+                --skip-git-repo-check -C "$REPO" "$PROMPT_TEXT")"
+        fi
+        ;;
+    agy)
+        command -v agy >/dev/null 2>&1 || die "agy not on PATH"
+        # agy (Antigravity) has no system-prompt override flag: pixel reaches
+        # it through pixel install's own wiring (AGENTS.md / hooks), which the
+        # VM already has.
+        if [ "$INTERACTIVE" -eq 1 ]; then
+            # -i consumes the next token as the prompt: the permission flag
+            # must come after it
+            RUNNER_CMD="$(q agy -i="$PROMPT_TEXT" --dangerously-skip-permissions)"
+        else
+            RUNNER_CMD="$(q agy -p --dangerously-skip-permissions \
+                "$PROMPT_TEXT")"
+        fi
+        ;;
+    pi)
+        command -v pi >/dev/null 2>&1 || die "pi not on PATH"
+        if [ "$INTERACTIVE" -eq 1 ]; then
+            RUNNER_CMD="$(q pi "$PROMPT_TEXT")"
+        else
+            RUNNER_CMD="$(q pi --no-session "$PROMPT_TEXT")"
+        fi
         ;;
 esac
 
+if [ "$INTERACTIVE" -eq 0 ]; then
 # The recorded command is a generated script (not an inline bash -c string):
 # the raw harness stream is teed to $LOG for counting, piped through the
 # pretty-printer the video shows, and stderr is mirrored to a file without
@@ -243,6 +289,37 @@ RUNNER_SCRIPT="$OUTDIR/runner-$BASE.sh"
         "$RUNNER_CMD" "$LOG" "$FILTER" "$OUTDIR/$BASE.counts"
     printf 'exit "${PIPESTATUS[0]}"\n'
 } > "$RUNNER_SCRIPT"
+else
+# Interactive: the TUI renders itself (no filter). The session runs inside a
+# tmux server so the consent dialogs first interactive launch shows (Claude
+# Code's bypass-permissions warning) can be answered with injected keys.
+# The idle watcher runs as a background subshell; the runner itself execs
+# tmux attach in the foreground — tmux refuses a backgrounded client.
+RUNNER_SCRIPT="$OUTDIR/runner-$BASE.sh"
+SESSION="shoot-$BASE"
+{
+    printf '#!/usr/bin/env bash\n'
+    printf '# generated by scripts/harness-recorder.sh — the interactive harness session\n'
+    printf 'set -u\n'
+    printf 'stty rows %d cols %d 2> /dev/null || true\n' "${AGG_ROWS:-36}" "${AGG_COLS:-112}"
+    printf 'TMUX_BIN=%q\n' "$(command -v tmux || echo tmux)"
+    printf '"$TMUX_BIN" kill-session -t %q 2>/dev/null\n' "$SESSION"
+    printf '"$TMUX_BIN" new-session -d -s %q -x %d -y %d %q\n' \
+        "$SESSION" "${AGG_COLS:-112}" "${AGG_ROWS:-36}" \
+        "cd $(printf '%q' "$REPO") && $RUNNER_CMD"
+    printf '( sleep 4; "$TMUX_BIN" send-keys -t %q Down Enter 2>/dev/null ) &\n' "$SESSION"
+    printf '( start=$SECONDS; idle_start=""; prev_size=0; while :; do\n'
+    printf '    sleep 2\n'
+    printf '    size=$(wc -c < %q 2>/dev/null | tr -d " ")\n' "$CAST"
+    printf '    if [ "${size:-0}" -gt "${prev_size:-0}" ]; then prev_size=$size; idle_start=$SECONDS; fi\n'
+    printf '    if [ -n "${idle_start:-}" ] && [ $((SECONDS - idle_start)) -ge %d ] \\\n' "$INTERACTIVE_IDLE"
+    printf '        && [ "${prev_size:-0}" -gt 2000 ]; then break; fi\n'
+    printf '    if [ $((SECONDS - start)) -ge %d ]; then break; fi\n' "$INTERACTIVE_MAX"
+    printf '  done; "$TMUX_BIN" kill-session -t %q 2>/dev/null\n' "$SESSION"
+    printf ') &\n'
+    printf 'exec "$TMUX_BIN" attach -t %q\n' "$SESSION"
+} > "$RUNNER_SCRIPT"
+fi
 chmod +x "$RUNNER_SCRIPT"
 
 echo "harness-recorder: provider=$PROVIDER scenario=$SCENARIO repo=$REPO" >&2
@@ -285,6 +362,24 @@ fi
 if [ "$PIXEL_CALLS" -eq 0 ]; then
     PIXEL_CALLS=$(grep -h -c -E '(^|[[:space:]/;&|"])pixel (search|find-code|search-content|resolve|targets|impact|changes|excavate|rescue|scope-task|inspect|recall)' \
         "$LOG" "$OUTDIR/$BASE.stderr.log" 2>/dev/null | awk -F: '{s+=$1} END {print s+0}')
+    if [ "$PIXEL_CALLS" -eq 0 ] && [ -s "$CAST" ]; then
+        # interactive TUIs have no machine stream: count pixel command echoes
+        # across every event of the cast
+        PIXEL_CALLS=$(python3 - "$CAST" << 'PY'
+import json, re, sys
+pat = re.compile(r"pixel\s+(search|find-code|search-content|resolve|targets|impact|changes|excavate|rescue|scope-task|inspect|recall|search-like-rg)")
+n = 0
+for line in open(sys.argv[1]):
+    try:
+        e = json.loads(line)
+    except json.JSONDecodeError:
+        continue
+    if isinstance(e, list) and len(e) > 2 and e[1] == "o" and pat.search(e[2]):
+        n += 1
+print(n)
+PY
+)
+    fi
     TOOLS_USED=$(grep -h -oE '"name":"[A-Za-z]+|pixel [a-z-]+' "$LOG" "$OUTDIR/$BASE.stderr.log" 2>/dev/null | sed 's/"name":"//' | sort | uniq -c | sort -rn | awk '{printf "%s×%s, ", $2, $1}' | sed 's/, $//')
     [ -n "$TOOLS_USED" ] || TOOLS_USED="none"
 fi
