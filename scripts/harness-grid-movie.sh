@@ -98,8 +98,10 @@ rm -f "$MOVIE"
 WATCHER=$!
 
 echo "harness-grid-movie: recording the wall (idle>=$IDLE s or cap $MAX s)"
+# the attach client must report the wall's exact size, or tmux shrinks the
+# session down to the client terminal
 asciinema rec \
-    --command "tmux attach -t $SESS" \
+    --command "stty rows 72 cols 224; tmux attach -t $SESS" \
     --output-format asciicast-v3 \
     --idle-time-limit 3.0 \
     --overwrite --quiet \
