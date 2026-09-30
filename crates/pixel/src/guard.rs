@@ -534,6 +534,21 @@ fn rewrite_json(provider: Provider, updated_input: Value) -> Value {
 }
 
 fn provider_rewrite(provider: Provider, payload: &Value) -> Option<Value> {
+    provider_rewrite_with(
+        provider,
+        payload,
+        crate::search_compat::native_configuration,
+    )
+}
+
+/// [`provider_rewrite`] with the check for the user's own rg/grep
+/// configuration passed in, so a test pins it instead of reading the
+/// developer's `RIPGREP_CONFIG_PATH` (#448).
+fn provider_rewrite_with(
+    provider: Provider,
+    payload: &Value,
+    native_configuration: impl Fn(crate::search_compat::SearchTool) -> bool,
+) -> Option<Value> {
     if !is_guard_event(
         payload,
         payload
@@ -586,10 +601,10 @@ fn provider_rewrite(provider: Provider, payload: &Value) -> Option<Value> {
         .map(|p| base.join(p))
         .unwrap_or(base);
     let rewritten = if matches!(provider, Provider::Devin | Provider::Zcode) {
-        crate::search_compat::rewrite_retrieval(&command, &cwd)
+        crate::search_compat::rewrite_retrieval_with(&command, &cwd, native_configuration)
             .or_else(|| reader_rewrite(&command, &cwd))?
     } else {
-        crate::search_compat::rewrite(&command, &cwd)?
+        crate::search_compat::rewrite_with(&command, &cwd, native_configuration)?
     };
     let rewritten_command = rewritten_command_value(original_command, rewritten)?;
     let mut updated = Value::Object(input.clone());
@@ -7348,7 +7363,8 @@ mod tests {
             })
         };
         for tool in ["exec", "Bash"] {
-            let rewritten = provider_rewrite(Provider::Devin, &payload(tool)).expect(tool);
+            let rewritten =
+                provider_rewrite_with(Provider::Devin, &payload(tool), |_| false).expect(tool);
             assert_eq!(
                 rewritten["hookSpecificOutput"]["updatedInput"]["command"],
                 "pixel search-like-rg rg -- 'needle' 'src'",
@@ -7376,7 +7392,8 @@ mod tests {
             })
         };
         for tool in ["exec", "Bash"] {
-            let rewritten = provider_rewrite(Provider::Zcode, &payload(tool)).expect(tool);
+            let rewritten =
+                provider_rewrite_with(Provider::Zcode, &payload(tool), |_| false).expect(tool);
             assert_eq!(
                 rewritten["hookSpecificOutput"]["updatedInput"]["command"],
                 "pixel search-like-rg rg -- 'needle' 'src'",
@@ -7387,6 +7404,40 @@ mod tests {
             provider_rewrite(Provider::Zcode, &payload("WebSearch")),
             None
         );
+    }
+
+    /// A user's own rg configuration can change what `rg` prints, so the
+    /// rewrite declines for every provider when it is set; the check is the
+    /// injected one, not the developer's environment (#448).
+    #[test]
+    fn provider_rewrite_declines_a_search_the_users_rg_config_could_change() {
+        let repo = scratch_repo("rg-config-rewrite");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".pixel")).unwrap();
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "rg needle src"},
+            "cwd": repo,
+        });
+        for provider in [
+            Provider::Claude,
+            Provider::Codex,
+            Provider::Devin,
+            Provider::Zcode,
+        ] {
+            assert_eq!(
+                provider_rewrite_with(provider, &payload, |tool| {
+                    tool == crate::search_compat::SearchTool::Rg
+                }),
+                None,
+                "{provider:?}"
+            );
+            assert!(
+                provider_rewrite_with(provider, &payload, |_| false).is_some(),
+                "{provider:?}"
+            );
+        }
     }
 
     /// The native fallback is the policy's deny path: with `enforce` on, a

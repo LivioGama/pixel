@@ -215,7 +215,7 @@ pub fn rewrite_retrieval(command: &str, cwd: &Path) -> Option<String> {
     rewrite_retrieval_with(command, cwd, native_configuration)
 }
 
-fn rewrite_retrieval_with(
+pub(crate) fn rewrite_retrieval_with(
     command: &str,
     cwd: &Path,
     native_configuration: impl Fn(SearchTool) -> bool,
@@ -314,7 +314,7 @@ fn rewrite_find(args: &[String], cwd: &Path) -> Option<String> {
 /// `rewrite` with the tool-configuration probe as a parameter, so a test
 /// states the environment it assumes instead of inheriting the developer's
 /// (an exported `RIPGREP_CONFIG_PATH` turned every `rg` case native).
-fn rewrite_with(
+pub(crate) fn rewrite_with(
     command: &str,
     cwd: &Path,
     native_configuration: impl Fn(SearchTool) -> bool,
@@ -431,7 +431,7 @@ fn credential_path(path: &Path) -> bool {
 /// Only that tool's own configuration counts. `RIPGREP_CONFIG_PATH` changes
 /// nothing about `grep` and `GREP_OPTIONS` nothing about `rg`; a developer
 /// with an rg config would otherwise never get a `grep` rewrite.
-fn native_configuration(tool: SearchTool) -> bool {
+pub(crate) fn native_configuration(tool: SearchTool) -> bool {
     let variable = match tool {
         SearchTool::Rg => "RIPGREP_CONFIG_PATH",
         SearchTool::Grep => "GREP_OPTIONS",
