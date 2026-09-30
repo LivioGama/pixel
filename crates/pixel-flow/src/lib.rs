@@ -12,11 +12,12 @@ pub mod replay;
 pub mod store;
 pub mod types;
 
-mod vars;
+pub mod vars;
 
-pub use execute::{ExecResult, execute};
+pub use execute::{Browser, ExecResult, agent_browser, evaluate_condition, execute, execute_step};
 pub use store::{delete, ensure_flow_dir, exists, flow_dir, list, load, save, slugify};
 pub use types::{Flow, FlowStep, FlowVar};
+pub use vars::substitute;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -93,7 +94,7 @@ pub fn flow(action: &FlowAction) -> Result<Value, String> {
     }
 }
 
-fn now_unix() -> i64 {
+pub fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
@@ -109,7 +110,7 @@ fn save_flow(
 ) -> Result<Value, String> {
     if exists(name) {
         return Err(format!(
-            "flow '{}' already exists — use `pixel replay-flow revise {}` to update it",
+            "flow '{}' already exists — use `pixel flow revise {}` to update it",
             slugify(name),
             slugify(name)
         ));
@@ -418,7 +419,7 @@ mod tests {
         let again = save_flow("Login Flow", "Other", "", &[], &None, &from_file).unwrap_err();
         assert_eq!(
             again,
-            "flow 'login-flow' already exists — use `pixel replay-flow revise login-flow` to update it"
+            "flow 'login-flow' already exists — use `pixel flow revise login-flow` to update it"
         );
         assert_eq!(
             load("Login Flow").unwrap().title,
