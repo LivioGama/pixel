@@ -34,7 +34,7 @@ use serde_json::{Map, Value};
 use toml_edit::{DocumentMut, Item};
 
 use super::Agent;
-use super::config::{CLAUDE_ONBOARDING_FILE, codex_config, temp_for};
+use super::config::{CLAUDE_ONBOARDING_FILE, codex_config, resolve_target, temp_for};
 use super::rpc::{self, MergeStrategy};
 
 /// The Codex config key the `config/batchWrite` RPC addresses hook trust by.
@@ -387,6 +387,10 @@ fn write_private(path: &Path, value: &Value) -> Result<(), String> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt as _;
 
+    // Same reasoning as `write_atomically`: a dotfiles-managed config is a
+    // symlink, and a rename onto the link would clear no gate — the agent
+    // reads the file the link points at.
+    let path = &resolve_target(path);
     let text = serde_json::to_string_pretty(value)
         .map_err(|e| format!("cannot serialise {}: {e}", path.display()))?;
     if let Some(parent) = path.parent() {
@@ -485,6 +489,35 @@ mod tests {
             again.detail.contains("already"),
             "an idempotent run must read as one: {again:?}"
         );
+        fs::remove_dir_all(&home).unwrap();
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    /// The same link on the file `--approve` writes. `~/.claude.json` is a
+    /// common dotfiles target, so a rename onto the link would leave the file
+    /// Claude Code actually reads still gated while the report said the
+    /// workspace was trusted.
+    #[test]
+    fn a_claude_approval_through_a_symlinked_config_still_clears_the_gate() {
+        let home = own_dir("claude-symlinked");
+        let workspace = own_dir("claude-symlinked-workspace");
+        let real = home.join("managed-claude.json");
+        fs::write(&real, "{}").unwrap();
+        let path = home.join(CLAUDE_ONBOARDING_FILE);
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+
+        let approval = approve(&home, Agent::Claude, &workspace, Duration::from_secs(1));
+        assert!(approval.approved, "{approval:?}");
+
+        assert!(
+            fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link was replaced by a regular file"
+        );
+        let written: Value = serde_json::from_str(&fs::read_to_string(&real).unwrap()).unwrap();
+        assert_eq!(written["hasCompletedOnboarding"], Value::Bool(true));
         fs::remove_dir_all(&home).unwrap();
         fs::remove_dir_all(&workspace).unwrap();
     }

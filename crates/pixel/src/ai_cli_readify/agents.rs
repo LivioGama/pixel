@@ -304,14 +304,17 @@ pub(crate) fn classify_output(text: &str) -> Option<FailureClass> {
 /// The env vars that carry Claude's gateway credential. Claude Code prints
 /// the same `authentication_failed` token for a credential that was rejected
 /// and for one that was never configured, so the report reads the
-/// environment to tell the two apart. `ANTHROPIC_API_KEY` is listed because
-/// Claude Code honours it when something else set it; this port never writes
-/// or exports it.
-pub(crate) const CLAUDE_CREDENTIAL_ENVS: [&str; 3] = [
-    "ANTHROPIC_AUTH_TOKEN",
-    "ANTHROPIC_API_KEY",
-    "ANTHROPIC_CUSTOM_HEADERS",
-];
+/// environment to tell the two apart.
+///
+/// `ANTHROPIC_API_KEY` is deliberately absent. Every child this command
+/// spawns runs with it removed ([`crate::ai_cli_readify::run_capture`],
+/// `terminal`, `auth`, `rpc`), so a shell that exports it does not put a
+/// credential in front of the agent — counting it here would report the
+/// opposite of what the probe passed through, and a run with only that
+/// variable set would read as a rejected credential instead of a missing
+/// one.
+pub(crate) const CLAUDE_CREDENTIAL_ENVS: [&str; 2] =
+    ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS"];
 
 /// True when any of `names` is set to something that is not blank, which is
 /// all the report needs: a name present but empty is not a credential.
@@ -765,12 +768,25 @@ mod tests {
 
     #[test]
     fn one_credential_among_the_alternatives_is_enough() {
-        // The three names are alternatives a user picks one of, so the rule
-        // is `any` and never `all`.
+        // The names are alternatives a user picks one of, so the rule is
+        // `any` and never `all`.
         let values = [None, Some("token".to_string()), Some(String::new())];
         assert!(
             any_non_blank(values.into_iter()),
             "one set name among unset ones is a configured credential"
+        );
+    }
+
+    #[test]
+    fn the_credential_list_holds_only_what_the_probe_passes_through() {
+        // Every child this command spawns runs with `ANTHROPIC_API_KEY`
+        // removed, so its presence in the shell cannot be what the agent saw.
+        // Listing it would invert the report's own distinction: a run whose
+        // only variable is the stripped one would read as a rejected
+        // credential where the truth is that none reached the agent.
+        assert_eq!(
+            CLAUDE_CREDENTIAL_ENVS,
+            ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS"]
         );
     }
 

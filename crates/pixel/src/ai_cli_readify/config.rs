@@ -134,6 +134,7 @@ fn read_or(path: &Path, missing: &str) -> Result<String, String> {
 /// The temp's name is unique per writer ([`temp_for`]), so two runs against
 /// the same config cannot take the file out from under each other.
 fn write_atomically(path: &Path, text: String) -> Result<(), String> {
+    let path = &resolve_target(path);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
@@ -153,6 +154,28 @@ fn write_atomically(path: &Path, text: String) -> Result<(), String> {
     drop(temp);
     fs::rename(&tmp, path)
         .map_err(|e| format!("rename {} into {}: {e}", tmp.display(), path.display()))
+}
+
+/// `path` with a final symlink resolved to the file it points at.
+///
+/// A dotfiles manager makes an agent's config a symlink into the user's own
+/// repository, and the rename in [`write_atomically`] replaces whatever sits
+/// at the destination. Renaming onto the link would delete the link, leave
+/// the managed file at its old contents and still report a write: the agent
+/// reads the file the link pointed at, which never changed. Resolving first
+/// puts the rename on that file — which is also the one `read_or` read and
+/// [`mode_for`] measured, both of which already follow the link.
+///
+/// Only a link is resolved, so an ordinary path is written where the caller
+/// named it and the report names the same path it was given. A link whose
+/// target is gone resolves to nothing and is returned unchanged: the write
+/// then leaves a regular file where the link was, as it did before.
+pub(crate) fn resolve_target(path: &Path) -> std::path::PathBuf {
+    fs::symlink_metadata(path)
+        .ok()
+        .filter(|meta| meta.file_type().is_symlink())
+        .and_then(|_| fs::canonicalize(path).ok())
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 /// The mode a rewrite of `path` carries: the one it already has, so a rename
@@ -347,6 +370,34 @@ mod tests {
         assert_eq!(route["base_url"].as_str(), Some("https://ollama.com/v1"));
         assert_eq!(route["env_key"].as_str(), Some("OLLAMA_API_KEY"));
         assert_eq!(route["wire_api"].as_str(), Some("chat"));
+    }
+
+    /// A dotfiles manager makes the config a symlink (`chezmoi`, `stow`), and
+    /// the agent reads the file on the other end. A rename onto the link
+    /// replaces the link with a regular file and leaves that other file at
+    /// its old contents: the run reports a write the agent never sees. The
+    /// assertion on the link is what pins it — reading `path` back would find
+    /// the new contents either way.
+    #[test]
+    fn a_symlinked_config_is_rewritten_at_its_target() {
+        let home = Scratch::new();
+        let real = home.path().join("managed-settings.json");
+        fs::write(&real, "{}").unwrap();
+        let path = claude_settings(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+
+        write_claude(&path, Provider::Ollama).unwrap();
+
+        assert!(
+            fs::symlink_metadata(&path)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "the link was replaced by a regular file"
+        );
+        let written: Value = serde_json::from_str(&fs::read_to_string(&real).unwrap()).unwrap();
+        assert_eq!(written["env"]["ANTHROPIC_BASE_URL"], GATEWAY_URL);
     }
 
     #[test]
