@@ -104,10 +104,19 @@ jobs:
             if found is None:
               print(f"issue {number} is not on the board; nothing to sync")
             else:
-              gh("project", "item-edit", "--id", found,
-                 "--project-id", "PVT_kwHOAGnAQs4BlIxX",
-                 "--field-id", "PVTSSF_lAHOAGnAQs4BlIxXzhj2yRU",
-                 "--single-select-option-id", option)
+              # The raw mutation, not `gh project item-edit`: that wrapper
+              # validates token scopes locally (read:org, read:discussion)
+              # before the operation, which `project: write` alone serves;
+              # `gh api` skips the preflight and the API only needs the
+              # scopes the project itself requires.
+              mutation = (
+                  'mutation { updateProjectV2ItemFieldValue(input: {'
+                  ' projectId: "PVT_kwHOAGnAQs4BlIxX",'
+                  ' itemId: "%s",'
+                  ' fieldId: "PVTSSF_lAHOAGnAQs4BlIxXzhj2yRU",'
+                  ' value: { singleSelectOptionId: "%s" } })'
+                  ' { projectV2Item { id } } }' % (found, option))
+              gh("api", "graphql", "-f", "query=" + mutation)
               print(f"PR {os.environ['PR_NUMBER']} ({action}, "
                     f"merged={merged}): task {number} set to {note}")
           PY
