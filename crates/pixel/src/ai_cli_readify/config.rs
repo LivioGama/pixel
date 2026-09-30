@@ -219,7 +219,13 @@ pub(crate) fn write_codex(path: &Path, provider: Provider) -> Result<String, Str
     route["name"] = Item::Value(TomlValue::from(MODEL_PROVIDER_NAME));
     route["base_url"] = Item::Value(TomlValue::from(provider.base_url()));
     route["env_key"] = Item::Value(TomlValue::from(provider.key_env()));
-    route["wire_api"] = Item::Value(TomlValue::from("chat"));
+    // `responses` is the only value current Codex accepts: its `WireApi` enum
+    // has that one variant, and `"chat"` is a config-load error
+    // (`CHAT_WIRE_API_REMOVED_ERROR`, openai/codex discussion 7782), so a
+    // `"chat"` here would leave Codex refusing to start rather than talking a
+    // different protocol. Ollama serves it — `POST /v1/responses`, added in
+    // v0.13.3, stateless only, which is all the recordings ask of it.
+    route["wire_api"] = Item::Value(TomlValue::from("responses"));
     // Merged into, never replaced. `[model_providers.<other>]` blocks are the
     // user's own routes, and leaving them alone is what the sibling
     // `write_claude` does with `env`; assigning a fresh table over this key
@@ -369,7 +375,7 @@ mod tests {
         let route = &doc["model_providers"][MODEL_PROVIDER_NAME];
         assert_eq!(route["base_url"].as_str(), Some("https://ollama.com/v1"));
         assert_eq!(route["env_key"].as_str(), Some("OLLAMA_API_KEY"));
-        assert_eq!(route["wire_api"].as_str(), Some("chat"));
+        assert_eq!(route["wire_api"].as_str(), Some("responses"));
     }
 
     /// A dotfiles manager makes the config a symlink (`chezmoi`, `stow`), and
