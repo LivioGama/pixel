@@ -63,26 +63,44 @@ jobs:
 
             def gh(*args):
               env = dict(os.environ, GH_TOKEN=token)
-              return subprocess.run(["gh", *args], capture_output=True,
-                                    text=True, check=True, env=env).stdout
+              result = subprocess.run(["gh", *args], capture_output=True,
+                                      text=True, env=env)
+              if result.returncode != 0:
+                print(result.stderr.strip())
+                raise SystemExit(f"gh {' '.join(args)} failed")
+              return result.stdout
 
-            # A single call with a large limit walks every item (gh
-            # paginates internally). Match the content type and repository
-            # so another repo's issue with the same number can never be
-            # edited.
-            page = json.loads(gh(
-              "project", "item-list", "3", "--owner", "LivioGama",
-              "--format", "json", "--limit", "10000"))
+            # GraphQL pagination: `first` is capped at 100 per page, so one
+            # big `item-list` call dies. Walk the pages instead. The query
+            # returns issues only, and the URL check keeps a same-numbered
+            # item from another repository out of reach.
             found = None
-            for entry in page.get("items", []):
-              content = entry.get("content", {})
-              if (content.get("number") == number
-                  and content.get("type") == "Issue"
-                  and content.get("url", "").startswith(
-                      os.environ["PR_REPO_URL"])
-              ):
-                found = entry["id"]
+            cursor = None
+            while True:
+              query = (
+                'query($owner:String!, $n:Int!, $cursor:String) {'
+                ' user(login: $owner) { projectV2(number: $n) {'
+                ' items(first:100, after:$cursor) {'
+                ' pageInfo { hasNextPage endCursor }'
+                ' nodes { id content {'
+                ' ... on Issue { number url } } } } } } }')
+              args = ["api", "graphql", "-f", f"query={query}",
+                      "-f", "owner=LivioGama", "-F", "n=3"]
+              if cursor:
+                args += ["-f", f"cursor={cursor}"]
+              items = json.loads(
+                  gh(*args))["data"]["user"]["projectV2"]["items"]
+              for entry in items["nodes"]:
+                content = entry.get("content", {})
+                if (content.get("number") == number
+                    and content.get("url", "").startswith(
+                        os.environ["PR_REPO_URL"])
+                ):
+                  found = entry["id"]
+                  break
+              if found is not None or not items["pageInfo"]["hasNextPage"]:
                 break
+              cursor = items["pageInfo"]["endCursor"]
             if found is None:
               print(f"issue {number} is not on the board; nothing to sync")
             else:
