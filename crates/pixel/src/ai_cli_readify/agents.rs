@@ -311,10 +311,21 @@ pub(crate) const CLAUDE_CREDENTIAL_ENVS: [&str; 3] = [
 
 /// True when any of `names` is set to something that is not blank, which is
 /// all the report needs: a name present but empty is not a credential.
+///
+/// The process environment is the one input a test cannot arrange — emptying
+/// it is a write to state every other test in this binary shares, and they
+/// run in parallel — so the read is kept this thin and the rule below it is
+/// asserted through [`any_non_blank`], which is handed the values instead.
+#[cfg_attr(test, mutants::skip)] // reads the process environment; any_non_blank asserts the rule
 pub(crate) fn any_env_set(names: &[&str]) -> bool {
-    names
-        .iter()
-        .any(|name| std::env::var(name).is_ok_and(|value| !value.trim().is_empty()))
+    any_non_blank(names.iter().map(|name| std::env::var(name).ok()))
+}
+
+/// A name counts only when it carries something. `export ANTHROPIC_AUTH_TOKEN=`
+/// sets the name and asserts nothing, and the report must not call that a
+/// configured credential; the names are alternatives, so one is enough.
+fn any_non_blank(mut values: impl Iterator<Item = Option<String>>) -> bool {
+    values.any(|value| value.is_some_and(|value| !value.trim().is_empty()))
 }
 
 /// Every string a JSONL stream carries under a text-shaped key, concatenated.
@@ -723,6 +734,40 @@ mod tests {
             "{absent:?}"
         );
         assert_ne!(configured.detail, absent.detail);
+    }
+
+    #[test]
+    fn a_blank_credential_variable_is_not_a_credential() {
+        // `export ANTHROPIC_AUTH_TOKEN=` sets the name and asserts nothing.
+        // Reading that as configured is how a run reports a credential the
+        // user never supplied.
+        assert!(
+            !any_non_blank([Some(String::new())].into_iter()),
+            "an empty value is not a credential"
+        );
+        assert!(
+            !any_non_blank([Some("   ".to_string())].into_iter()),
+            "whitespace is not a credential either"
+        );
+        assert!(
+            !any_non_blank([None].into_iter()),
+            "an unset name is not a credential"
+        );
+        assert!(
+            !any_non_blank(std::iter::empty()),
+            "no names at all is not a credential"
+        );
+    }
+
+    #[test]
+    fn one_credential_among_the_alternatives_is_enough() {
+        // The three names are alternatives a user picks one of, so the rule
+        // is `any` and never `all`.
+        let values = [None, Some("token".to_string()), Some(String::new())];
+        assert!(
+            any_non_blank(values.into_iter()),
+            "one set name among unset ones is a configured credential"
+        );
     }
 
     #[test]

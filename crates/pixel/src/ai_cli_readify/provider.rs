@@ -133,7 +133,6 @@ pub(crate) fn classify_status(status: u16) -> ProbeFailure {
         402 => ProbeFailure::NoCredit,
         401 => ProbeFailure::Credential,
         403 => ProbeFailure::Credential,
-        400 => ProbeFailure::Upstream,
         404 => ProbeFailure::NoModel,
         500..=599 => ProbeFailure::Server,
         _ => ProbeFailure::Upstream,
@@ -642,6 +641,39 @@ mod tests {
         let key = "a".repeat(48);
         let out = redact(&format!("body carried {key} back"));
         assert!(!out.contains(&key), "{out}");
+        assert!(out.contains("<redacted>"), "{out}");
+    }
+
+    #[test]
+    fn redact_hides_a_long_key_shaped_run_whatever_separators_it_uses() {
+        // A provider's key is not a bare alphanumeric run: it is 30+ characters
+        // that mix case, digits, dashes, underscores and dots. Dropping any one
+        // of those four classes from the accepted set would let a real key
+        // through, so the fixture carries all of them and the assertion below
+        // pins the length the predicate is about.
+        let key = "aB3k9_Lm2-nQ7.xR4tY6uI8oP0sD5fG1hJ9kL3zX8cV2bN";
+        assert!(
+            key.len() >= KEY_RUN_CHARS,
+            "the fixture has to be key-shaped"
+        );
+        let out = redact(&format!("body carried {key} back"));
+        assert!(!out.contains(key), "{out}");
+        assert!(out.contains("<redacted>"), "{out}");
+    }
+
+    #[test]
+    fn redact_masks_a_prefixed_key_only_past_a_bare_words_length() {
+        // The prefix rule deliberately leaves a short token alone: `sk-` plus
+        // five characters is a bare word, and masking ordinary prose is the
+        // false positive this predicate exists to avoid. One character longer
+        // is a key.
+        let bare = "sk-abcde";
+        assert_eq!(bare.len(), 8, "the fixture is the bare-word length");
+        assert_eq!(redact(bare), bare, "an 8-character token stays readable");
+
+        let key = "sk-abcdef";
+        let out = redact(key);
+        assert!(!out.contains(key), "{out}");
         assert!(out.contains("<redacted>"), "{out}");
     }
 

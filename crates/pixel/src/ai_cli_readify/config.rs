@@ -371,6 +371,26 @@ mod tests {
     }
 
     #[test]
+    fn codex_refuses_a_config_it_cannot_read_rather_than_calling_it_missing() {
+        // A missing file is an empty starting point — that is what lets the
+        // first readiness run create one. Only a *missing* file is: a path
+        // that exists and cannot be read has to surface as the read error,
+        // because treating it as empty would write a fresh config over
+        // whatever is really there. A directory where the file belongs is
+        // the read failure a test can arrange on every platform.
+        let home = Scratch::new();
+        let path = codex_config(home.path());
+        fs::create_dir_all(&path).unwrap();
+        let error = write_codex(&path, Provider::Ollama)
+            .expect_err("a path that cannot be read is not a missing config");
+        assert!(
+            error.starts_with(&format!("read {}", path.display())),
+            "the read failure is the one to report: {error}"
+        );
+        assert!(path.is_dir(), "the refused path is left as it was");
+    }
+
+    #[test]
     fn codex_apply_is_idempotent() {
         let home = Scratch::new();
         let path = codex_config(home.path());

@@ -470,6 +470,29 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_config_is_refused_rather_than_taken_for_an_absent_one() {
+        // Only `NotFound` means "no config yet, create one". Every other read
+        // failure is a file that exists and cannot be read, and treating it
+        // as absent is the destructive case: the write path would then put a
+        // two-key document where the user's whole config used to be.
+        let home = own_dir("claude-unreadable");
+        let workspace = own_dir("claude-unreadable-workspace");
+        let path = home.join(CLAUDE_ONBOARDING_FILE);
+        fs::create_dir(&path).unwrap();
+        let approval = approve(&home, Agent::Claude, &workspace, Duration::from_secs(1));
+        assert!(!approval.approved, "{approval:?}");
+        assert!(
+            approval.detail.contains("cannot read"),
+            "the refusal names the read that failed: {approval:?}"
+        );
+        assert!(
+            path.is_dir(),
+            "the path it could not read is left exactly as it was"
+        );
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
     fn a_claude_approval_refuses_a_projects_table_of_the_wrong_shape() {
         let home = own_dir("claude-shape");
         let workspace = own_dir("claude-shape-workspace");

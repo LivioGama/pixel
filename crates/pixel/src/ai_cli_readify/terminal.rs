@@ -255,22 +255,7 @@ impl ScriptTerminal {
     /// left with nothing to measure. A `WouldBlock` read is the end of this
     /// screen rather than a failure.
     pub(crate) fn pump(&mut self) -> io::Result<&str> {
-        for _ in 0..PUMP_READS {
-            match self.stdout.read(&mut self.read_buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let chunk = String::from_utf8_lossy(&self.read_buf[..n]);
-                    self.screen.push_str(&chunk);
-                    if self.screen.chars().count() > SCREEN_CAP_CHARS {
-                        let drop = self.screen.len() - SCREEN_CAP_CHARS;
-                        self.screen.drain(..drop);
-                    }
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                Err(e) => return Err(e),
-            }
-        }
+        drain_screen(&mut self.stdout, &mut self.screen, &mut self.read_buf)?;
         Ok(&self.screen)
     }
 
@@ -293,6 +278,17 @@ impl ScriptTerminal {
     }
 
     /// End the child the way the reference does: interrupt, then escalate.
+    //
+    // `mutants::skip` because the loop's boundary carries an equivalent
+    // mutant — `<` for `<=` differs only at the instant `now == deadline`,
+    // which no test can arrange and after which both sides kill anyway — and
+    // the attribute is function-granular, so exempting that one exempts its
+    // siblings too. The grace period itself is not unverified: a teardown
+    // that escalated early is what `the_teardown_lets_the_child_act_on_the
+    // _interrupt_before_the_kill` catches, and it fails with `signal Some(9)`
+    // under a shortened or skipped grace. Same shape, same attribute as
+    // `Drop for Session` in rpc.rs.
+    #[cfg_attr(test, mutants::skip)] // the boundary instant is unarrangeable; the grace period is covered by the teardown test
     pub(crate) fn stop(&mut self) {
         let _ = self.send(CTRL_C);
         let deadline = Instant::now() + Duration::from_millis(500);
@@ -311,6 +307,34 @@ impl Drop for ScriptTerminal {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// One [`ScriptTerminal::pump`], over any reader.
+///
+/// Split out so the drain's own policy — the cap, and the three error kinds —
+/// is reachable from a test with a scripted reader: a real pty can be asked
+/// for a `WouldBlock` by a child with nothing to say, but never for an
+/// `Interrupted` or any other error on demand. The production path is
+/// unchanged: `pump` hands it the child's read end, its screen and its read
+/// buffer.
+fn drain_screen<R: Read>(reader: &mut R, screen: &mut String, buf: &mut [u8]) -> io::Result<()> {
+    for _ in 0..PUMP_READS {
+        match reader.read(buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                let chunk = String::from_utf8_lossy(&buf[..n]);
+                screen.push_str(&chunk);
+                if screen.chars().count() > SCREEN_CAP_CHARS {
+                    let drop = screen.len() - SCREEN_CAP_CHARS;
+                    screen.drain(..drop);
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Put the read end of the child's output pipe in non-blocking mode, so a
@@ -430,6 +454,8 @@ fn shell_quote(arg: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::process::ExitStatusExt;
+
     use super::*;
 
     /// A clock a test advances by hand, so a budget can be crossed without
@@ -663,6 +689,110 @@ mod tests {
         assert_eq!(shell_quote("plain"), "'plain'");
     }
 
+    /// A reader whose every call a test decides, so the drain's cap and its
+    /// three error arms are reachable without a child. A real pty can be
+    /// asked for the one error a silent child produces (`WouldBlock`), but an
+    /// `Interrupted` or a plain fault cannot be arranged on demand through a
+    /// kernel interface, and the cap needs a child that writes 64 KiB of
+    /// bytes the test chooses.
+    struct ScriptedReader<F>(F)
+    where
+        F: FnMut(&mut [u8]) -> io::Result<usize>;
+
+    impl<F> Read for ScriptedReader<F>
+    where
+        F: FnMut(&mut [u8]) -> io::Result<usize>,
+    {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            (self.0)(buf)
+        }
+    }
+
+    /// One drain, over a scripted reader, with the screen it produced.
+    fn drain<R: Read>(reader: &mut R) -> io::Result<String> {
+        let mut screen = String::new();
+        let mut buf = [0u8; 8_192];
+        drain_screen(reader, &mut screen, &mut buf)?;
+        Ok(screen)
+    }
+
+    #[test]
+    fn a_would_block_read_ends_the_screen_rather_than_failing() {
+        // A child with nothing to say leaves the pty readable and empty. The
+        // read that finds it so is the end of this screen, not a failed
+        // launch: reading it as a fault would fail every silent child.
+        let mut reader = ScriptedReader(|_: &mut [u8]| Err(io::ErrorKind::WouldBlock.into()));
+        let screen = drain(&mut reader).expect("a would-block read ends the screen");
+        assert_eq!(screen, "");
+    }
+
+    #[test]
+    fn an_interrupted_read_is_retried_rather_than_reported() {
+        // A signal landing during the read interrupts it without data and
+        // without fault; the byte after it must still arrive, and the empty
+        // read that follows it must end the screen.
+        let mut calls = 0_u32;
+        let mut reader = ScriptedReader(move |buf: &mut [u8]| {
+            calls += 1;
+            match calls {
+                1 => Err(io::ErrorKind::Interrupted.into()),
+                2 => {
+                    buf[..2].copy_from_slice(b"ok");
+                    Ok(2)
+                }
+                _ => Ok(0),
+            }
+        });
+        let screen = drain(&mut reader).expect("an interrupted read is a retry, not a failure");
+        assert_eq!(screen, "ok");
+    }
+
+    #[test]
+    fn a_read_error_that_is_neither_would_block_nor_interrupted_is_reported() {
+        // Anything else is a real fault, and the driver has to hear about it:
+        // swallowing it would report a broken terminal as a clean screen.
+        let mut reader = ScriptedReader(|_: &mut [u8]| {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the pty is gone",
+            ))
+        });
+        let error = drain(&mut reader).expect_err("a real read fault must be reported");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn a_screen_past_the_cap_is_held_at_the_cap() {
+        // A full read buffer on every one of `PUMP_READS` reads is twice the
+        // cap: the screen has to come back down to it rather than keep
+        // everything a stream has ever written.
+        let mut reader = ScriptedReader(|buf: &mut [u8]| {
+            buf.fill(b'x');
+            Ok(buf.len())
+        });
+        let screen = drain(&mut reader).expect("a full read buffer is not an error");
+        assert_eq!(screen.chars().count(), SCREEN_CAP_CHARS);
+        assert_eq!(screen.len(), SCREEN_CAP_CHARS);
+    }
+
+    #[test]
+    fn a_screen_of_wide_characters_at_the_cap_is_not_cut_in_half() {
+        // The cap counts characters, so a screen that reaches it in two-byte
+        // characters is left as it is. The boundary is exact here: every one
+        // of `PUMP_READS` reads fills the buffer with `é`, so the drain ends
+        // on 65536 characters and 131072 bytes, and a cap measured in bytes
+        // would cut the screen in half at that point.
+        let mut reader = ScriptedReader(|buf: &mut [u8]| {
+            for (i, byte) in buf.iter_mut().enumerate() {
+                *byte = if i % 2 == 0 { 0xc3 } else { 0xa9 };
+            }
+            Ok(buf.len())
+        });
+        let screen = drain(&mut reader).expect("a full read buffer is not an error");
+        assert_eq!(screen.chars().count(), SCREEN_CAP_CHARS);
+        assert_eq!(screen.len(), 2 * SCREEN_CAP_CHARS);
+    }
+
     /// Drive a real child through the terminal the driver reads, on a thread
     /// so that a call which never comes back fails a timeout here instead of
     /// hanging the whole suite.
@@ -726,6 +856,44 @@ mod tests {
     }
 
     #[test]
+    fn the_bytes_sent_to_the_child_come_back_through_the_pump() {
+        // `cat` echoes its stdin, so the marker on the screen is proof the
+        // bytes left this process: a `send` that wrote nothing would leave
+        // the driver typing into a terminal nothing ever sees.
+        let argv = ["cat".to_string()];
+        let cwd = std::env::current_dir().expect("the test process has a working directory");
+        let mut terminal = ScriptTerminal::spawn(&argv, &cwd, &[]).expect("script must start");
+        terminal
+            .send(b"hello-from-the-test\r")
+            .expect("the child has a stdin");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut screen = String::new();
+        while Instant::now() < deadline && !screen.contains("hello-from-the-test") {
+            screen = terminal
+                .pump()
+                .expect("the pty stays readable while the child lives")
+                .to_string();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(screen.contains("hello-from-the-test"), "{screen:?}");
+    }
+
+    #[test]
+    fn a_child_that_only_speaks_after_a_moment_still_settles_clean() {
+        // The budget is measured after the screen is read, so a child that is
+        // silent for the first polls and then prints is a launch that
+        // settled, not one that ran out of time: a budget checked before the
+        // screen would report the interface that never appeared, one poll in.
+        let (outcome, _) = drive_a_real_child(
+            &["sh", "-c", "sleep 0.3; echo ready"],
+            Duration::from_secs(2),
+        );
+        assert!(outcome.clean, "{outcome:?}");
+        assert_eq!(outcome.blocker, None, "{outcome:?}");
+        assert!(outcome.screen.contains("ready"), "{outcome:?}");
+    }
+
+    #[test]
     fn a_child_the_driver_gave_up_on_is_reaped_with_the_terminal() {
         // The terminal owns the teardown, and the launch budget ends with the
         // child still running: a child killed but never waited on would sit as
@@ -747,5 +915,54 @@ mod tests {
             Some(libc::ESRCH),
             "the child is a zombie rather than gone"
         );
+    }
+
+    /// A child torn down by the terminal once it has reached the screen, and
+    /// the status the teardown left behind: the status is what tells an exit
+    /// the child chose from one it was given.
+    fn teardown_status(argv: &[&str], ready: &str) -> ExitStatus {
+        let argv: Vec<String> = argv.iter().map(ToString::to_string).collect();
+        let cwd = std::env::current_dir().expect("the test process has a working directory");
+        let mut terminal = ScriptTerminal::spawn(&argv, &cwd, &[]).expect("script must start");
+        // The interrupt has to arrive after the process it is meant for: the
+        // byte is read by the pty's line discipline, which signals whoever is
+        // the terminal's foreground group at that moment, and a byte written
+        // before the child has taken the pty signals nobody.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut screen = String::new();
+        while Instant::now() < deadline && !screen.contains(ready) {
+            screen = terminal
+                .pump()
+                .expect("the pty stays readable while the child lives")
+                .to_string();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(screen.contains(ready), "the child never spoke: {screen:?}");
+        terminal.stop();
+        terminal
+            .child
+            .wait()
+            .expect("the teardown reaps the child it stopped")
+    }
+
+    #[test]
+    fn the_teardown_lets_the_child_act_on_the_interrupt_before_the_kill() {
+        // A child that leaves on the interrupt with a status of its own is
+        // distinguishable from one that had to be killed, and the grace
+        // period is exactly that difference: a teardown that escalated to the
+        // kill straight away reports SIGKILL instead of the status the child
+        // chose. The trap takes its time on purpose, so the child is still
+        // alive when a teardown that did not wait for it kills it.
+        let status = teardown_status(
+            &[
+                "sh",
+                "-c",
+                "trap 'sleep 0.2; exit 7' INT; echo ready; sleep 5",
+            ],
+            "ready",
+        );
+        let code = status.code();
+        let signal = status.signal();
+        assert_eq!(code, Some(7), "code {code:?}, signal {signal:?}");
     }
 }

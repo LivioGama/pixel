@@ -153,6 +153,13 @@ impl Report {
 /// Read one provider's key from the environment, if it is there and not
 /// blank. A missing key is its own outcome, not a transport error: it is the
 /// one failure a user can fix without touching the provider.
+///
+/// The process environment is the one input a test cannot arrange: emptying
+/// it is a write to state every other test in this binary shares, and they
+/// run in parallel. So this is the only place that reads it, and everything
+/// downstream takes the key as a parameter — the branches below are asserted
+/// through [`outcome_for_key`], which is handed the key instead.
+#[cfg_attr(test, mutants::skip)] // reads the process environment; outcome_for_key asserts the mapping
 fn key_for(provider: Provider) -> Option<String> {
     match std::env::var(provider.key_env()) {
         Ok(value) if !value.trim().is_empty() => Some(value),
@@ -171,26 +178,33 @@ fn outcome_for_key<F>(
     probe_one: &F,
 ) -> ProbeOutcome
 where
-    F: Fn(Provider, Duration) -> ProbeOutcome,
+    F: Fn(Provider, &str, Duration) -> ProbeOutcome,
 {
     match key {
         None => ProbeOutcome::failed(provider, ProbeFailure::MissingKey, String::new()),
-        Some(_) => probe_one(provider, timeout),
+        Some(key) => probe_one(provider, &key, timeout),
     }
 }
 
 /// Probe the provider and return its row plus the winner, the provider
 /// exactly when it answered.
 ///
-/// `probe_one` is the seam a test drives with a fake: the production call is
-/// [`provider::probe`], and a test substitutes a closure that answers without
-/// a socket.
-fn probe_providers_with<F>(timeout: Duration, probe_one: F) -> (ProviderRow, Option<Provider>)
+/// `key` is a parameter for the same reason it is one on [`outcome_for_key`],
+/// and `probe_one` is the seam a test drives with a fake: the production call
+/// is [`provider::probe`], and a test substitutes a closure that answers
+/// without a socket. Between them a test reaches every branch here with no
+/// environment variable and no network — asserting the winner used to depend
+/// on whether the machine running the suite happened to export a key.
+fn probe_providers_with<F>(
+    key: Option<String>,
+    timeout: Duration,
+    probe_one: F,
+) -> (ProviderRow, Option<Provider>)
 where
-    F: Fn(Provider, Duration) -> ProbeOutcome,
+    F: Fn(Provider, &str, Duration) -> ProbeOutcome,
 {
     let provider = Provider::Ollama;
-    let outcome = outcome_for_key(provider, key_for(provider), timeout, &probe_one);
+    let outcome = outcome_for_key(provider, key, timeout, &probe_one);
     let winner = outcome.ready.then_some(provider);
     let row = ProviderRow {
         provider: provider.name(),
@@ -204,12 +218,9 @@ where
 /// The production provider probe: send one real completion through whichever
 /// key the environment holds.
 fn probe_providers(timeout: Duration) -> (ProviderRow, Option<Provider>) {
-    probe_providers_with(timeout, |provider, timeout| match key_for(provider) {
-        Some(key) => probe(provider, provider.base_url(), &key, timeout),
-        // `outcome_for_key` already turned a missing key into its own
-        // outcome, so this arm is unreachable through `probe_providers_with`
-        // and exists only to keep the closure total.
-        None => ProbeOutcome::failed(provider, ProbeFailure::MissingKey, String::new()),
+    let provider = Provider::Ollama;
+    probe_providers_with(key_for(provider), timeout, |provider, key, timeout| {
+        probe(provider, provider.base_url(), key, timeout)
     })
 }
 
@@ -753,8 +764,11 @@ mod tests {
 
     #[test]
     fn a_ready_provider_is_the_winner_and_its_row_says_so() {
-        let (row, winner) =
-            probe_providers_with(Duration::from_secs(1), |provider, _| ready(provider));
+        let (row, winner) = probe_providers_with(
+            Some("k".to_string()),
+            Duration::from_secs(1),
+            |provider, _key, _timeout| ready(provider),
+        );
         assert_eq!(winner, Some(Provider::Ollama));
         assert_eq!(row.provider, "ollama");
         assert!(row.ready, "{row:?}");
@@ -764,8 +778,11 @@ mod tests {
 
     #[test]
     fn a_provider_that_did_not_answer_is_not_the_winner() {
-        let (row, winner) =
-            probe_providers_with(Duration::from_secs(1), |provider, _| throttled(provider));
+        let (row, winner) = probe_providers_with(
+            Some("k".to_string()),
+            Duration::from_secs(1),
+            |provider, _key, _timeout| throttled(provider),
+        );
         assert_eq!(winner, None);
         assert!(!row.ready, "{row:?}");
         assert_eq!(row.provider, "ollama");
@@ -777,7 +794,7 @@ mod tests {
         // The seam is handed `None` rather than having the environment
         // emptied, so this asserts the branch and not the machine's shell.
         let probed = Mutex::new(0);
-        let probe_one = |provider: Provider, _timeout: Duration| {
+        let probe_one = |provider: Provider, _key: &str, _timeout: Duration| {
             *probed.lock().unwrap() += 1;
             ready(provider)
         };
@@ -793,7 +810,7 @@ mod tests {
 
     #[test]
     fn a_provider_with_a_key_is_probed() {
-        let probe_one = |provider: Provider, _timeout: Duration| ready(provider);
+        let probe_one = |provider: Provider, _key: &str, _timeout: Duration| ready(provider);
         let outcome = outcome_for_key(
             Provider::Ollama,
             Some("k".to_string()),
@@ -844,6 +861,29 @@ mod tests {
         // the label is the whole message and must not print an empty tail.
         let row = failed_row("", "no key");
         assert_eq!(provider_line(&row), "no key");
+    }
+
+    #[test]
+    fn a_blank_detail_is_treated_as_no_detail_at_all() {
+        // Whitespace is not provider text: a body of spaces carries nothing
+        // for the label to be joined to, so the label is the whole message.
+        let row = failed_row("   ", "no key");
+        assert_eq!(provider_line(&row), "no key");
+    }
+
+    #[test]
+    fn a_body_that_does_not_open_with_the_label_keeps_both_halves() {
+        // A gateway can answer in its own sentence instead of the one the
+        // classifier keys on. The label names the condition and the body is
+        // the provider's evidence; dropping either loses a fact.
+        let row = failed_row(
+            "the upstream model is unavailable right now",
+            "server error (503)",
+        );
+        assert_eq!(
+            provider_line(&row),
+            "server error (503): the upstream model is unavailable right now"
+        );
     }
 
     #[test]

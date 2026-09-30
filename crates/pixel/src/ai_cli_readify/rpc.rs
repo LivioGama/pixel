@@ -555,6 +555,34 @@ mod tests {
         }
     }
 
+    /// A reader that yields a scripted sequence of read outcomes, so the
+    /// drain loop's error handling can be driven without a real pipe. Each
+    /// step is consumed once; the stream is closed after the last one.
+    struct Scripted {
+        steps: std::vec::IntoIter<io::Result<Vec<u8>>>,
+    }
+
+    impl Read for Scripted {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            match self.steps.next() {
+                None => Ok(0),
+                Some(Ok(bytes)) => {
+                    let n = bytes.len().min(buf.len());
+                    buf[..n].copy_from_slice(&bytes[..n]);
+                    Ok(n)
+                }
+                Some(Err(e)) => Err(e),
+            }
+        }
+    }
+
+    /// A `Scripted` reader over `steps`, closed after the last one.
+    fn scripted(steps: Vec<io::Result<Vec<u8>>>) -> Scripted {
+        Scripted {
+            steps: steps.into_iter(),
+        }
+    }
+
     /// A wire over a `Vec<u8>` writer and a channel, with nothing spawned.
     fn wire(budget: Duration) -> Wire<Vec<u8>> {
         let (_sender, lines) = mpsc::channel();
@@ -952,6 +980,27 @@ mod tests {
         let first = lines.recv().unwrap();
         assert_eq!(first.len(), MAX_LINE_BYTES);
         assert_eq!(lines.recv().unwrap(), b"ok".to_vec());
+        assert!(lines.recv().is_err());
+    }
+
+    #[test]
+    fn drain_resumes_after_an_interrupted_read() {
+        let lines = drained(scripted(vec![
+            Err(io::Error::from(io::ErrorKind::Interrupted)),
+            Ok(b"{\"a\":1}\n".to_vec()),
+        ]));
+        assert_eq!(lines.recv().unwrap(), b"{\"a\":1}".to_vec());
+        assert!(lines.recv().is_err());
+    }
+
+    #[test]
+    fn drain_ends_at_a_read_error_that_is_not_interrupted() {
+        let lines = drained(scripted(vec![
+            Ok(b"first\n".to_vec()),
+            Err(io::Error::from(io::ErrorKind::Other)),
+            Ok(b"second\n".to_vec()),
+        ]));
+        assert_eq!(lines.recv().unwrap(), b"first".to_vec());
         assert!(lines.recv().is_err());
     }
 }
