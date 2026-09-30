@@ -69,8 +69,10 @@ the pane always closes on **merge**, and the worktree is removed only when
   a per-PR `gh pr view` that succeeded.
 
 Teardown dial: `PIXEL_PR_SWARM_TEARDOWN=off` (close the pane, remove nothing)
-/ `safe` (default) / `aggressive` (also `--delete-branch`). Branch refs always
-survive; `down --delete-branch` is the explicit opt-in.
+/ `safe` (default: close pane, remove worktree when rails pass, keep branch) /
+`aggressive` (also `--delete-branch` on the local ref). Branch refs always
+survive under `off` and `safe`; `down --delete-branch` is the explicit
+opt-in, separately from the env var.
 
 ## State
 

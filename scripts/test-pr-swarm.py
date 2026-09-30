@@ -862,6 +862,117 @@ class PrSwarmContract(unittest.TestCase):
         self.assertEqual(broken.returncode, 0, broken.stderr)
         self.assertIn("gh pr list failed", broken.stderr)
 
+    # ── 24-26. CodeRabbit convergence ──
+
+    def test_cmd_up_does_not_create_a_duplicate_pane_when_one_exists(self):
+        """cmd_up must read existing panes before its pane_id_of guard.
+
+        Without it, `up 435` after a restart where the pane is already in
+        the rmux server would silently create a second one. Pinned by
+        seeding the rmux state with the pane and asserting the rmux
+        mutation log has no `new-session` for it.
+        """
+        wt = self.add_worktree("wt435", "feat/x")
+        self.write_prs([self.pr(435, "feat/x")])
+        # Seed the per-PR gh stub so cmd_up can read headRefName + headRefOid.
+        (self.gh_dir / "pr-435.json").write_text(json.dumps({
+            "headRefName": "feat/x", "headRefOid": "0" * 12,
+        }))
+        # Seed an existing pane for #435, owned by the same worktree.
+        self.seed_panes([(435, "feat/x", str(wt))])
+
+        before = len([c for c in self.rmux_calls() if c and c[0] == "new-session"])
+        out = self.run_swarm("up", "435")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        after = len([c for c in self.rmux_calls() if c and c[0] == "new-session"])
+        self.assertEqual(after, before,
+            "cmd_up created a duplicate pane for an existing PR")
+
+    def test_cmd_down_refuses_to_touch_panes_for_non_merged_states(self):
+        """cmd_down gates teardown on state=MERGED, not on !=OPEN.
+
+        OPEN, CLOSED, and unknown states must all refuse without --force.
+        MERGED must proceed. The reasoning: a pane's PR can flip through
+        CLOSED on its way to MERGED, and the rails belong to MERGED.
+        Pinned by exercising CLOSED and unknown: both must refuse, and
+        only MERGED may remove.
+        """
+        wt = self.add_worktree("wt435", "feat/x")
+        self.write_prs([])
+        self.seed_panes([(435, "feat/x", str(wt))])
+
+        # CLOSED: must refuse. The pre-fix gate only refused OPEN, so a
+        # CLOSED pane would fall through to `kill-pane`.
+        self.write_pr_state(435, "CLOSED")
+        before = self._pane_count()
+        r = self.run_swarm("down", "435")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("needs state=MERGED", r.stderr)
+        self.assertEqual(self._pane_count(), before,
+            "CLOSED pane was killed; the gate only blocks OPEN")
+
+        # Unknown (state empty): must refuse.
+        self.write_pr_state(435, "")
+        r = self.run_swarm("down", "435")
+        self.assertIn("needs state=MERGED", r.stderr)
+        self.assertEqual(self._pane_count(), before)
+
+        # MERGED: must proceed past the gate (rails may still refuse,
+        # which is why this test only checks the gate).
+        self.write_pr_state(435, "MERGED")
+        r = self.run_swarm("down", "435")
+        self.assertNotIn("needs state=MERGED", r.stderr)
+
+    def _pane_count(self) -> int:
+        if not self.rmux_state.exists():
+            return 0
+        return len(json.loads(self.rmux_state.read_text()).get("panes", []))
+
+    def test_removal_refusal_protects_a_worktree_an_open_pr_still_needs(self):
+        """Rail 8: refuse when DESIRED lists the owner for an open PR.
+
+        A pane's PR can flip back to OPEN between `gh pr list` and the
+        state view. The worktree is for the PR, not the pane.
+        """
+        wt = self.add_worktree("wt435", "feat/x")
+        # A pane for #435 exists and the PR is MERGED -- so the reconcile
+        # teardown path runs.
+        self.seed_panes([(435, "feat/x", str(wt))])
+        self.write_pr_state(435, "MERGED")
+        # But the open-PR list has only #436, which also lives on this
+        # worktree path (stacked-PR shape). `gh_open_prs` returns #436,
+        # not #435, so the pane is eligible for teardown while DESIRED
+        # still has the worktree path.
+        self.write_prs([
+            {"number": 436, "headRefName": "feat/x",
+             "headRefOid": "0" * 12, "isCrossRepository": False},
+        ])
+        (self.gh_dir / "pr-436.json").write_text(json.dumps({
+            "headRefName": "feat/x", "headRefOid": "0" * 12,
+        }))
+
+        before = self._pane_count()
+        r = self.run_swarm("reconcile", "--no-wait")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log = self.log_lines()
+        if not any("in use by an open PR" in line for line in log):
+            print("=== reconcile log ===")
+            for line in log: print(line)
+            print("=== rmux log ===")
+            for line in self.rmux_calls(): print(line)
+
+        # The pane is gone (MERGED -> kill-pane ran), but the worktree
+        # must remain in git. Without rail 8 the worktree would be removed
+        # while PR #436 still claims it.
+        out = subprocess.run(
+            ["git", "-C", str(self.repo), "worktree", "list"],
+            capture_output=True, text=True, check=True,
+        )
+        self.assertIn(str(wt), out.stdout,
+            "worktree removed while an open PR still lists it in DESIRED")
+        self.assertTrue(any("in use by an open PR" in line for line in log),
+            f"rail 8 reason not logged; log was: {log!r}")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

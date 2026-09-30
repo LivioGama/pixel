@@ -303,6 +303,16 @@ removal_refusal() {   # $1 = worktree path
     unpushed="$(git -C "$wt" rev-list --count HEAD --not --remotes 2>/dev/null || printf '1')"
     [ "$unpushed" = "0" ] || { printf '%s commits not on any remote' "$unpushed"; return 0; }
 
+    # 8. The owner is not the worktree an open PR still needs. A pane's PR
+    # can flip back to OPEN in the window between `gh pr list` and the
+    # `gh pr view` for state; the worktree is for the PR, not the pane.
+    if [ -n "${DESIRED:-}" ]; then
+        if printf '%s\n' "$DESIRED" | awk -F'\t' -v p="$wt" '$3 == p { found = 1 } END { exit !found }'; then
+            printf 'worktree is in use by an open PR'
+            return 0
+        fi
+    fi
+
     return 1
 }
 
@@ -550,16 +560,21 @@ cmd_status() {
 
     # Panes whose PR is no longer open are teardown candidates; show the state
     # a reconcile would act on, without acting.
-    local state
+    local state action
     while IFS=$'\t' read -r num pane_id wt win idx cwd title; do
         [ -n "$num" ] || continue
         if printf '%s\n' "$(open_pr_numbers)" | grep -qx "$num"; then
             continue
         fi
         state="$(gh_pr_state "$num" 2>/dev/null || echo unknown)"
+        case "$state" in
+            MERGED) action="close, remove worktree (rails permitting)" ;;
+            CLOSED) action="closed unmerged - pane kept" ;;
+            OPEN|'') action="stale pane: PR is $state" ;;
+            *)      action="[$state] pane kept" ;;
+        esac
         printf '%-7s %-28s %-44s %-6s %-26s %s\n' \
-            "#$num" '—' "${cwd:-—}" "$pane_id" '—' \
-            "[$state] close, keep worktree"
+            "#$num" '—' "${cwd:-—}" "$pane_id" '—' "$action"
     done <<< "$PANES_TSV"
 }
 
@@ -583,6 +598,7 @@ cmd_up() {
 
     acquire_lock 10 || { say "another reconcile holds the lock; $num untouched"; exit 0; }
     gather_worktrees
+    PANES_TSV="$(list_panes)" || PANES_TSV=""
 
     if [ "$make_wt" -eq 1 ]; then
         wt="$HOME/Documents/pixel-pr-$num"
@@ -642,8 +658,8 @@ cmd_down() {
 
     if [ "$force" -eq 0 ]; then
         state="$(gh_pr_state "$num" 2>/dev/null || echo unknown)"
-        if [ "$state" = "OPEN" ]; then
-            echo "pr-swarm down: #$num is still open; pass --force to tear it down anyway" >&2
+        if [ "$state" != "MERGED" ]; then
+            echo "pr-swarm down: #$num state is $state; teardown needs state=MERGED or --force" >&2
             exit 0
         fi
     fi
