@@ -704,6 +704,30 @@ pub(crate) fn check_developer_instructions(
 mod tests {
     use super::*;
 
+    /// A `hooks.state` key spells the event the way Codex does
+    /// (`hook_event_key_label`); a wrong or missing label reads every
+    /// review of that event as absent, or hides the event's Pixel hooks.
+    #[test]
+    fn hook_event_label_should_spell_every_event_as_codex_keys_it() {
+        let table = [
+            ("PreToolUse", "pre_tool_use"),
+            ("PermissionRequest", "permission_request"),
+            ("PostToolUse", "post_tool_use"),
+            ("PreCompact", "pre_compact"),
+            ("PostCompact", "post_compact"),
+            ("SessionStart", "session_start"),
+            ("SessionEnd", "session_end"),
+            ("UserPromptSubmit", "user_prompt_submit"),
+            ("SubagentStart", "subagent_start"),
+            ("SubagentStop", "subagent_stop"),
+            ("Stop", "stop"),
+        ];
+        for (event, label) in table {
+            assert_eq!(hook_event_label(event), Some(label), "{event}");
+        }
+        assert_eq!(hook_event_label("NotAnEvent"), None);
+    }
+
     #[test]
     fn the_asset_survives_a_toml_literal_string() {
         // A literal multi-line string cannot contain its own delimiter and
