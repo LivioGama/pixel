@@ -25,7 +25,6 @@ with a note and does nothing.
 | `context` | `pack-context` |
 | `env` | `edit-env` |
 | `excavate` | `dig-history` |
-| `flow` | `replay-flow` |
 | `graph` | `rebuild-graph` |
 | `history` | `commit-history` |
 | `history-search` | `search-history` |
@@ -43,6 +42,7 @@ with a note and does nothing.
 | `ready` | `prepare-repo` |
 | `reconcile` | `sync-branch` |
 | `release-check` | `check-release` |
+| `replay-flow` | `flow` |
 | `rescue` | `plan-rollback` |
 | `resolve` | `find-code` |
 | `review` | `review-changes` |

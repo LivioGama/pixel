@@ -2050,6 +2050,7 @@ dependencies = [
  "pixel-recall",
  "pixel-release",
  "pixel-session",
+ "pixel-ultraflow",
  "regex",
  "serde",
  "serde-saphyr",
@@ -2268,6 +2269,16 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "pixel-ultraflow"
+version = "0.6.1"
+dependencies = [
+ "mutants",
+ "pixel-flow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
