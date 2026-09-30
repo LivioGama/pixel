@@ -42,7 +42,8 @@ VIDEO_MAX_SECONDS="${HARNESS_VIDEO_MAX_SECONDS:-15}"
 # spinner redraws while the agent works, so silence means done), or
 # HARNESS_INTERACTIVE_MAX seconds hard cap, whichever first.
 INTERACTIVE=0
-INTERACTIVE_IDLE="${HARNESS_INTERACTIVE_IDLE:-10}"
+PROVIDER_DEFAULT_KEYS=""
+INTERACTIVE_IDLE="${HARNESS_INTERACTIVE_IDLE:-30}"
 INTERACTIVE_MAX="${HARNESS_INTERACTIVE_MAX:-300}"
 
 usage() {
@@ -241,6 +242,7 @@ case "$PROVIDER" in
         if [ "$INTERACTIVE" -eq 1 ]; then
             RUNNER_CMD="$(q codex --dangerously-bypass-approvals-and-sandbox \
                 "$PROMPT_TEXT")"
+            PROVIDER_DEFAULT_KEYS="sleep:8|n|sleep:2|text:$PROMPT_TEXT|Enter"
         else
             RUNNER_CMD="$(q codex exec --dangerously-bypass-approvals-and-sandbox \
                 --skip-git-repo-check -C "$REPO" "$PROMPT_TEXT")"
@@ -259,6 +261,7 @@ case "$PROVIDER" in
             # -i consumes the next token as the prompt: the permission flag
             # must come after it
             RUNNER_CMD="$(q "$AGY_BIN" -i="$PROMPT_TEXT" --dangerously-skip-permissions)"
+            PROVIDER_DEFAULT_KEYS="Enter"
         else
             RUNNER_CMD="$(q "$AGY_BIN" -p --dangerously-skip-permissions \
                 "$PROMPT_TEXT")"
@@ -268,6 +271,7 @@ case "$PROVIDER" in
         command -v pi >/dev/null 2>&1 || die "pi not on PATH"
         if [ "$INTERACTIVE" -eq 1 ]; then
             RUNNER_CMD="$(q pi "$PROMPT_TEXT")"
+            PROVIDER_DEFAULT_KEYS=""
         else
             RUNNER_CMD="$(q pi --no-session "$PROMPT_TEXT")"
         fi
@@ -311,7 +315,22 @@ if [ "${HARNESS_INTERACTIVE_TMUX:-1}" = "1" ] && command -v tmux >/dev/null 2>&1
     printf '"$TMUX_BIN" new-session -d -s %q -x %d -y %d %q\n' \
         "$SESSION" "${AGG_COLS:-112}" "${AGG_ROWS:-36}" \
         "cd $(printf '%q' "$REPO") && $RUNNER_CMD"
-    printf '( sleep 4; "$TMUX_BIN" send-keys -t %q Down Enter 2>/dev/null ) &\n' "$SESSION"
+    # HARNESS_START_KEYS: |-separated tokens sent into the tmux pane after the
+    # session starts, to answer consent dialogs and (for codex's task center)
+    # type the prompt. Tokens: "sleep:N" waits, "text:..." types literally
+    # (send-keys -l), anything else is a tmux key name. Defaults per provider:
+    # claude Down|Enter (bypass warning defaults to No, exit), agy Enter
+    # (trust dialog defaults to Yes), codex n|sleep:2|text:<prompt>|Enter,
+    # pi nothing (prompt rides argv).
+    printf 'START_KEYS=%q\n' "${HARNESS_START_KEYS:-$PROVIDER_DEFAULT_KEYS}"
+    printf '( sleep 4; printf %s "$START_KEYS" | tr "|" "\\n" | while IFS= read -r k; do\n' '"$START_KEYS"'
+    printf '    case "$k" in\n'
+    printf '      sleep:*) sleep "${k#sleep:}" ;;\n'
+    printf '      text:*) "$TMUX_BIN" send-keys -t %q -l "${k#text:}" 2>/dev/null ;;\n' "$SESSION"
+    printf '      "") : ;;\n'
+    printf '      *) "$TMUX_BIN" send-keys -t %q "$k" 2>/dev/null ;;\n' "$SESSION"
+    printf '    esac\n'
+    printf '  done ) &\n'
     printf '( start=$SECONDS; idle_start=""; prev_size=0; while :; do\n'
     printf '    sleep 2\n'
     printf '    size=$(wc -c < %q 2>/dev/null | tr -d " ")\n' "$CAST"
