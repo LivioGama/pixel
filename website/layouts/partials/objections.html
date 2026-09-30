@@ -4,8 +4,7 @@
      FAQPage (partials/head.html) serialises it, so both carry the same text.
      Call with (dict "abs" true) for absolute links (the JSON-LD). */}}
 {{ $big := partial "wall-row.html" . }}
-{{/* The code graph's grammars: crates/pixel-graph/src/extract.rs. The last five use the generic extractor. */}}
-{{ $langs := slice "TypeScript" "JavaScript" "Rust" "Go" "Java" "Python" "C#" "Ruby" "PHP" "C" "Swift" "Elixir" "Lua" }}
+{{ $langs := partial "languages.html" . }}
 {{ $bench := cond .abs ("benchmarks/" | absURL) ("benchmarks/" | relURL) }}
 {{ $vars := dict
   "{bench}" $bench
@@ -20,7 +19,6 @@
 }}
 {{ $out := slice }}
 {{ $entries := hugo.Data.objections.objection }}
-{{ if .home }}{{ $entries = where $entries "comparison" "ne" true }}{{ end }}
 {{ if .comparisons }}{{ $entries = where hugo.Data.objections.objection "comparison" true }}{{ end }}
 {{ range $entries }}
   {{ $paras := slice }}

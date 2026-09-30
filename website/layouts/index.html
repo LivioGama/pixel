@@ -8,16 +8,16 @@
   <a href="#main" class="skip">Skip to content</a>
   {{ partial "nav.html" . }}
   {{ $s := hugo.Data.scope }}
-  {{/* The token wall's file and the spread its caption quotes: data/read_savings.toml, the well-known files scripts/bench-read-savings.sh measures. */}}
+  {{/* The row marked `wall` in data/read_savings.toml (the well-known files scripts/bench-read-savings.sh measures): the Problem chapter's example file. */}}
   {{ $big := partial "wall-row.html" . }}
-  {{/* The kept files' count, range and median: partials/kept-rates.html, which /benchmarks/, /vs/ (partials/alternatives.html) and /savings/ read too. */}}
+  {{/* The kept files' count, range and median (the hero's median badge, the Results meter): partials/kept-rates.html, which /benchmarks/, /vs/ (partials/alternatives.html) and /savings/ read too. */}}
   {{ $r := partial "kept-rates.html" . }}
   {{ $bench := "benchmarks/" | relURL }}
-  {{/* The supported agents, shown by the hero's line and the Compatibility grid, from data/agents.toml (which also feeds /for/ and the /docs/ wiring table). Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
+  {{/* The supported agents, shown by the hero's Works with row and the Compatibility grid, from data/agents.toml (which also feeds /for/ and the /docs/ wiring table). Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
   {{ $agents := hugo.Data.agents.agent }}
-  {{/* The prompt a visitor pastes into their agent instead of a shell: the repository README's "Let your agent install it" block, shared by the hero, the Install terminal and the sticky bar. */}}
+  {{/* The prompt a visitor pastes into their agent instead of a shell: the repository README's "Let your agent install it" block, used by the Install terminal. */}}
   {{ $agentPrompt := "Install Pixel (https://github.com/LivioGama/pixel) for me: follow the \"For AI agents\" section of its README, then tell me what changed and whether `pixel doctor .` is green." }}
-  {{/* The install commands, shared by the hero, the Install terminal, the closing block and the dock. The one-liner runs the install.sh asset of the latest release (release.yml uploads scripts/install.sh with every tag); $scriptSrc is that file at the tag of the version this site describes (crates/pixel/Cargo.toml, mounted as data/cli.toml, which the release bumps), so "read the script" opens the bytes the one-liner runs. $inspect is the same install for a visitor who reads before running: download, page through, then run. */}}
+  {{/* The shared Install terminal commands. The one-liner runs the install.sh asset of the latest release (release.yml uploads scripts/install.sh with every tag); $scriptSrc is that file at the tag of the version this site describes (crates/pixel/Cargo.toml, mounted as data/cli.toml, which the release bumps), so "read the script" opens the bytes the one-liner runs. $inspect is the same install for a visitor who reads before running: download, page through, then run. */}}
   {{ $scriptURL := printf "%s/releases/latest/download/install.sh" site.Params.github_url }}
   {{ $curl := printf "curl -fsSL %s | sh" $scriptURL }}
   {{ $inspect := printf "curl -fsSL -o install.sh %s && less install.sh && sh install.sh" $scriptURL }}
@@ -28,51 +28,73 @@
   <nav class="rail" aria-label="Sections" data-rail hidden></nav>
 
   <main id="main">
-    {{/* ---------- hero: the token wall ---------- */}}
+    {{/* ---------- hero: the agent session ---------- */}}
+    {{/* The session's files: data/hero_session.toml, each joined to its kept row of data/read_savings.toml by `repo`, so every figure on the right comes from the bench. */}}
+    {{ $session := slice }}
+    {{ range hugo.Data.hero_session.file }}
+      {{ $row := index (where hugo.Data.read_savings.row "repo" .repo) 0 }}
+      {{ $session = $session | append (merge $row .) }}
+    {{ end }}
+    {{ $langs := partial "languages.html" . }}
     <section class="hero wrap">
       <div class="hero__copy">
-      {{/* Who it is for, before the title: four marks a visitor recognises, then the count of the rest (the Compatibility grid lists them). The ids inside a mark get a prefix, since the grid inlines the same SVG. */}}
-      {{ $named := first 4 (where $agents "logo" "in" (slice "claude" "codex" "pi" "cursor")) }}
-      <p class="hero__for">
-        <span class="hero__marks" aria-hidden="true">{{ range $named }}<span class="hero__mark hero__mark--{{ .logo }}">{{ replace (resources.Get (printf "logos/%s.svg" .logo)).Content "lobe-icons-" "hero-lobe-icons-" | safeHTML }}</span>{{ end }}</span>
-        {{ $rest := sub (len $agents) (len $named) }}
-        <span>For {{ range $i, $a := $named }}{{ if $i }}, {{ end }}{{ $a.name }}{{ end }} and <a class="link" href="#agents" aria-label="{{ $rest }} more coding agents">{{ $rest }} more</a></span>
-      </p>
-      {{/* The title names the pain and the mechanism, and the lede carries one figure only: the kept files' median saving (partials/kept-rates.html), the number the wall beside it illustrates and the Tokens meter rounds. Agent timings are discussed separately in Proof; the headline is a file/outline volume comparison. */}}
-      <h1 class="hero__title hero__title--long"><span>Your agent reads whole files.</span> <span class="glow">Pixel hands it the map.</span></h1>
-      <p class="hero__lede"><strong>Every session starts cold, so your coding agent opens file after file to find its way.</strong> Pixel is a local code index it asks instead: {{ lang.FormatNumber 1 $r.median }}% less read volume at the median across {{ $r.count }} pinned large files (whole file versus signatures), and nothing leaves your machine.</p>
-      <div class="hero__cta">
-        <div class="cmd">
-          <code><span class="cmd__prompt" aria-hidden="true">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</code>
-          <button class="cmd__copy" type="button" data-copy="{{ $curl }}" data-copy-next="hero-next">Copy</button>
-        </div>
-        {{/* The second way in, for a visitor already inside an agent: the README's "Let your agent install it" prompt (keep the two in step). */}}
-        <button class="button button--ghost hero__agent" type="button" data-copy="{{ $agentPrompt }}" data-copy-next="hero-next-agent">Or let your agent install it</button>
+      {{/* What Pixel is, before what it does: a visitor otherwise cannot tell a CLI from a hosted service or an MCP server. */}}
+      <p class="hero__kind">Open-source CLI &middot; runs on your machine</p>
+      {{/* Agents do not read every file whole: they grep, then read slices. The title names that search and the map Pixel gives instead; the lede says what the map is and that nobody learns a command. */}}
+      <h1 class="hero__title hero__title--long"><span>Agents grep your code blind.</span> <span class="glow">Pixel hands them the map.</span></h1>
+      <p class="hero__lede"><strong>A local index of signatures and callers that your agent queries before it greps.</strong> One install, zero commands to learn: you keep prompting as usual.</p>
+      {{/* No install command here: the hero convinces, the Install chapter asks for the paste, with the script one click away. */}}
+      <div class="hero__cta"><a class="button" href="#your-number">Try Pixel on your repo</a><a class="link hero__how" href="#how">See how it works</a></div>
+      {{/* Every supported agent, named: several are not household names. Marks from assets/logos/ (the ids inside a mark get a prefix, since the Compatibility grid inlines the same SVG). */}}
+      <div class="hero__works">
+        <p class="hero__works-label">Works with</p>
+        <ul class="hero__agents">
+          {{ range $agents }}<li><span class="hero__mark hero__mark--{{ .logo }}">{{ replace (resources.Get (printf "logos/%s.svg" .logo)).Content "lobe-icons-" "hero-lobe-icons-" | safeHTML }}</span><span class="hero__agent-name">{{ .name }}</span></li>{{ end }}
+        </ul>
       </div>
-      {{/* Shown once a Copy above succeeds, one per button (the last copy wins): the step after the paste, so the copy moves the visitor forward instead of just confirming. */}}
-      {{/* Piping a script into a shell asks for trust, so the script is one click away before the paste, described in the terms a reader checks it against. Keep this line true to scripts/install.sh. */}}
-      <p class="hero__script">Read it before you run it: <a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">the script</a> is one short POSIX <code>sh</code> file, with no <code>sudo</code>. It checks the archive's SHA&#8209;256, then writes one file, <code>~/.local/bin/pixel</code>. Prefer Homebrew, or reading it in your terminal first? <a class="link" href="#install">Other ways in</a>.</p>
-      <p class="hero__next" id="hero-next" hidden>Copied. Then run <code>pixel install</code> and restart your agent: the next session starts with the map. In a repository of yours, <code>pixel audit</code> shows what its largest files cost your agent today.</p>
-      <p class="hero__next" id="hero-next-agent" hidden>Copied. Paste it into your agent: it installs Pixel, wires itself and tells you whether <code>pixel doctor .</code> is green. Then <code>pixel audit</code> shows what your largest files cost it.</p>
-      {{/* Beside the one call to action, what a visitor checks before pasting it: the platforms the release builds (release.yml), the licence and the telemetry. No star button here: the nav links GitHub. */}}
-      <p class="hero__trust">Free and MIT &middot; macOS on Apple Silicon and Linux &middot; no account, no telemetry &middot; one <code>pixel uninstall</code> undoes the setup</p>
+      {{/* Keep each claim true to the binary: no account, no key for anything an agent runs (`pixel classify` is off by default and uses the key the user configures), no telemetry (SECURITY.md). The code stays local; the network use the FAQ lists carries no source. Platforms: the targets release.yml builds. */}}
+      <p class="hero__claim"><strong>No account. No API key. No telemetry.</strong><br>Your code stays on your machine.</p>
+      <p class="hero__facts">
+        <span>{{ len $langs }} languages</span>
+        <span>{{ partial "icon.html" (dict "name" "scale" "size" 14) }}MIT</span>
+        <span>{{ partial "icon.html" (dict "name" "apple" "size" 14) }}macOS <small>Apple Silicon</small></span>
+        <span>{{ partial "icon.html" (dict "name" "penguin" "size" 14) }}Linux</span>
+      </p>
       </div>
 
-      <figure class="wall" data-wall data-full="{{ $big.full }}" data-pixel="{{ $big.pixel }}" data-per="25">
-        <div class="wall__meter">
-          <p class="wall__state" aria-hidden="true"><span data-wall-state>Without Pixel</span></p>
-          <p class="wall__label" data-wall-label aria-hidden="true">Your agent reading {{ $big.owner }} {{ path.Base $big.path }}, all {{ lang.FormatNumberCustom 0 $big.lines }} lines</p>
-          <p class="wall__count" aria-hidden="true"><span data-wall-count>{{ lang.FormatNumberCustom 0 $big.full }}</span> estimated tokens <span class="wall__delta">&minus;{{ math.Floor $big.saved }}%</span></p>
-          <p class="sr-only" aria-live="polite" data-wall-announce>Your agent reading {{ $big.owner }} {{ path.Base $big.path }}, all {{ lang.FormatNumberCustom 0 $big.lines }} lines: {{ lang.FormatNumberCustom 0 $big.full }} estimated tokens. Signatures through Pixel: {{ lang.FormatNumberCustom 0 $big.pixel }} estimated tokens. UTF-8 bytes divided by four.</p>
+      {{/* The same question about three well-known files: without Pixel the agent reads the file (Claude Code's Read returns at most 2,000 lines a call), with Pixel it runs `pixel list-signatures` by itself. One square is 25 estimated tokens. Rendered at rest; the script below types it out, one tab after another, and each tab replays its own. */}}
+      <figure class="session" data-session>
+        <div class="session__tabs" role="tablist" aria-label="Example file">
+          {{ range $i, $f := $session }}<button class="session__tab" type="button" role="tab" id="session-tab-{{ $i }}" aria-controls="session-{{ $i }}" aria-selected="{{ cond (eq $i 0) "true" "false" }}" tabindex="{{ cond (eq $i 0) "0" "-1" }}">{{ $f.lang }} <span>{{ $f.project }}</span></button>{{ end }}
         </div>
-        <div class="wall__grid" aria-hidden="true"></div>
-        <figcaption class="wall__caption">
-          <span class="key key--waste">{{ lang.FormatNumberCustom 0 $big.full }} estimated tokens, whole file</span>
-          <span class="key key--kept">{{ lang.FormatNumberCustom 0 $big.pixel }} estimated tokens, signatures</span>
-          {{/* One file is an example, so the caption gives the spread over every kept file, with the link to the table and the excluded one. */}}
-          <span class="wall__unit">One square is 25 estimated tokens (UTF-8 bytes ÷ 4), not billed tokens. Across <a class="link" href="{{ $bench }}#well-known-files">{{ $r.count }} well-known files</a>, the outline is {{ lang.FormatNumber 1 ($r.min) }} to {{ lang.FormatNumber 1 ($r.max) }}% less (median {{ lang.FormatNumber 1 $r.median }}%).</span>
-          <button class="wall__replay" type="button" data-wall-replay hidden>Replay</button>
-        </figcaption>
+        <div class="session__shell">
+          <p class="session__median"><strong>&minus;{{ lang.FormatNumber 1 $r.median }}%</strong> median <br>on {{ $r.count }} large files</p>
+          {{ range $i, $f := $session }}
+          {{ $reads := int (math.Ceil (div (float $f.lines) 2000)) }}
+          {{ $file := path.Base $f.path }}
+          <div class="session__panel" role="tabpanel" id="session-{{ $i }}" aria-labelledby="session-tab-{{ $i }}" data-full="{{ $f.full }}" data-pixel="{{ $f.pixel }}"{{ if $i }} hidden{{ end }}>
+            <p class="session__ask"><span class="session__who">you</span> <span data-type>what's in {{ $file }}?</span></p>
+            <div class="session__step">
+              <p class="session__row session__row--waste"><em>without pixel</em><code>{{ $reads }} Read call{{ if gt $reads 1 }}s{{ end }} &middot; {{ lang.FormatNumberCustom 0 $f.lines }} lines</code><strong data-count="{{ $f.full }}">{{ lang.FormatNumberCustom 0 $f.full }}</strong></p>
+              <canvas class="session__field" data-field="waste" aria-hidden="true"></canvas>
+            </div>
+            <div class="session__step">
+              <p class="session__row session__row--kept"><em>with pixel</em><code data-type>pixel list-signatures {{ $file }}</code><strong data-count="{{ $f.pixel }}">{{ lang.FormatNumberCustom 0 $f.pixel }}</strong></p>
+              <canvas class="session__field" data-field="kept" aria-hidden="true"></canvas>
+            </div>
+            <p class="session__step session__auto">&#8627; Your agent picked this command. <strong>You typed nothing.</strong></p>
+            <div class="session__out">
+              {{ range $f.sample }}<span class="session__step">{{ . }}</span>{{ end }}
+              <span class="session__step">&hellip; {{ sub $f.signatures (len $f.sample) }} more signatures</span>
+            </div>
+            <div class="session__step session__sum">
+              <p><span class="session__from">{{ lang.FormatNumberCustom 0 $f.full }}</span> <span aria-hidden="true">&rarr;</span><span class="sr-only">to</span> <span class="session__to">{{ lang.FormatNumberCustom 0 $f.pixel }}</span> <small>tokens</small></p>
+              <span class="session__saved"><strong>&minus;{{ lang.FormatNumber 1 $f.saved }}%</strong> on this file</span>
+            </div>
+          </div>
+          {{ end }}
+          <p class="session__foot">One square is 25 estimated tokens (UTF-8 bytes ÷ 4), Pixel 0.5.0 &middot; <button class="session__replay" type="button" data-session-replay>Replay</button> &middot; <a class="link" href="{{ $bench }}#well-known-files">How we measure</a></p>
+        </div>
       </figure>
       <a class="hero__down" href="#problem" aria-label="Scroll to the problem">
         <svg viewBox="0 0 14 8" width="28" height="16" aria-hidden="true" fill="currentColor"><path d="M0 0h2v2H0zM2 2h2v2H2zM4 4h2v2H4zM6 6h2v2H6zM8 4h2v2H8zM10 2h2v2h-2zM12 0h2v2h-2z"/></svg>
@@ -85,19 +107,19 @@
     <section class="section wrap" id="problem" aria-labelledby="problem-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Problem</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="problem-title">Every session starts <span class="glow">cold.</span></h2>
-        <p>Your agent does not remember your repository. So it searches, opens a match, reads the whole file, and pays for every line of it.</p>
+        <h2 id="problem-title">First, it has to <span class="glow">find its way.</span></h2>
+        <p>A new task needs a map of your repository. Your agent searches, opens a match and reads the file around it before it knows where to start.</p>
       </header>
       <ul class="pains" data-reveal="stagger">
         <li class="pains__card">
           <p class="pains__tag">Context</p>
           <h3>The window fills before the first edit.</h3>
-          <p>Read whole, {{ $big.owner }} <code>{{ path.Base $big.path }}</code> takes <strong>{{ $ctx.share }}%</strong> of a {{ lang.FormatNumberCustom 0 $ctx.window }}-token context window. A few of those and the agent compacts, and forgets what it just read.</p>
+          <p>Read whole, {{ $big.owner }} <code>{{ path.Base $big.path }}</code> is <strong>{{ $ctx.share }}%</strong> of a {{ lang.FormatNumberCustom 0 $ctx.window }}-token context window, estimated as UTF-8 bytes ÷ 4. <a class="link" href="{{ $bench }}#well-known-files">Source</a>. That leaves less room for the task itself.</p>
         </li>
         <li class="pains__card">
           <p class="pains__tag">Bill</p>
-          <h3>You pay for lines it never needed.</h3>
-          <p>The question was one function. The agent read the file around it, and every token of it goes on the bill, in every session.</p>
+          <h3>It reads lines it never needed.</h3>
+          <p>The question was one function. An outline lets the agent locate it before reading the body. The difference in volume is measurable; a lower session bill is not guaranteed.</p>
         </li>
         <li class="pains__card">
           <p class="pains__tag">Time</p>
@@ -111,8 +133,8 @@
     <section class="section wrap" id="scope" aria-labelledby="scope-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Scoping</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="scope-title">It knows <span class="glow">where to look.</span></h2>
-        <p class="scope__lede"><span>You describe the task. Your agent asks Pixel on&nbsp;its&nbsp;own.</span> <span>It gets the {{ len $s.p0 }}&nbsp;files that matter out of&nbsp;{{ $s.files }}, and starts coding instead of&nbsp;searching.</span></p>
+        <h2 id="scope-title">A map of <span class="glow">where to look.</span></h2>
+        <p class="scope__lede"><span>You describe the task. Your agent asks Pixel where to&nbsp;start.</span> <span>In this recorded run: {{ len $s.p0 }}&nbsp;starting files out of&nbsp;{{ $s.files }} indexed files, to check before&nbsp;editing.</span></p>
       </header>
       {{/* The agent runs scope-task because pixel install put the protocol in its session: the visitor never types it. */}}
       <figure class="board" data-board data-p1="{{ delimit $s.p1 "," }}" data-files="{{ $s.files }}">
@@ -134,10 +156,11 @@
           <span class="key key--pad">{{ $s.files }} files in the index</span>
         </figcaption>
       </figure>
-      <p class="board__note" data-reveal>You never type that command. <code>pixel install</code> teaches your agent when to run it, the same way it learns every other Pixel command.</p>
+      <p class="board__note" data-reveal>A recorded <code>pixel scope-task</code> run on Pixel’s repository, commit <a class="link" href="{{ site.Params.github_url }}/tree/7e8dda5">7e8dda5</a>, 23 September 2026. These are suggested starting points, not an exhaustive change map. <code>pixel install</code> teaches supported agents when to ask for them.</p>
     </section>
 
     {{/* ---------- numbers ---------- */}}
+    <span id="savings"></span>
     <section class="numbers wrap" id="results" aria-label="Measured results">
       {{/* File/outline volume only; rates come from the archived kept rows. */}}
       {{ $stats := slice
@@ -189,7 +212,7 @@
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Verify</span></p>
       <header class="section__head" data-reveal>
         <h2 id="yours-title">Don't trust our numbers. <span class="glow">Get yours.</span></h2>
-        <p>Run inside a repository of yours, the first command prints the estimated token volume of its largest files versus their signatures. No session, no account, and nothing leaves your machine.</p>
+        <p>Try it on your own repo: install the binary below, then run these checks inside a Git repository of yours. The first command builds the local index in <code>.pixel/</code> and adds it to <code>.gitignore</code>. No agent session or account needed.</p>
       </header>
       <ol class="yours" data-reveal="stagger">
         <li class="yours__step">
@@ -199,7 +222,7 @@
             <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel audit</code>
             <button class="cmd__copy" type="button" data-copy="pixel audit">Copy</button>
           </div>
-          <p>On Requests, estimated as bytes ÷ 4: <strong class="yours__waste">95,693 tokens</strong> for the twenty files whole against <strong class="yours__kept">11,447</strong> for their outlines: &minus;88%.</p>
+          <p>On Requests at <code>611c616</code>, with Pixel 0.5.1, estimated as bytes ÷ 4: <strong class="yours__waste">95,693 tokens</strong> for the twenty files whole against <strong class="yours__kept">11,447</strong> for their outlines: &minus;88%.</p>
         </li>
         <li class="yours__step">
           <span class="yours__n" aria-hidden="true">2</span>
@@ -208,7 +231,7 @@
             <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel list-signatures &lt;file&gt;</code>
             <button class="cmd__copy" type="button" data-copy="pixel list-signatures ">Copy</button>
           </div>
-          <p>On Requests' <code>models.py</code> (1,184 lines): <code>full read 10365 tok, pixel answer 641 tok (-94%)</code>, in well under a second.</p>
+          <p>On the same Requests clone, <code>models.py</code> (1,184 lines): <code>full read 10365 tok, pixel answer 641 tok (-94%)</code>, in well under a second.</p>
         </li>
         <li class="yours__step">
           <span class="yours__n" aria-hidden="true">3</span>
@@ -220,7 +243,7 @@
           <p>After a few sessions, inspect measured Pixel output volumes and versioned workflow estimates. These do not measure all agent reads or billed cost.</p>
         </li>
       </ol>
-      <p class="numbers__more" data-reveal>Not installed yet? <a class="link" href="#install">Two commands</a>. The method behind the count: <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">measure it on your own code</a>.</p>
+      <p class="numbers__more" data-reveal>The method behind the count: <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">measure it on your own code</a>.</p>
     </section>
 
     {{/* ---------- how it works ---------- */}}
@@ -228,13 +251,13 @@
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Architecture</span></p>
       <header class="section__head" data-reveal>
         <h2 id="how-title">How it <span class="glow">works.</span></h2>
-        <p>One binary, one folder in your repository, no server. Then six jobs your agent runs on it every day.</p>
+        <p>One binary and one folder in your repository, without a hosted service.</p>
       </header>
       <ol class="how" data-reveal="stagger">
         <li>
           <span class="how__icon">{{ partial "icon.html" (dict "name" "grid" "size" 28) }}</span>
           <h3>Index</h3>
-          <p><code>.pixel/</code>, at your repository root, holds a text index of every file Git does not ignore and a code graph of symbols, imports and calls parsed with tree-sitter, built on first use.</p>
+          <p><code>.pixel/</code>, at your repository root, holds a text index of eligible files Git does not ignore and a code graph of symbols, imports and calls parsed with tree-sitter, built on first use.</p>
         </li>
         <li>
           <span class="how__icon">{{ partial "icon.html" (dict "name" "bolt" "size" 28) }}</span>
@@ -279,156 +302,9 @@
         <div><dt>Account</dt><dd>None</dd></div>
         <div><dt>Telemetry</dt><dd>None</dd></div>
       </dl>
-      {{/* The six jobs an agent runs every day on that index, each a workflow illustration without Pixel and with it: data/jobs.toml. No latency in the heading: commit-and-push waits on the remote, so a millisecond claim would not hold for all six. They live under How it works so the page has one chapter for what Pixel does, not two. */}}
-      <h3 class="vs__kicker" id="jobs" data-reveal>Six jobs your agent runs every day</h3>
-      <p class="ledger__fine">Workflow illustrations, not timed agent trials. The accounting animation combines measured local output volumes with token and time estimates; it does not measure billed savings.</p>
-      <div class="jobs" data-jobs data-reveal>
-        <div class="jobs__tabs" role="tablist" aria-label="Jobs">
-          {{ range $i, $j := hugo.Data.jobs.job }}
-          <button class="jobs__tab" type="button" role="tab" id="tab-{{ $j.id }}" aria-controls="panel-{{ $j.id }}" aria-selected="{{ if eq $i 0 }}true{{ else }}false{{ end }}"{{ if ne $i 0 }} tabindex="-1"{{ end }}>
-            <span class="jobs__name">{{ $j.name }}</span>
-            <code class="jobs__cmd">{{ $j.command }}</code>
-          </button>
-          {{ end }}
-        </div>
-        {{ range $i, $j := hugo.Data.jobs.job }}
-        <div class="jobs__panel" role="tabpanel" id="panel-{{ $j.id }}" aria-labelledby="tab-{{ $j.id }}"{{ if ne $i 0 }} hidden{{ end }}>
-          <p class="jobs__text">{{ $j.text }}</p>
-          {{ $src := printf "examples/%s.mp4" $j.media | relURL }}
-          <video class="jobs__video" width="1600" height="1000" muted loop playsinline preload="none"
-            poster="{{ printf "examples/%s.jpg" $j.media | relURL }}" aria-label="{{ $j.name }}: workflow illustration without Pixel and with it"
-            {{ if eq $i 0 }}src="{{ $src }}"{{ else }}data-src="{{ $src }}"{{ end }}></video>
-        </div>
-        {{ end }}
-      </div>
+      <p class="numbers__more"><a class="link" href="{{ "docs/" | relURL }}#jobs">See the workflow and Git examples</a> · <a class="link" href="{{ "classify/" | relURL }}">Optional classification</a></p>
     </section>
 
-
-    {{/* ---------- coding decisions ---------- */}}
-    {{/* The optional classify command's figures live in content/benchmarks.md#coding-decisions: update that page first, then this proof block. */}}
-    <section class="section wrap" id="decisions" aria-labelledby="decisions-title">
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Decisions</span></p>
-      <header class="section__head" data-reveal>
-        <h2 id="decisions-title"><span class="glow">Fast and accurate.</span></h2>
-        <p>Published model results, with their measurement limits.</p>
-      </header>
-      <div class="decisions" data-reveal>
-        <div class="decisions__intro">
-          <p>Ollaya reports 0.722 typed-decisions accuracy for winnow:e4b and 0.738 for TypeSafe Jev. The separate latency measurements below use different hardware and requests; they do not establish a speed winner.</p>
-          <p>These are upstream measurements, not a Pixel reproduction. The benchmark page describes the sample, scoring and source.</p>
-        </div>
-        <ul class="decisions__metrics">
-          <li>
-            <strong>89ms</strong>
-            <span>winnow:e4b on Ollaya</span>
-            <small>RTX 4090, five questions · 0.722 accuracy</small>
-          </li>
-          <li>
-            <strong>236–276ms</strong>
-            <span>TypeSafe Jev</span>
-            <small>Hosted API, median request · 0.738 accuracy</small>
-          </li>
-        </ul>
-      </div>
-      {{/* One classify call, drawn the way the command answers: the caller names the labels, --criterion holds each definition, and the answer is one probability per label plus `predicted:` (the argmax). $lines is the single source — each token paints itself (k: command, f: flag, s: prose string, d: dim joiner) and also feeds $copy, the string Copy sends. The meter values are the supplied real local Ollaya run. Labels list alphabetically, as the command prints them. */}}
-      {{ $lines := slice
-        (slice (dict "t" "pixel classify " "c" "k") (dict "t" `"Review this Rust PR, find correctness bugs, and propose a safe patch."` "c" "s") (dict "t" ` \` "c" "d"))
-        (slice (dict "t" "    ") (dict "t" "--engine ollaya" "c" "f") (dict "t" ` \` "c" "d"))
-        (slice (dict "t" "    ") (dict "t" "--context " "c" "f") (dict "t" `"Choose the cheapest model that can reliably handle the request."` "c" "s") (dict "t" ` \` "c" "d"))
-        (slice (dict "t" "    ") (dict "t" "--label " "c" "f") (dict "t" `'claude-haiku-4.5_(fast)'` "c" "l") (dict "t" ` \` "c" "d"))
-        (slice (dict "t" "    ") (dict "t" "--label " "c" "f") (dict "t" `'claude-opus-5.5_(strong)'` "c" "l") (dict "t" ` \` "c" "d"))
-        (slice (dict "t" "    ") (dict "t" "--label " "c" "f") (dict "t" `'claude-fable-5.1_(reasoning)'` "c" "l") (dict "t" ` \` "c" "d"))
-        (slice (dict "t" "    ") (dict "t" "--criterion " "c" "f") (dict "t" `'claude-haiku-4.5_(fast)` "c" "l") (dict "t" `=Simple rewriting, extraction, or classification; no deep reasoning.'` "c" "s") (dict "t" ` \` "c" "d"))
-        (slice (dict "t" "    ") (dict "t" "--criterion " "c" "f") (dict "t" `'claude-opus-5.5_(strong)` "c" "l") (dict "t" `=Complex coding, multi-file review, or tool use; accuracy matters.'` "c" "s") (dict "t" ` \` "c" "d"))
-        (slice (dict "t" "    ") (dict "t" "--criterion " "c" "f") (dict "t" `'claude-fable-5.1_(reasoning)` "c" "l") (dict "t" `=Multi-step analysis, difficult debugging, or high uncertainty.'` "c" "s")) }}
-      {{ $copy := "" }}
-      {{ range $i, $line := $lines }}
-        {{ $texts := slice }}{{ range $tok := $line }}{{ $texts = $texts | append $tok.t }}{{ end }}
-        {{ $copy = print $copy (delimit $texts "") }}{{ if lt $i (sub (len $lines) 1) }}{{ $copy = print $copy "\n" }}{{ end }}
-      {{ end }}
-      <figure class="decisions__example" data-reveal>
-        <div class="term">
-          <div class="term__bar">
-            <span class="term__dots" aria-hidden="true"><span></span><span></span><span></span></span>
-            <button class="cmd__copy term__copy" type="button" data-copy="{{ $copy }}">Copy</button>
-          </div>
-          <pre class="term__body"><code>{{ range $i, $line := $lines }}<span data-line>{{ if eq $i 0 }}<span class="term__p">$</span> {{ end }}{{ range $tok := $line }}{{ if $tok.c }}<span class="tk-{{ $tok.c }}">{{ $tok.t }}</span>{{ else }}{{ $tok.t }}{{ end }}{{ end }}</span>{{ end }}</code></pre>
-          <ol class="classify" aria-label="Answer: one probability per label, then the argmax">
-            <li class="classify__row">
-              <span class="classify__name">claude-fable-5.1_(reasoning)</span>
-              <span class="classify__meter" aria-hidden="true"><i style="--p:0.192"></i></span>
-              <span class="classify__prob">0.192</span>
-            </li>
-            <li class="classify__row">
-              <span class="classify__name">claude-haiku-4.5_(fast)</span>
-              <span class="classify__meter" aria-hidden="true"><i style="--p:0.098"></i></span>
-              <span class="classify__prob">0.098</span>
-            </li>
-            <li class="classify__row classify__row--top">
-              <span class="classify__name">claude-opus-5.5_(strong)</span>
-              <span class="classify__meter" aria-hidden="true"><i style="--p:0.710"></i></span>
-              <span class="classify__prob">0.710</span>
-            </li>
-          </ol>
-          <p class="classify__verdict"><span class="term__c">predicted:</span> claude-opus-5.5_(strong)</p>
-        </div>
-        <figcaption class="decisions__caption">One local run using Ollaya: each score is the local model's probability for that label; <code>predicted:</code> is the highest-scoring choice. Remote engines are also available and report their own scores, renormalized to sum to 1 — a decision aid, not a measurement.</figcaption>
-      </figure>
-      <p class="decisions__more" data-reveal><a class="link" href="{{ $bench }}#coding-decisions">Benchmark source and method</a> <span>· typed-decisions accuracy, higher is better; latency, lower is better</span></p>
-    </section>
-
-
-    {{/* ---------- roles ---------- */}}
-    {{/* The kept files' range, for the developers' card. */}}
-    {{ $range := printf "%s to %s%%" (lang.FormatNumber 1 ($r.min)) (lang.FormatNumber 1 ($r.max)) }}
-    <section class="section wrap" id="teams" aria-labelledby="teams-title">
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Teams</span></p>
-      <header class="section__head" data-reveal>
-        <h2 id="teams-title">Picked by developers, <span class="glow">signed off by the CTO.</span></h2>
-        <p>An agent tool stays in a team when every seat gets something from it. What Pixel gives each one, with the number behind it.</p>
-      </header>
-      {{/* Every figure is a benchmarks.md row (or the data files it reads); every command exists (docs_drift reads benchmarks.md, not this page: check with pixel <cmd> --help). */}}
-      <ul class="roles" data-reveal="stagger">
-        <li class="roles__card">
-          <p class="roles__who">{{ partial "icon.html" (dict "name" "laptop" "size" 16) }}Developers</p>
-          <h3>The agent stops opening whole files to find its way.</h3>
-          <ul>
-            <li><strong>{{ $range }} less</strong> read to learn what a large file holds, on {{ $r.count }} well-known files.</li>
-            <li>Callers of a symbol in a <strong>153&nbsp;ms</strong> median, and the files a task needs before the first edit.</li>
-            <li>Same agent, same prompts: <code>pixel install</code> once, and the agent calls Pixel from its own shell.</li>
-          </ul>
-        </li>
-        <li class="roles__card">
-          <p class="roles__who">{{ partial "icon.html" (dict "name" "user" "size" 16) }}Lead developers</p>
-          <h3>Agents that check the blast radius before they edit.</h3>
-          <ul>
-            <li><code>pixel impact</code> lists a symbol's callers and callees before the change; <code>pixel review-changes</code> shows the diff, structured.</li>
-            <li>Git writes that keep work: pushes go out leased, and <code>pixel plan-rollback</code> writes nothing until <code>--apply</code>.</li>
-            <li>One index for every agent the team runs, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files.</li>
-          </ul>
-        </li>
-        <li class="roles__card">
-          <p class="roles__who">{{ partial "icon.html" (dict "name" "robot" "size" 16) }}Harness engineers</p>
-          <h3>Deterministic index answers that state their own limits.</h3>
-          <ul>
-            <li>Every index and graph answer is marked <code>complete</code>, <code>capped</code> or <code>unresolved</code>, and a graph answer never claims it saw every caller. The one model-backed command, the optional <code>pixel classify</code>, says it is not deterministic.</li>
-            <li>A CLI plus hooks, not an MCP server: <strong>~4,160 tokens</strong> of context per turn, 4.7&times; less than GitNexus.</li>
-            <li>Not left to the model's goodwill: the protocol is injected at session start, and the agent called Pixel in <strong>11 of 11</strong> recorded runs.</li>
-          </ul>
-        </li>
-        <li class="roles__card">
-          <p class="roles__who">{{ partial "icon.html" (dict "name" "shield" "size" 16) }}CTOs</p>
-          <h3>Local read-volume estimates, no new vendor, no telemetry.</h3>
-          <ul>
-            <li>Estimate large-file read volume at your own input price; <a class="link" href="{{ "savings/" | relURL }}">see the assumptions</a>.</li>
-            <li>No second model on the bill, no account, no telemetry: the index stays in <code>.pixel/</code>. The network sees only what you run: Git remotes, the optional <code>pixel classify</code> and <code>pixel web-search</code>, and a one-time embedding model download.</li>
-            <li>MIT licensed, and the same index serves {{ len $agents }} agents, so switching agents does not mean switching tools.</li>
-          </ul>
-          {{/* The estimate multiplies the well-known files' rate by the team's own numbers; the page says it is per large-file read, not per session. */}}
-          <a class="link roles__more" href="{{ "savings/" | relURL }}">Estimate it for your team</a>
-        </li>
-      </ul>
-    </section>
 
     {{/* ---------- agents ---------- */}}
     <section class="section wrap section--center" id="agents" aria-labelledby="agents-title">
@@ -445,92 +321,6 @@
       <p class="agents__more"><a class="link" href="{{ "for/" | relURL }}">What Pixel writes for each agent, and how to check it</a></p>
     </section>
 
-    {{/* ---------- alternatives ---------- */}}
-    {{/* After Teams and Compatibility, before Objections: the matrix is the page's heaviest block, read by a visitor already weighing the choice, not one still learning what Pixel is. */}}
-    <section class="section wrap" id="alternatives" aria-labelledby="alternatives-title">
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Alternatives</span></p>
-      <header class="section__head" data-reveal>
-        <h2 id="alternatives-title">Measured against <span class="glow">the alternatives.</span></h2>
-        <p>The code indexes a team weighs Pixel against, with the row where each one wins kept in. GitNexus was run against Pixel on the same cases and the same machine; the others are compared on how they work, with no figure until we measure them.</p>
-      </header>
-      {{/* The matrix is the tools marked `matrix` in data/alternatives.toml, in file order, beside Pixel's own `[pixel.traits]`; the cards below are the tools marked `home`. partials/alternatives.html fills both, the same entries the /vs/ pages render: change a figure on content/benchmarks.md first, then there. */}}
-      {{ $alts := partial "alternatives.html" (dict "abs" false) }}
-      {{ $cols := where $alts "matrix" true }}
-      {{ $pixel := hugo.Data.alternatives.pixel }}
-      {{/* A figure row: the first matrix tool's row carrying that `matrix` key gives Pixel's cell; a tool without the row was not measured on it. */}}
-      {{ $figures := slice "callers" "context" }}
-      {{ $traits := slice (dict "key" "how" "label" "How it answers") (dict "key" "needs" "label" "What it needs") (dict "key" "reach" "label" "How the agent reaches it") (dict "key" "history" "label" "Git history") (dict "key" "licence" "label" "Licence") }}
-      <div class="mx" data-reveal>
-        <div class="mx__scroll" tabindex="0" role="region" aria-labelledby="alternatives-title">
-          <table class="mx__table">
-            <colgroup><col class="mx__col-label"><col class="mx__col-pixel">{{ range $cols }}<col>{{ end }}</colgroup>
-            <thead>
-              <tr>
-                <th scope="col"><span class="sr-only">Criterion</span></th>
-                <th scope="col" class="mx__pixel">Pixel</th>
-                {{ range $cols }}<th scope="col"><a href="{{ .url }}">{{ .column | default .name }}</a>{{ if ne .measure "design" }}<span class="mx__tag mx__tag--measured">{{ (partial "vs-measure.html" .).label }}</span>{{ end }}</th>{{ end }}
-              </tr>
-            </thead>
-            <tbody>
-              {{ range $i, $key := $figures }}
-              {{ $first := dict }}{{ range $cols }}{{ range .rows }}{{ if and (eq .matrix $key) (not $first) }}{{ $first = . }}{{ end }}{{ end }}{{ end }}
-              {{ if not $first }}{{ errorf "data/alternatives.toml: no matrix tool has a row with matrix = %q" $key }}{{ end }}
-              <tr>
-                <th scope="row">{{ $first.label | safeHTML }}</th>
-                <td class="mx__pixel{{ if eq $first.win "pixel" }} is-win{{ end }}">{{ $first.pixel | safeHTML }}</td>
-                {{/* A tool with no figure row at all gets one cell across every figure row, saying how it was compared; a tool with some of them reads "Not measured" on each row it lacks, so every row keeps one cell per column. */}}
-                {{ range $c := $cols }}
-                  {{ $has := where $c.rows "matrix" "in" $figures }}
-                  {{ with index (where $c.rows "matrix" $key) 0 }}<td{{ if eq .win "other" }} class="is-win"{{ end }}>{{ .other | safeHTML }}</td>
-                  {{ else }}{{ if $has }}<td class="mx__none">Not measured</td>{{ else if eq $i 0 }}<td class="mx__none" rowspan="{{ len $figures }}"><span class="mx__tag">{{ (partial "vs-measure.html" $c).label }}</span></td>{{ end }}{{ end }}
-                {{ end }}
-              </tr>
-              {{ end }}
-              {{ range $t := $traits }}
-              <tr>
-                <th scope="row">{{ $t.label }}</th>
-                <td class="mx__pixel">{{ index $pixel.traits $t.key | safeHTML }}</td>
-                {{ range $cols }}<td>{{ index .traits $t.key | safeHTML }}</td>{{ end }}
-              </tr>
-              {{ end }}
-              <tr class="mx__wins">
-                <th scope="row">Where it beats Pixel</th>
-                <td class="mx__pixel">&mdash;</td>
-                {{ range $cols }}<td>{{ .wins | safeHTML }}</td>{{ end }}
-              </tr>
-              <tr class="mx__links">
-                <th scope="row"><span class="sr-only">Full comparison</span></th>
-                <td class="mx__pixel"><a class="link" href="{{ $bench }}#against-gitnexus">How we measured</a></td>
-                {{ range $cols }}<td><a class="link" href="{{ .url }}">Full comparison<span class="sr-only"> with {{ .name }}</span></a></td>{{ end }}
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </div>
-
-      {{/* Cards for the tools marked `home` that are not code indexes; none is marked today, so the matrix stands alone and the line below links them. */}}
-      {{ with where $alts "home" true }}
-      <h3 class="vs__kicker" data-reveal>Other ways to spend fewer tokens</h3>
-      <div class="vs" data-reveal="stagger">
-        {{ range . }}{{ $tool := . }}
-        <article class="vs__card">
-          <header class="vs__head"><h3>vs {{ .name }}</h3><p>{{ .pitch | safeHTML }}</p></header>
-          <table class="vs__table">
-            <thead><tr><th scope="col"><span class="sr-only">Measure</span></th><th scope="col">Pixel</th><th scope="col">{{ .name }}</th></tr></thead>
-            <tbody>
-              {{ range where .rows "page" "!=" true }}<tr><th scope="row">{{ .label | safeHTML }}</th><td{{ if eq .win "pixel" }} class="is-win"{{ end }}>{{ .pixel | safeHTML }}</td><td{{ if eq .win "other" }} class="is-win"{{ end }}>{{ .other | safeHTML }}</td></tr>
-              {{ end }}
-            </tbody>
-          </table>
-          <p class="vs__theirs"><strong>{{ .note_label | default (printf "Where %s wins" .name) }}:</strong> {{ .note | default .wins | safeHTML }}</p>
-          {{ with .more_href }}<a class="link vs__more" href="{{ . }}">{{ $tool.more }}</a>{{ else }}<a class="link vs__more" href="{{ $bench }}#{{ .bench }}">{{ .more }}</a>{{ end }}
-        </article>
-        {{ end }}
-      </div>
-      {{ end }}
-      <p class="ledger__fine" data-reveal>Other ways to spend fewer tokens have a page each: <a class="link" href="{{ "vs/shunt/" | relURL }}">shunt</a>, which hands large reads to a second model, <a class="link" href="{{ "vs/jev/" | relURL }}">Jev</a>, a model for coding judgement calls, and <a class="link" href="{{ "vs/rtk/" | relURL }}">RTK</a>, which compresses command output and runs beside Pixel. Where a specialist beats Pixel at its one job (semble on a plain-English search's top 10, stacklit on a compact repository map), and how Pixel compares with <a class="link" href="{{ "vs/warpgrep/" | relURL }}">WarpGrep</a>, Morph's search subagent, the numbers are on the <a class="link" href="{{ $bench }}#where-a-specialist-wins">benchmarks page</a>, and <a class="link" href="{{ "vs/" | relURL }}">every comparison</a> is listed.</p>
-    </section>
-
     {{/* ---------- questions ---------- */}}
     <section class="section wrap section--center" id="faq" aria-labelledby="faq-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Objections</span></p>
@@ -545,7 +335,8 @@
           {{ .answer | safeHTML }}
         </details>
         {{ end }}
-      </div>
+      </div>      <p class="numbers__more"><a class="link" id="alternatives" href="{{ "vs/" | relURL }}#alternatives">Full comparisons</a> · <a class="link" id="teams" href="{{ "teams/" | relURL }}">For your team</a> · <a class="link" id="decisions" href="{{ "classify/" | relURL }}">Optional classification</a> · <a class="link" id="jobs" href="{{ "docs/" | relURL }}#jobs">Workflow and Git examples</a></p>
+
     </section>
 
     {{/* ---------- install ---------- */}}
@@ -568,15 +359,23 @@
               </div>
               <button class="cmd__copy term__copy" type="button" data-copy="{{ $curl }} && pixel install && pixel doctor .">Copy all</button>
             </div>
-            <pre class="term__body"><code><span data-line="curl"><span class="term__p">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</span><span data-line="inspect" hidden><span class="term__p">$</span> curl -fsSL -o install.sh {{ replace $scriptURL "/" "/<wbr>" | safeHTML }}</span><span data-line="inspect" hidden><span class="term__p">$</span> less install.sh    <span class="term__c"># read every line it will run</span></span><span data-line="inspect" hidden><span class="term__p">$</span> sh install.sh</span><span data-line="brew" hidden><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span></span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel list-signatures path/to/a/large/file.py  <span class="term__c"># first result, in your repo</span></span><span data-line="agent" hidden><span class="term__c"># paste into Claude Code, Codex, Pi or any agent with a shell</span></span><span data-line="agent" hidden><span class="term__p">&gt;</span> {{ $agentPrompt }}</span></code></pre>
+            <pre class="term__body" tabindex="0" role="region" aria-label="Installation commands"><code><span data-line="curl"><span class="term__p">$</span> {{ $curl }}</span><span data-line="inspect" hidden><span class="term__p">$</span> curl -fsSL -o install.sh {{ $scriptURL }}</span><span data-line="inspect" hidden><span class="term__p">$</span> less install.sh</span><span data-line="inspect" hidden><span class="term__p">$</span> sh install.sh</span><span data-line="brew" hidden><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel install</span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel doctor .</span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel list-signatures path/to/a/large/file.py</span><span data-line="agent" hidden><span class="term__c"># paste into Claude Code, Codex, Pi or any agent with a shell</span></span><span data-line="agent" hidden><span class="term__p">&gt;</span> {{ $agentPrompt }}</span></code></pre>
           </div>
-          {{/* Measured on a fresh clone of psf/requests with the pixel of this commit; re-run it when the report line changes (crates/pixel-actionlog/src/metrics.rs, measured_read_section). */}}
-          <p class="install__more">The last line needs no session: under the file's outline, Pixel's report compares it with reading the whole file. On Requests' <code>models.py</code>: <code>full read 10365 tok, pixel answer 641 tok (-94%)</code>.</p>
-          {{/* The prebuilt targets are release.yml's matrix (aarch64-apple-darwin, x86_64 and aarch64 musl Linux), and scripts/install.sh refuses an archive whose .sha256 it cannot fetch or match: change this line when either changes. */}}
-          <p class="install__more">Prebuilt for Apple Silicon Macs and Linux (x86_64, arm64); <a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">the script</a> checks the archive's SHA&#8209;256 before it installs anything, and writes only <code>~/.local/bin/pixel</code> (<code>PIXEL_INSTALL_DIR</code> moves it). No Windows build yet. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}">Plugins and rules files</a>.</p>
-          <p class="install__more"><code>pixel install</code> edits your agents' settings, so every file it writes is listed per agent, with the check and the removal: <a class="link" href="{{ "for/" | relURL }}">what Pixel writes for each agent</a>.</p>
-          <p class="install__more install__ask">Questions, or stuck on setup? <a class="link" href="{{ site.Params.github_url }}/discussions" target="_blank" rel="noopener">Ask in GitHub Discussions</a>.</p>
+          <p class="term__hint">Scroll sideways to read the full commands.</p>
+          <noscript><p class="install__more">For Homebrew or the download-and-read variant, see <a class="link" href="{{ "docs/" | relURL }}#install">all installation methods</a>.</p></noscript>
+          <p class="install__more">Run inside your repo. Restart your agent after <code>pixel install</code>.</p>
+          <p class="install__more"><a class="link" href="{{ "docs/" | relURL }}#install">All installation details</a> · <a class="link" href="{{ site.Params.github_url }}/discussions" target="_blank" rel="noopener">Setup help</a></p>
         </div>
+        <aside class="setup__guide" aria-labelledby="setup-guide-title" data-reveal>
+          <h3 id="setup-guide-title">From download to your first outline</h3>
+          <ol class="setup__flow">
+            <li><span class="setup__n" aria-hidden="true">1</span><div><strong>Get the binary</strong><p>Apple Silicon Macs · Linux x86_64 / arm64. No Windows build yet.</p><a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">Read the script</a></div></li>
+            <li><span class="setup__n" aria-hidden="true">2</span><div><strong>Connect your agent</strong><p>Hooks and rules in its settings.</p><a class="link" href="{{ "for/" | relURL }}">Files changed &amp; removal</a></div></li>
+            <li><span class="setup__n" aria-hidden="true">3</span><div><strong>Check the setup</strong><p><code>pixel doctor .</code> checks it. Optional, inspectable.</p></div></li>
+            <li><span class="setup__n" aria-hidden="true">4</span><div><strong>See your first outline</strong><p>Replace the example path with a file in your repo. Compare its outline with a full read.</p><a class="link" href="{{ $bench }}#measure-it-on-your-own-code">How the count works</a></div></li>
+          </ol>
+          <p class="setup__note">Script download: SHA&#8209;256 checked → <code>~/.local/bin/pixel</code><br><code>PIXEL_INSTALL_DIR</code> changes the destination.</p>
+        </aside>
       </div>
       {{/* The call for more voices, under the install it follows (the report needs a few sessions), not in the Proof chapter, where it drew attention to an empty list of quotes: a Show and tell discussion prefilled with what a quote needs (the numbers, the repository, the agent). A quote only moves to data/voices.toml with its author's written consent. */}}
       {{ $title := "My pixel token-savings numbers" }}
@@ -601,34 +400,26 @@
     {{/* ---------- closing ---------- */}}
     <section class="closing wrap" aria-labelledby="closing-title">
       <h2 id="closing-title" class="closing__title" data-reveal>Give your agent <span class="glow">a map.</span></h2>
-      <p class="closing__lede" data-reveal>Give the next session a map before it opens its first file, then inspect local volumes and estimates with <code>pixel token-savings</code>.</p>
-      <div class="cmd closing__cmd" data-reveal>
-        <code><span class="cmd__prompt" aria-hidden="true">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }} && pixel install</code>
-        <button class="cmd__copy" type="button" data-copy="{{ $curl }} && pixel install">Copy</button>
-      </div>
-      <p class="hero__trust" data-reveal>Free and MIT &middot; no account, no telemetry &middot; restart your agent and it is live &middot; one <code>pixel uninstall</code> undoes the setup</p>
-      {{/* One way onward, not three: the Install block right above already offers the script and the agent prompt, and the docs are in the nav. */}}
-      <div class="closing__cta" data-reveal>
-        <a class="button button--ghost" href="#your-number">Measure it on your code first</a>
-      </div>
+      <p class="closing__lede" data-reveal>Start with a file/outline comparison on your own code. Then give the next agent session the map, and check what it actually runs.</p>
+      <div class="closing__cta" data-reveal><a class="button" href="#your-number">Try Pixel on your repo</a></div>
     </section>
   </main>
-
-  {{/* The install command within reach once the hero has scrolled away; the script below hides it again over the Install and closing blocks, which carry the same command. Nothing is stored: it comes back on every visit. */}}
-  <aside class="dock" data-dock aria-label="Install Pixel" hidden>
-    <div class="dock__inner wrap">
-      <span class="dock__brand" aria-hidden="true"><span class="brand__pixel"></span></span>
-      <div class="cmd dock__cmd">
-        <code><span class="cmd__prompt" aria-hidden="true">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</code>
-        <button class="cmd__copy" type="button" data-copy="{{ $curl }}">Copy</button>
-      </div>
-      <a class="link dock__more" href="#your-number">Measure it on your code</a>
-    </div>
-  </aside>
 
   {{ partial "footer.html" . }}
 
   <script>
+    (function () {
+      var moved = {
+        '#decisions': '{{ "classify/" | relURL }}',
+        '#teams': '{{ "teams/" | relURL }}',
+        '#alternatives': '{{ "vs/" | relURL }}#alternatives',
+        '#jobs': '{{ "docs/" | relURL }}#jobs',
+        '#savings': '{{ "benchmarks/" | relURL }}#reading-code'
+      };
+      var follow = function () { if (moved[location.hash]) location.replace(moved[location.hash]); };
+      follow();
+      addEventListener('hashchange', follow);
+    })();
     /* At rest until the visitor moves. The scroll-driven effects below
        (reveals, assembling titles, the counting numbers) prime what is
        still below the fold only on the first scroll, so a full-page
@@ -645,141 +436,155 @@
       return r.bottom > 0 && r.top < window.innerHeight;
     };
 
-    /* Token wall: one square per 25 tokens of a full file read. On load the
-       wall burns down to what the same question costs through Pixel, the
-       counter follows, and the survivors gather into a P. Reduced
-       motion gets the final state; Replay runs it again. */
+    /* Agent session: the hero's tabs, each a file of data/hero_session.toml.
+       The page renders every panel at rest. Once the session is on screen
+       (after the splash), the script types each tab out in turn: the
+       question, the coral field filling as the file is read, the command
+       the agent picks, the green field, its output, the sum. A tab click
+       or Replay plays one panel. Reduced motion gets the panels at rest. */
     (function () {
-      var fig = document.querySelector('[data-wall]');
+      var fig = document.querySelector('[data-session]');
       if (!fig) return;
-      var grid = fig.querySelector('.wall__grid');
-      var count = fig.querySelector('[data-wall-count]');
-      var label = fig.querySelector('[data-wall-label]');
-      var replay = fig.querySelector('[data-wall-replay]');
-      var announce = fig.querySelector('[data-wall-announce]');
-      var said = announce.textContent;
-      var full = +fig.dataset.full, kept = +fig.dataset.pixel, per = +fig.dataset.per;
-      var n = Math.round(full / per), k = Math.round(kept / per);
-      var startLabel = label.textContent;
-      var state = fig.querySelector('[data-wall-state]');
-      var startState = state.textContent;
-      var cells = [];
-      var frag = document.createDocumentFragment();
-      for (var i = 0; i < n; i++) { var c = document.createElement('span'); cells.push(c); frag.appendChild(c); }
-      grid.appendChild(frag);
-
-      // A fixed shuffle, so every visit burns the same squares.
-      var order = cells.map(function (_, i) { return i; });
-      var seed = 7;
-      for (var j = order.length - 1; j > 0; j--) {
-        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-        var r = seed % (j + 1), t = order[j]; order[j] = order[r]; order[r] = t;
-      }
-      var keep = order.slice(0, k).sort(function (a, b) { return a - b; });
-      var burn = order.slice(k);
+      var tabs = [].slice.call(fig.querySelectorAll('[role="tab"]'));
+      var panels = [].slice.call(fig.querySelectorAll('[role="tabpanel"]'));
+      var PER = 25;
+      var still = matchMedia('(prefers-reduced-motion: reduce)').matches;
       var fmt = function (v) { return Math.round(v).toLocaleString('en-US'); };
-
-      // The survivors gather into a P, for Pixel, made of exactly k squares,
-      // so "one square is 25 tokens" stays true. The bowl is a stroke-t
-      // outline, the stem takes the rest in whole rows: the search keeps the
-      // shapes whose remainder divides by t, then the one closest to a 1.6
-      // height-to-width ratio, a 3-square stroke and notched corners.
-      // Failing that, the smallest P is cut down from the stem's foot, and
-      // failing that, a plain block.
-      var outline = function (t, w, b, notch, x, y) {
-        return (x < t || y < t || y >= b - t || x >= w - t) && !(notch && x === w - 1 && (y === 0 || y === b - 1));
-      };
-      var letter = function (rows, cols) {
-        var best = null, near = null;
-        for (var t = 2; t <= 4; t++) for (var w = 3 * t; w <= 6 * t; w++) for (var b = 2 * t + 1; b <= 2 * t + 9; b++) {
-          [true, false].forEach(function (notch) {
-            var pts = [];
-            for (var y = 0; y < b; y++) for (var x = 0; x < w; x++) if (outline(t, w, b, notch, x, y)) pts.push([x, y]);
-            var rest = k - pts.length;
-            if (rest <= 0) return;
-            var len = Math.ceil(rest / t), h = b + len;
-            if (h > rows || w > cols || len < 0.6 * b || len > 1.2 * b) return;
-            for (var yy = b; yy < h; yy++) for (var xx = 0; xx < t; xx++) pts.push([xx, yy]);
-            var score = Math.abs(h / w - 1.6) + (t === 3 ? 0 : 0.2) + (notch ? 0 : 0.05);
-            var cand = { pts: pts.slice(0, k), w: w, h: h, score: score };
-            if (rest % t === 0) { if (!best || score < best.score) best = cand; }
-            else if (!near || score < near.score) near = cand;
-          });
+      var token = function (name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); };
+      /* Both fields of a panel share one square size, so their areas
+         compare; each field is as tall as its own file needs. */
+      var cols = function (w) { return w < 300 ? 50 : w < 480 ? 72 : 96; };
+      var fields = panels.map(function (p) {
+        return {
+          waste: { cv: p.querySelector('[data-field="waste"]'), total: Math.round(+p.dataset.full / PER), shown: 0, color: '--coral', alpha: 0.55, glow: 0 },
+          kept: { cv: p.querySelector('[data-field="kept"]'), total: Math.round(+p.dataset.pixel / PER), shown: 0, color: '--green-hi', alpha: 1, glow: 6 }
+        };
+      });
+      var paint = function (f) {
+        var w = f.cv.clientWidth;
+        if (!w) return;
+        var dpr = window.devicePixelRatio || 1, n = cols(w), gap = 1, cell = (w - gap * (n - 1)) / n;
+        var h = Math.ceil(f.total / n) * (cell + gap);
+        if (f.cv.width !== Math.round(w * dpr) || f.cv.height !== Math.round(h * dpr)) {
+          f.cv.style.height = h + 'px'; f.cv.width = Math.round(w * dpr); f.cv.height = Math.round(h * dpr);
         }
-        return best || near;
+        var c = f.cv.getContext('2d');
+        c.setTransform(dpr, 0, 0, dpr, 0, 0); c.clearRect(0, 0, w, h);
+        c.fillStyle = token('--cell');
+        for (var i = 0; i < f.total; i++) c.fillRect((i % n) * (cell + gap), Math.floor(i / n) * (cell + gap), cell, cell);
+        var col = token(f.color);
+        c.fillStyle = col; c.globalAlpha = f.alpha; c.shadowColor = col; c.shadowBlur = f.glow;
+        for (var k = 0; k < f.shown; k++) c.fillRect((k % n) * (cell + gap), Math.floor(k / n) * (cell + gap), cell, cell);
+        c.shadowBlur = 0; c.globalAlpha = 1;
       };
-      var gather = function () {
-        var cols = getComputedStyle(grid).gridTemplateColumns.split(' ').length;
-        var rows = Math.ceil(n / cols);
-        var a = cells[0].getBoundingClientRect(), b = cells[1].getBoundingClientRect();
-        var step = b.left - a.left;
-        var shape = letter(rows, cols);
-        if (!shape) {
-          var bw = Math.ceil(Math.sqrt(k * 1.6)), bh = Math.ceil(k / bw), pts = [];
-          for (var s = 0; s < k; s++) pts.push([s % bw, Math.floor(s / bw)]);
-          shape = { pts: pts, w: bw, h: bh };
-        }
-        var c0 = Math.floor((cols - shape.w) / 2), r0 = Math.floor((rows - shape.h) / 2);
-        keep.forEach(function (idx, s) {
-          var x = (idx % cols), y = Math.floor(idx / cols);
-          var tx = c0 + shape.pts[s][0], ty = r0 + shape.pts[s][1];
-          cells[idx].style.transform = 'translate(' + (tx - x) * step + 'px,' + (ty - y) * step + 'px)';
+      var paintPanel = function (i) { paint(fields[i].waste); paint(fields[i].kept); };
+      var cur = 0, run = 0;
+      var show = function (i) {
+        cur = i;
+        tabs.forEach(function (t, j) { t.setAttribute('aria-selected', String(j === i)); t.tabIndex = j === i ? 0 : -1; });
+        panels.forEach(function (p, j) { p.hidden = j !== i; });
+      };
+      var parts = function (i) {
+        var p = panels[i];
+        return {
+          steps: [].slice.call(p.querySelectorAll('.session__step')),
+          typed: [].slice.call(p.querySelectorAll('[data-type]')),
+          counts: [].slice.call(p.querySelectorAll('[data-count]')),
+          auto: p.querySelector('.session__auto')
+        };
+      };
+      var texts = panels.map(function (_, i) { return parts(i).typed.map(function (el) { return el.textContent; }); });
+      var rest = function (i) {
+        run++;
+        var q = parts(i);
+        q.steps.forEach(function (s) { s.classList.remove('is-off'); });
+        q.typed.forEach(function (el, j) { el.textContent = texts[i][j]; el.classList.remove('is-typing'); });
+        q.counts.forEach(function (el) { el.textContent = fmt(+el.dataset.count); });
+        q.auto.classList.remove('is-pop');
+        fields[i].waste.shown = fields[i].waste.total; fields[i].kept.shown = fields[i].kept.total;
+        paintPanel(i);
+      };
+      var wait = function (ms, id) { return new Promise(function (r) { setTimeout(function () { r(id === run); }, ms); }); };
+      var type = function (el, text, id, speed) {
+        el.classList.add('is-typing');
+        return new Promise(function (done) {
+          var n = 0;
+          (function tick() {
+            if (id !== run) { el.classList.remove('is-typing'); return done(false); }
+            el.textContent = text.slice(0, ++n);
+            if (n < text.length) setTimeout(tick, speed);
+            else { el.classList.remove('is-typing'); done(true); }
+          })();
         });
       };
-      var final = function () {
-        burn.forEach(function (i) { cells[i].className = 'is-gone'; });
-        keep.forEach(function (i) { cells[i].className = 'is-kept'; });
-        count.textContent = fmt(kept);
-        label.textContent = 'Your agent asking the same question';
-        state.textContent = 'With Pixel';
-        fig.classList.add('is-done');
-        gather();
+      var fill = function (i, key, el, ms, id) {
+        var f = fields[i][key], target = +el.dataset.count;
+        return new Promise(function (done) {
+          var t0 = null;
+          var frame = function (t) {
+            if (id !== run) return done(false);
+            if (t0 === null) t0 = t;
+            var p = Math.min(1, (t - t0) / ms), e = 1 - Math.pow(1 - p, 2);
+            f.shown = Math.round(f.total * e); el.textContent = fmt(target * e); paint(f);
+            if (p < 1) requestAnimationFrame(frame); else done(true);
+          };
+          requestAnimationFrame(frame);
+        });
       };
-      var run = function () {
-        fig.classList.remove('is-done');
-        replay.hidden = true;
-        cells.forEach(function (c) { c.className = ''; c.style.transform = ''; });
-        count.textContent = fmt(full);
-        label.textContent = startLabel;
-        state.textContent = startState;
-        announce.textContent = '';
-        var t0 = null, dur = 1800;
-        var burnt = 0;
-        keep.forEach(function (i) { cells[i].className = 'is-kept is-waiting'; });
-        var tick = function (now) {
-          if (t0 === null) t0 = now;
-          var p = Math.min(1, (now - t0) / dur);
-          var e = 1 - Math.pow(1 - p, 3);
-          var target = Math.floor(e * burn.length);
-          for (; burnt < target; burnt++) cells[burn[burnt]].className = 'is-gone';
-          count.textContent = fmt(full - (full - kept) * e);
-          if (p < 1) return requestAnimationFrame(tick);
-          keep.forEach(function (i) { cells[i].className = 'is-kept'; });
-          label.textContent = 'Your agent asking the same question';
-          state.textContent = 'With Pixel';
-          fig.classList.add('is-done');
-          announce.textContent = said;
-          setTimeout(gather, 250);
-          setTimeout(function () { replay.hidden = false; }, 1400);
-        };
-        setTimeout(function () { requestAnimationFrame(tick); }, 900);
+      /* Steps, in document order: the coral read, the green command, the
+         "you typed nothing" line, the output lines, the sum. */
+      var play = function (i, chain) {
+        var id = ++run;
+        show(i);
+        var q = parts(i), f = fields[i];
+        q.steps.forEach(function (s) { s.classList.add('is-off'); });
+        q.typed.forEach(function (el) { el.textContent = ''; });
+        q.counts.forEach(function (el) { el.textContent = '0'; });
+        f.waste.shown = 0; f.kept.shown = 0; paintPanel(i);
+        var last = q.steps.length - 1;
+        var ok = function (fn) { return function (go) { return go ? fn() : false; }; };
+        return type(q.typed[0], texts[i][0], id, 28)
+          .then(ok(function () { q.steps[0].classList.remove('is-off'); return wait(200, id); }))
+          .then(ok(function () { return fill(i, 'waste', q.counts[0], 400 + f.waste.total / 2, id); }))
+          .then(ok(function () { return wait(300, id); }))
+          .then(ok(function () { q.steps[1].classList.remove('is-off'); return type(q.typed[1], texts[i][1], id, 24); }))
+          .then(ok(function () { return fill(i, 'kept', q.counts[1], 350, id); }))
+          .then(ok(function () { q.steps[2].classList.remove('is-off'); q.auto.classList.add('is-pop'); return wait(700, id); }))
+          .then(ok(function () {
+            var p = Promise.resolve(true);
+            q.steps.slice(3, last).forEach(function (s) { p = p.then(ok(function () { s.classList.remove('is-off'); return wait(120, id); })); });
+            return p;
+          }))
+          .then(ok(function () { q.steps[last].classList.remove('is-off'); return wait(2600, id); }))
+          .then(function (go) {
+            q.auto.classList.remove('is-pop');
+            if (go && chain && i + 1 < panels.length) return play(i + 1, true);
+          });
       };
-      replay.addEventListener('click', run);
-      var t;
-      addEventListener('resize', function () {
-        clearTimeout(t);
-        t = setTimeout(function () { if (fig.classList.contains('is-done')) gather(); }, 120);
+      tabs.forEach(function (t, i) {
+        t.addEventListener('click', function () { if (still) { show(i); rest(i); } else play(i, false); });
+        t.addEventListener('keydown', function (e) {
+          var d = { ArrowRight: 1, ArrowLeft: -1 }[e.key];
+          if (!d) return;
+          e.preventDefault();
+          var j = (i + d + tabs.length) % tabs.length;
+          tabs[j].focus(); tabs[j].click();
+        });
       });
-      if (matchMedia('(prefers-reduced-motion: reduce)').matches) return final();
-      // Burn only once the wall is on screen, and after the splash, so nobody misses it.
+      fig.querySelector('[data-session-replay]').addEventListener('click', function () { if (still) rest(cur); else play(cur, false); });
+      var t;
+      addEventListener('resize', function () { clearTimeout(t); t = setTimeout(function () { paintPanel(cur); }, 120); });
+      rest(0);
+      if (document.fonts && document.fonts.ready) document.fonts.ready.then(function () { paintPanel(cur); });
+      if (still) return;
       var start = function () {
-        if (!('IntersectionObserver' in window)) return run();
+        if (!('IntersectionObserver' in window)) return play(0, true);
         var seen = new IntersectionObserver(function (e) {
           if (!e[0].isIntersecting) return;
           seen.disconnect();
-          run();
-        }, { threshold: 0.5 });
-        seen.observe(grid);
+          play(0, true);
+        }, { threshold: 0.4 });
+        seen.observe(fig);
       };
       if (document.documentElement.classList.contains('splash')) addEventListener('pixel:splashdone', start, { once: true });
       else start();
@@ -1245,37 +1050,6 @@
       });
     })();
 
-    /* Videos play only while on screen, and never on their own under
-       reduced motion: those visitors get the poster (the finished state)
-       and the controls. */
-    var still = matchMedia('(prefers-reduced-motion: reduce)').matches;
-    var watch = function (video) {
-      if (still) { video.controls = true; return; }
-      if (!('IntersectionObserver' in window)) return;
-      new IntersectionObserver(function (e) {
-        var v = e[0].target;
-        v.dataset.visible = e[0].intersectionRatio >= 0.5 ? '1' : '';
-        if (v.dataset.visible && !v.closest('[hidden]') && v.dataset.ended !== '1') v.play().catch(function () {});
-        else v.pause();
-      }, { threshold: [0, 0.5, 1] }).observe(video);
-    };
-
-    /* Demo: waits for its Play button. Once started it gets the native
-       controls; at the end the button comes back as Replay. */
-    (function () {
-      var demo = document.querySelector('[data-demo]');
-      var btn = document.querySelector('[data-demo-play]');
-      if (!demo || !btn) return;
-      var label = btn.querySelector('span');
-      btn.addEventListener('click', function () {
-        demo.controls = true;
-        demo.currentTime = 0;
-        demo.play().catch(function () {});
-      });
-      demo.addEventListener('play', function () { btn.hidden = true; });
-      demo.addEventListener('ended', function () { label.textContent = 'Replay video'; btn.hidden = false; });
-    })();
-
     /* Install: the Script / Read it first / Homebrew / Your agent switch shows the lines of
        that variant (a line names every variant it belongs to) and sets what
        Copy all copies. */
@@ -1293,66 +1067,7 @@
       });
     })();
 
-    /* Dock: shown once the hero has left the viewport, hidden while the
-       Install or closing block (the same command, in full) is on screen. */
-    (function () {
-      var dock = document.querySelector('[data-dock]');
-      var hero = document.querySelector('.hero');
-      var covers = [document.getElementById('install'), document.querySelector('.closing')];
-      if (!dock || !hero || !('IntersectionObserver' in window)) return;
-      var seen = new Map();
-      var update = function () {
-        var show = !seen.get(hero) && !covers.some(function (c) { return seen.get(c); });
-        dock.hidden = false;
-        dock.classList.toggle('is-shown', show);
-        dock.inert = !show;
-      };
-      var io = new IntersectionObserver(function (entries) {
-        entries.forEach(function (e) { seen.set(e.target, e.isIntersecting); });
-        update();
-      });
-      [hero].concat(covers).forEach(function (el) { if (el) { seen.set(el, false); io.observe(el); } });
-    })();
 
-    /* Jobs: a tab list; a recording loads only when its tab is opened. */
-    (function () {
-      var root = document.querySelector('[data-jobs]');
-      if (!root) return;
-      var tabs = [].slice.call(root.querySelectorAll('[role="tab"]'));
-      var videos = [].slice.call(root.querySelectorAll('video'));
-      videos.forEach(watch);
-      var select = function (tab) {
-        tabs.forEach(function (t) {
-          var on = t === tab;
-          t.setAttribute('aria-selected', on);
-          t.tabIndex = on ? 0 : -1;
-          var panel = document.getElementById(t.getAttribute('aria-controls'));
-          panel.hidden = !on;
-          var video = panel.querySelector('video');
-          if (!video) return;
-          if (on && video.dataset.src) { video.src = video.dataset.src; video.removeAttribute('data-src'); }
-          if (on && !still) {
-            video.currentTime = 0;
-            // The panel just became visible, so its observer has not fired yet:
-            // judge the tab list's own visibility instead.
-            var r = root.getBoundingClientRect();
-            if (r.top < innerHeight / 2 && r.bottom > innerHeight / 2) video.play().catch(function () {});
-          }
-          if (!on) video.pause();
-        });
-      };
-      tabs.forEach(function (t, i) {
-        t.addEventListener('click', function () { select(t); });
-        t.addEventListener('keydown', function (e) {
-          var d = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[e.key];
-          if (!d) return;
-          e.preventDefault();
-          var next = tabs[(i + d + tabs.length) % tabs.length];
-          select(next);
-          next.focus();
-        });
-      });
-    })();
   </script>
 </body>
 </html>

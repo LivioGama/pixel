@@ -1,0 +1,46 @@
+# The hero's agent session: one tab per file, in tab order. `repo` names a
+# kept row of data/read_savings.toml, which gives the path, line count, the
+# two token estimates, the saving and the signature count; this file adds
+# only what the bench does not record. `lang` is the tab label, `project`
+# the name beside it. `sample` is four lines of `pixel list-signatures` on
+# that file at the row's pinned `commit`, in the tool's order, each as
+# "L <line>  <signature>":
+#
+#   curl -fsSL https://raw.githubusercontent.com/<repo>/<commit>/<path> -o f
+#   pixel list-signatures f --metrics off
+#
+# Checked 2026-09-30 with pixel 0.6.1 at the pinned commits (90, 60 and 66
+# signatures, the counts the bench recorded).
+
+[[file]]
+repo = "huggingface/transformers"
+lang = "Python"
+project = "Transformers"
+sample = [
+  "L  261  class Trainer:",
+  "L 1437  def train(",
+  "L 2077  def compute_loss(",
+  "L 2702  def evaluate(",
+]
+
+[[file]]
+repo = "vercel/next.js"
+lang = "TypeScript"
+project = "Next.js"
+sample = [
+  "L  330  abstract class Server<",
+  "L  465  public constructor(options: ServerOptions) {",
+  "L  866  public async handleRequest(",
+  "L 2202  public async render(",
+]
+
+[[file]]
+repo = "tokio-rs/tokio"
+lang = "Rust"
+project = "Tokio"
+sample = [
+  "L  101  pub(super) struct Worker {",
+  "L  519  fn run(worker: Arc<Worker>) {",
+  "L  647  fn run_task(&self, task: Notified, mut core: Box<Core>) -> ControlFlow<(), Box<Core>> {",
+  "L  839  fn park(&self, mut core: Box<Core>) -> Box<Core> {",
+]

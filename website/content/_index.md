@@ -1,4 +1,4 @@
 ---
 title: "Pixel"
-description: "A local code index for coding agents: query signatures, callers, task scope and Git history. File/outline volume comparisons and agent-trial limits are documented."
+description: "A local code index that gives coding agents a map of your repository and reduces whole-file reads. Try it on your own code; evidence and limits are documented."
 ---

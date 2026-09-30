@@ -41,59 +41,34 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 
 ## Where things live
 
-- `layouts/index.html`: the whole landing page, with its scripts inline at
-  the bottom. The hero opens on who Pixel is for (four agent marks and the
-  count of the rest, from `data/agents.toml`, which the Compatibility grid
-  also draws, each mark linking to its `/for/<slug>/` page), then a title
-  that names the pain and the mechanism and a lede with one figure only,
-  the kept files' median byte-volume reduction (tokens estimated as bytes ÷ 4).
-  The numbers band uses only that file/outline comparison. Under the call to action (the brew command, and beside it the
-  root README's "Let your agent install it" prompt, `$agentPrompt`, which
-  the Install terminal's "Your agent" tab copies too: keep the two texts in
-  step; no star button, the nav links GitHub) a quiet line states what a
-  visitor checks before pasting it: free and MIT, the platforms
-  `release.yml` builds, no account or telemetry, and `pixel uninstall`. A
-  successful copy there unhides the next step, which ends on `pixel audit`
-  so the visitor's first run prints their own number (`data-copy-next` in
-  the footer's copy script names the hint's id). The token wall draws one square per 25 tokens of a full file
-  read of a well-known file (`data/read_savings.toml`, the row marked
-  `wall`) and burns down to what the same
-  question costs through Pixel once it scrolls into view. A Without / With
-  Pixel chip names the side shown, the saving (`saved`, floored as the
-  stats round it) appears once the wall has burnt, and the caption quotes
-  the kept files' range and median; the survivors
-  gather into a P of exactly that many squares, built from the count by
-  the script, so one square always means 25 tokens. The order after the
-  hero names the cost, then shows before it proves: the Problem chapter
-  (three costs the visitor already pays, in coral; its one figure is the
-  wall's full read as a share of a context window, from
-  `layouts/partials/context-share.html`, the only place the window size is
-  written, which `/benchmarks/` quotes through `{{% read-savings "window" %}}`),
-  the scope example, the numbers band (with the `/savings/` estimate beside
-  the figures it scales), then the chapters of proof (Proof, Verify, How it
-  works with the six daily jobs under it, Teams, Compatibility,
-  Alternatives, Objections, Install). The Alternatives matrix, the heaviest
-  block, sits after Compatibility, for a visitor already weighing the
-  choice. Verify (`#your-number`) hands the proof to the
-  visitor: `pixel audit`, `pixel list-signatures` and `pixel token-savings`,
-  each beside the figure it printed (the first two restate "Measure it on
-  your own code" in `content/benchmarks.md`). The band compares whole files with signatures, not agent sessions.
-  Proof reports the Opus-with-hooks summary (no gain on its task) and
-  links its method and limits. Measurement versions belong in the benchmark
-  protocols, not repeated on the home page. The optional
-  `pixel classify` has a dedicated Decisions section on the home and its
-  fuller accuracy-and-latency comparison on `/benchmarks/`; it remains an
-  optional add-on, separate from the local index. The scope board
-  draws one pad per indexed file and routes a trace from each P0 pad to its
-  file name. The job tabs load each video only when opened, with captions that identify them as workflow illustrations. Videos never autoplay under reduced motion: the poster shows the
-  finished state and the controls are there.
-- Under the four "How it works" cards, the cold start figure: the time
-  from nothing to a full index of a large repository, beside a track of
-  one cell per 0.2 s of that run (the text index's share lit bright). It
-  restates the "Cold start on a large repository" table of
-  `content/benchmarks.md`: change the figure there first, then the value,
-  the legend and the `$indexCells` split in `layouts/index.html`. Current
-  times only, no before and after.
+- `layouts/index.html`: the landing page keeps the original explanatory
+  arc: hero promise and token wall, reading problem, scoping example,
+  read-volume evidence and agent-trial limits, own-repo checks
+  (`#your-number`), local mechanics and cold-start measurement (`#how`),
+  compatibility (`#agents`), questions (`#faq`), installation (`#install`)
+  and the closing map message. Hero, nav and closing share one primary
+  action: try Pixel on your repo. Installation stays in one terminal with
+  Script, Read it first, Homebrew and Your agent variants, beside a visual
+  setup sequence. Shell commands stay on one line and scroll within the
+  terminal on narrow screens. Own-repo checks stack vertically; specs use
+  three wider columns, then two, then labelled rows on mobile. Keep
+  `$agentPrompt` in step with the root README. The inspected script remains
+  linked to the released tag; never deploy while validating a branch.
+- The wall uses `data/read_savings.toml`; the evidence compares whole files
+  with signatures, not billed tokens or task outcomes. The scope board
+  uses `data/scope.toml`, with its recorded repo and commit visible. The
+  own-repo examples name their Requests commit and Pixel version, and link
+  `/benchmarks/` for methods and limits. The cold-start track restates that
+  page’s private Rails fresh-clone measurement (Apple M2, median of three
+  runs); refresh its figure, legend and cell split together.
+- Detailed specialist content lives on secondary pages: the alternatives
+  matrix is `partials/comparison-matrix.html`, rendered by `/vs/`; the
+  classifier example is `shortcodes/classify-example.html` on `/classify/`;
+  persona guidance is `/teams/`; workflow and Git recordings are
+  `shortcodes/workflow-jobs.html` on `/docs/`. Legacy home fragments
+  `#alternatives`, `#decisions`, `#teams`, `#jobs` and `#savings` link to
+  these destinations and navigate directly with JavaScript. Existing
+  problem, proof, own-repo, local, compatibility and install anchors stay.
 - At rest until the first scroll: the scroll-driven effects (the
   `data-reveal` fades, the assembling titles, the counting numbers) prime
   only what is still below the fold when the visitor first scrolls
@@ -109,17 +84,6 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   The text never leaves the DOM; no JavaScript, reduced motion or a
   missing Handjet leaves the titles static. The hero title keeps its own
   `materialize` animation, which follows the splash.
-- The "Alternatives" and "Teams" chapters restate `content/benchmarks.md`
-  (GitNexus, the well-known files, agent-trial limits). Alternatives keeps, in
-  the matrix, the row where each other tool wins; Teams gives each role (developer, lead,
-  harness engineer, CTO) three proofs, each a number or a command that
-  exists. Change a figure on the benchmarks page first, then in
-  `data/alternatives.toml` (the Alternatives cards and the `/vs/` pages)
-  or the Teams chapter (and `data/answers.toml`, whose build check names
-  the entry a changed figure leaves behind), then in the repository README's "Why" list and
-  `static/llms.txt`, whose "Evaluating Pixel against alternatives" section
-  gives the same results to an assistant comparing tools for its user and
-  links each `/vs/` page.
 - `data/alternatives.toml`: one entry per tool Pixel is compared with, read
   through `layouts/partials/alternatives.html` (placeholders such as
   `{kept.range}` or `{big.full}` filled from `data/read_savings.toml`, an
@@ -177,22 +141,18 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   `crates/pixel/tests/cli/docs_drift.rs` reads the pages and this file for
   `pixel …` commands, and fails when `static/llms.txt` ("Answers") misses a
   page or states another question than its `title`. Linked from the footer.
-- `data/voices.toml`: quotes from people who run Pixel, shown under the
-  Proof chapter's ledger. Nothing renders while the file holds no entry.
-  The invite for more sits under the Install block instead (an empty
-  list of quotes should not be what the Proof chapter points at, and the
-  report needs a few sessions anyway): it links a "Show and tell"
-  discussion prefilled with what a quote needs (repository, agent, the
-  `pixel token-savings` report, consent to be quoted); a reply moves to
-  this file only with its author's written yes.
-  Each entry is a real, named person who agreed in writing to be quoted;
-  the file's header lists the fields and the rules. A figure in a quote is
-  theirs, measured on their code, and says so in `measured`.
+- `data/voices.toml`: real, named people who agreed in writing to be
+  quoted. Quotes render under Proof only when entries exist (currently
+  empty). The install block invites reports through a prefilled Show and
+  tell discussion; a reply enters the data only with the author’s written
+  consent. Keep the measurement and consent rules in the file’s header.
 - The nav's GitHub star count shows only from `gh_stars_min` in
   `hugo.toml` up: a small count beside the brand argues against the page.
 - `data/objections.toml`: the "Fair questions" chapter, and the home's
   `FAQPage` JSON-LD, from one list (`layouts/partials/objections.html`
-  renders it for both, so the markup never says what the page does not).
+  renders the complete list for both, so the markup never says what the
+  page does not). Entries marked `comparison = true` also render on `/vs/`
+  with `comparisons = true`, beside the detailed matrix.
   Answers are HTML paragraphs; a figure that lives elsewhere is a
   placeholder (`{big.full}`, `{langs.count}`, `{bench}`…, listed at the top
   of the file) the partial fills in, and an unknown one fails the build.
@@ -224,8 +184,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   full read is replaced by signatures. Dollars value hypothetical input reduction
   at the chosen uncached price, not invoice savings; the observed range is not a
   confidence interval. The page links the agent trials' limitations instead. The page is labelled an estimate
-  everywhere, including `static/llms.txt`; it is linked from the home's
-  CTO card, `/benchmarks/`'s "Measure it on your own code" box and the
+  everywhere, including `static/llms.txt`; it is linked from `/teams/`, `/benchmarks/`'s "Measure it on your own code" box and the
   footer, not from the nav.
 - `content/benchmarks.md` opens on "Measure it on your own code": three
   commands, each run on a fresh clone of a third-party repository before it
@@ -259,11 +218,11 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   groups `/for/` by wiring, and the build fails on an agent with no page or
   an unknown wiring. No figure on a page unless it is on `/benchmarks/` for
   that agent: today only Claude Code's.
-- `data/scope.toml`: the real `pixel scope-task` run the hero grid replays.
+- `data/scope.toml`: the real `pixel scope-task` run the demonstration board replays.
   Refresh the task, the index size and every position together.
 - `data/read_savings.toml`: the well-known files `scripts/bench-read-savings.sh`
   measures (method in `docs/bench/read-savings.md`). The token wall, its
-  caption's range and median and the `/benchmarks/` table
+  evidence paragraph’s range and median, the `/benchmarks/` table
   (`layouts/shortcodes/read-savings.html`) and the `/savings/` estimate all read it: re-run the script
   and replace the rows, never one number by hand (the kept rows' count, range and median are computed once, in `layouts/partials/kept-rates.html`), then re-render the share
   card (`og/render.sh`), whose figures come from the wall's row.
@@ -329,14 +288,6 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 - `layouts/partials/icon.html`: the pixel icons, 8x8 bitmaps drawn in
   `currentColor`. Add one as a new row list; call it with
   `(dict "name" "star" "size" 16)`.
-- The agent demo never starts on its own: its poster is
-  `pixel-agent-demo-start.jpg`, the recording's first frame, which
-  `docs/motion/scripts/render.sh` writes beside the last-frame poster.
-- The dock (`[data-dock]`, end of `layouts/index.html`): the brew command
-  pinned to the bottom of the viewport once the hero has scrolled away,
-  hidden again while the Install or closing block, which carry the same
-  command, is on screen. Nothing is stored, so it returns on every visit;
-  without JavaScript it never shows.
 - `layouts/partials/splash.html`: the home's splash (pixels landing into
   the brand square, then the wordmark), about two seconds, skippable.
   `partials/head.html` decides it before the first paint: home only, once

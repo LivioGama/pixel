@@ -14,7 +14,7 @@
         <span>GitHub</span>
         <span class="nav__stars" title="GitHub stars" hidden>{{ partial "icon.html" (dict "name" "star" "size" 10) }}<span data-gh-stars="{{ .Site.Params.repo }}" data-gh-stars-min="{{ .Site.Params.gh_stars_min | default 0 }}"></span></span>
       </a>
-      <a class="nav__cta" href="{{ if .IsHome }}#install{{ else }}{{ "docs/#install" | relURL }}{{ end }}">Install</a>
+      <a class="nav__cta" href="{{ if .IsHome }}#your-number{{ else }}{{ "#your-number" | relURL }}{{ end }}">Try Pixel</a>
     </nav>
   </div>
 </header>
