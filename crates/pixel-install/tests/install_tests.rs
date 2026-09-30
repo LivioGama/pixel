@@ -1375,6 +1375,202 @@ fn uninstall_is_idempotent() {
     assert_eq!(r2.summary.red, 0, "no red steps on re-uninstall");
 }
 
+/// Every file under `root` whose name carries the `.pixel-bak.` marker, found
+/// by walking the whole tree: what is really on disk, independent of the
+/// directories uninstall chooses to look in.
+fn backups_on_disk(root: &Path) -> Vec<std::path::PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in fs::read_dir(dir).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if entry.file_name().to_string_lossy().contains(".pixel-bak.") {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(root, &mut out);
+    out.sort();
+    out
+}
+
+/// The paths of `rm -- '<a>' '<b>'` as a POSIX shell reads them: each word
+/// single-quoted, a quote inside one spelled `'\''`.
+fn rm_command_paths(command: &str) -> Vec<std::path::PathBuf> {
+    let words = command
+        .strip_prefix("rm -- ")
+        .unwrap_or_else(|| panic!("not an rm command: {command}"));
+    let mut paths = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    let mut chars = words.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => quoted = !quoted,
+            '\\' if !quoted => current.push(chars.next().expect("escaped char")),
+            ' ' if !quoted => paths.push(std::path::PathBuf::from(std::mem::take(&mut current))),
+            _ => current.push(c),
+        }
+    }
+    paths.push(std::path::PathBuf::from(current));
+    paths
+}
+
+fn backups_step(report: &InstallReport) -> &InstallStep {
+    report
+        .steps
+        .iter()
+        .find(|s| s.id == "backups")
+        .expect("backups step")
+}
+
+/// Uninstall keeps every backup install and uninstall wrote (each is the only
+/// undo of one write), but a user who never asked for them must learn they
+/// exist and how to drop them: the report lists exactly the backups on disk,
+/// and the command it prints removes them all, even from a home whose path a
+/// shell would split or cut at the quote.
+#[test]
+#[cfg(unix)]
+fn uninstall_reports_every_backup_it_leaves_with_a_command_that_removes_them() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path().join("it's my home");
+    fs::create_dir_all(home.join(".claude")).unwrap();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    fs::create_dir_all(home.join(".pi/agent")).unwrap();
+    let personal = [
+        (
+            ".claude/settings.json",
+            r#"{"model":"opus","hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo mine"}]}]}}"#,
+        ),
+        (
+            ".codex/hooks.json",
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"echo my-codex"}]}]}}"#,
+        ),
+        (".pi/agent/APPEND_SYSTEM.md", "# my pi system append\n"),
+        (".zshrc", "export MINE=1\n"),
+    ];
+    for (rel, text) in personal {
+        fs::write(home.join(rel), text).unwrap();
+    }
+    install(&InstallOptions {
+        repo: None,
+        home: Some(home.clone()),
+        executable_path: Some(fake_pixel_exe(&home)),
+        claude_executable: Some(fake_claude_exe(&home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .expect("install");
+
+    let report = uninstall(&UninstallOptions {
+        repo: None,
+        home: Some(home.clone()),
+        binary_path: Some(home.join("pixel")),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .expect("uninstall");
+
+    let on_disk = backups_on_disk(&home);
+    let backup_of = |rel: &str| {
+        let prefix = format!("{}.pixel-bak.", home.join(rel).display());
+        on_disk
+            .iter()
+            .any(|p| p.display().to_string().starts_with(&prefix))
+    };
+    for rel in [
+        ".claude/settings.json",
+        ".codex/hooks.json",
+        ".pi/agent/APPEND_SYSTEM.md",
+    ] {
+        assert!(backup_of(rel), "no backup of {rel} in {on_disk:?}");
+    }
+    let step = backups_step(&report);
+    assert_eq!(step.status, StepStatus::Green, "{step:?}");
+    assert_eq!(
+        step.summary,
+        format!(
+            "kept {} backup(s) of the files pixel rewrote, each the undo of one write; remove them once you no longer need them",
+            on_disk.len()
+        )
+    );
+    let command = step.detail.as_deref().expect("the command to remove them");
+    assert_eq!(rm_command_paths(command), on_disk, "{command}");
+
+    let out = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{command}: {out:?}");
+    assert_eq!(backups_on_disk(&home), Vec::<std::path::PathBuf>::new());
+    // Settings come back as equal JSON values (pixel rewrites them
+    // formatted), text files byte for byte.
+    for (rel, text) in personal {
+        let now = fs::read_to_string(home.join(rel)).unwrap();
+        if rel.ends_with(".json") {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&now).unwrap(),
+                serde_json::from_str::<serde_json::Value>(text).unwrap(),
+                "{rel} must be the user's own settings again, and survive the rm"
+            );
+        } else {
+            assert_eq!(
+                now, text,
+                "{rel} must be the user's own file again, and survive the rm"
+            );
+        }
+    }
+
+    let again = uninstall(&UninstallOptions {
+        repo: None,
+        home: Some(home.clone()),
+        binary_path: Some(home.join("pixel")),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .expect("second uninstall");
+    let step = backups_step(&again);
+    assert_eq!(step.summary, "no pixel backup left");
+    assert_eq!(step.detail, None);
+}
+
+/// `pixel uninstall --repo` names the backups it and `pixel install --repo`
+/// left inside the repository, the same way the global uninstall does.
+#[test]
+#[cfg(unix)]
+fn repo_uninstall_reports_the_backups_left_in_the_repository() {
+    let dir = TempDir::new().unwrap();
+    let home = dir.path().join("home");
+    let repo = dir.path().join("a 'repo'");
+    fs::create_dir_all(&home).unwrap();
+    fs::create_dir_all(&repo).unwrap();
+    fs::write(repo.join("AGENTS.md"), "# user instruction\n").unwrap();
+    install(&repo_install_options(&repo, &home)).expect("repo install");
+
+    let report = uninstall(&UninstallOptions {
+        home: Some(home.clone()),
+        repo: Some(repo.clone()),
+        ..Default::default()
+    })
+    .expect("repo uninstall");
+
+    let on_disk = backups_on_disk(&repo);
+    assert!(
+        on_disk.iter().any(|p| p.parent() == Some(repo.as_path())),
+        "the AGENTS.md rewrite keeps a backup at the root: {on_disk:?}"
+    );
+    let command = backups_step(&report).detail.as_deref().expect("command");
+    assert_eq!(rm_command_paths(command), on_disk, "{command}");
+    assert_eq!(
+        fs::read_to_string(repo.join("AGENTS.md")).unwrap(),
+        "# user instruction\n"
+    );
+}
+
 /// Dry-run uninstall does not modify the filesystem. The new install no
 /// longer writes managed blocks, so the fixture manually creates one (plus
 /// the pixel binary) for the dry-run to report against without touching.

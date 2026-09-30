@@ -1251,7 +1251,7 @@ pub(crate) fn shell_kind_from(shell: &str) -> ShellKind {
 /// the home being installed into, otherwise fish's default `~/.config/fish`.
 /// The containment test keeps an ambient `XDG_CONFIG_HOME` from redirecting an
 /// install that was explicitly aimed at another home (`--home`, tests).
-fn fish_config_dir(home: &Path) -> PathBuf {
+pub(crate) fn fish_config_dir(home: &Path) -> PathBuf {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
         let dir = PathBuf::from(&xdg);
         if !xdg.is_empty() && dir.starts_with(home) {
