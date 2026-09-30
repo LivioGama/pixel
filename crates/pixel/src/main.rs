@@ -1006,7 +1006,8 @@ enum Command {
         /// Preview what would be removed without making any changes.
         #[arg(long)]
         dry_run: bool,
-        /// Path to the pixel binary to remove (default: ~/.local/bin/pixel).
+        /// Path to the pixel binary to remove (default: the running binary,
+        /// left in place when Homebrew or mise installed it).
         #[arg(long)]
         binary_path: Option<PathBuf>,
         /// Shell whose wrapper block should be removed (default: the
@@ -4237,7 +4238,8 @@ struct ManagedRoot {
 
 /// The install trees `pixel upgrade` must not write into on its own:
 /// mise's `installs/` (`~/.local/share/mise`, or `$MISE_DATA_DIR`) and the
-/// Homebrew Cellars (`/opt/homebrew`, `/usr/local`, or `$HOMEBREW_CELLAR`
+/// Homebrew Cellars (`/opt/homebrew`, `/usr/local`, Linuxbrew's
+/// `/home/linuxbrew/.linuxbrew`, or `$HOMEBREW_CELLAR`
 /// that `brew shellenv` exports). Roots are canonicalized when they exist
 /// so they compare against a resolved binary path (`/tmp` is
 /// `/private/tmp` on macOS).
@@ -4256,7 +4258,13 @@ fn package_manager_roots(
             manager: ManagedBy::Mise,
         });
     }
-    for cellar in ["/opt/homebrew/Cellar", "/usr/local/Cellar"] {
+    // Linuxbrew's default prefix: `$HOMEBREW_CELLAR` is set only where `brew
+    // shellenv` ran, and a shell without it still runs the Cellar binary.
+    for cellar in [
+        "/opt/homebrew/Cellar",
+        "/usr/local/Cellar",
+        "/home/linuxbrew/.linuxbrew/Cellar",
+    ] {
         roots.push(ManagedRoot {
             root: PathBuf::from(cellar),
             manager: ManagedBy::Homebrew,
@@ -4648,7 +4656,7 @@ mod upgrade_target_tests {
     }
 
     /// The trees a bare upgrade must not write into: mise's default and
-    /// relocated `installs/`, both Homebrew Cellars, and the Cellar
+    /// relocated `installs/`, the macOS and Linuxbrew Cellars, and the Cellar
     /// `brew shellenv` exports. An unset or empty variable adds nothing
     /// (an empty `HOMEBREW_CELLAR` would otherwise make `""` a root).
     #[test]
@@ -4661,6 +4669,10 @@ mod upgrade_target_tests {
                 (home.join(".local/share/mise/installs"), "mise"),
                 (PathBuf::from("/opt/homebrew/Cellar"), "Homebrew"),
                 (PathBuf::from("/usr/local/Cellar"), "Homebrew"),
+                (
+                    PathBuf::from("/home/linuxbrew/.linuxbrew/Cellar"),
+                    "Homebrew"
+                ),
             ]
         );
         let empty = std::ffi::OsStr::new("");
@@ -4675,7 +4687,7 @@ mod upgrade_target_tests {
         ));
         assert!(with_env.contains(&(PathBuf::from("/nonexistent-mise/installs"), "mise")));
         assert!(with_env.contains(&(PathBuf::from("/nonexistent-cellar"), "Homebrew")));
-        assert_eq!(with_env.len(), 5);
+        assert_eq!(with_env.len(), 6);
     }
 
     fn target(path: PathBuf, explicit: bool) -> UpgradeTarget {
@@ -6878,6 +6890,7 @@ fn run_command(
             let report =
                 pixel_install::uninstall::uninstall(&pixel_install::uninstall::UninstallOptions {
                     binary_path,
+                    running_binary: std::env::current_exe().ok(),
                     dry_run,
                     shell,
                     wrappers_only,
