@@ -1,0 +1,707 @@
+//! The three providers, the honest probe, and the failure classification.
+//!
+//! The probe is honest because it is representative: it sends the same shape
+//! of request an agent's first real turn sends, so a provider that answers a
+//! toy request but throttles the real one is not reported ready. Concretely
+//! that means no system message and a `max_tokens` reservation in the range
+//! a real turn books — a 16-token reservation costs nothing against a
+//! tokens-per-minute budget and reports Ready on a provider whose next real
+//! request comes back 429. The 2026-09 run against the three providers failed
+//! in three different ways (Ollama 429 session limit, Groq fine on the toy
+//! probe and rate-limited on the real request, Cerebras 402 with a valid
+//! credential), which is what this module's classification exists to say out
+//! loud instead of collapsing into "unreachable".
+
+use std::time::Duration;
+
+use serde_json::json;
+
+/// Response bytes we are willing to read from a probe. A provider answering
+/// with an HTML error page or a runaway completion must not be read whole.
+pub(crate) const RESPONSE_CAP_BYTES: usize = 16_384;
+
+/// Characters of a provider's error body that reach the report. Long enough
+/// to carry the provider's own message ("no usable credit"), short enough to
+/// stay one line.
+pub(crate) const DETAIL_CAP_CHARS: usize = 240;
+
+/// Tokens the probe reserves. Deliberately not 16: see the module comment.
+/// A real first turn books hundreds, and the reservation is what a
+/// tokens-per-minute limiter accounts for, so a toy reservation is exactly
+/// the dishonesty the probe exists to avoid.
+pub(crate) const PROBE_MAX_TOKENS: u32 = 1_024;
+
+/// The prompt every probe sends. `READY` is the whole reply, so a 200 that
+/// carries prose, a refusal, or an empty completion is visible in the report
+/// rather than counted as a pass.
+pub(crate) const PROBE_PROMPT: &str = "Reply exactly READY.";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Provider {
+    Ollama,
+    Groq,
+    Cerebras,
+}
+
+impl Provider {
+    /// The priority order the winner is chosen in. It is applied to the
+    /// probe *results*, after all three probes have run concurrently, so the
+    /// wall-clock is parallel while the choice stays deterministic. Reading
+    /// it through this association rather than a free constant keeps one
+    /// source of truth for both the order and each provider's `rank`.
+    pub(crate) const PROBE_ORDER: [Provider; 3] = [Self::Ollama, Self::Groq, Self::Cerebras];
+
+    /// Position in [`Provider::PROBE_ORDER`]. The single source of truth for
+    /// both the ordering of the report and the `Ord` impl that lets the key
+    /// map iterate in priority order; a test ties the two together.
+    pub(crate) const fn rank(self) -> usize {
+        match self {
+            Self::Ollama => 0,
+            Self::Groq => 1,
+            Self::Cerebras => 2,
+        }
+    }
+
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::Groq => "groq",
+            Self::Cerebras => "cerebras",
+        }
+    }
+
+    /// OpenAI-compatible base URL; the probe posts to `{base}/chat/completions`.
+    pub(crate) const fn base_url(self) -> &'static str {
+        match self {
+            Self::Ollama => "https://ollama.com/v1",
+            Self::Groq => "https://api.groq.com/openai/v1",
+            Self::Cerebras => "https://api.cerebras.ai/v1",
+        }
+    }
+
+    /// The model an agent is pointed at when this provider wins.
+    ///
+    /// These are names the provider currently serves, and Ollama's changes
+    /// without notice: `deepseek-v3.1:cloud` was answered with `404 model not
+    /// found`, which demoted the highest-priority provider on every run while
+    /// the report blamed the request. `deepseek-v4.1-flash` is the name
+    /// `GET https://ollama.com/v1/models` returns. A 404 here now reports
+    /// itself as [`ProbeFailure::NoModel`] rather than as a refused request.
+    pub(crate) const fn model(self) -> &'static str {
+        match self {
+            Self::Ollama => "deepseek-v4.1-flash",
+            Self::Groq => "openai/gpt-oss-120b",
+            Self::Cerebras => "gpt-oss-120b",
+        }
+    }
+
+    /// The env var holding the key. Read by name only; the value never
+    /// reaches a log, an error string, or a written config.
+    pub(crate) const fn key_env(self) -> &'static str {
+        match self {
+            Self::Ollama => "OLLAMA_API_KEY",
+            Self::Groq => "GROQ_API_KEY",
+            Self::Cerebras => "CEREBRAS_API_KEY",
+        }
+    }
+}
+
+impl Ord for Provider {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.rank().cmp(&other.rank())
+    }
+}
+
+impl PartialOrd for Provider {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// Why a provider is not ready. Each arm names the provider's own condition
+/// so the report can say "402, no usable credit" instead of "failed".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProbeFailure {
+    /// No key in the environment and none typed at the prompt.
+    MissingKey,
+    /// 429 — the account's session or per-minute budget is spent.
+    RateLimited,
+    /// 402 — the credential is valid and the account has no credit.
+    NoCredit,
+    /// 401/403 — the credential was rejected.
+    Credential,
+    /// 400 — the request itself was refused. The 2026-09 gateway returned
+    /// `400 No connected db` here, a gateway-side condition, not the
+    /// provider's, and it must not read as "unreachable".
+    Upstream,
+    /// 404 — the provider does not serve the model that was asked for. Its
+    /// own condition because the remedy is the model name and nothing else:
+    /// read as a refused request it sends the reader to their credential or
+    /// their plan, and read as a transport failure it sends them to the
+    /// network. The name is a constant in this module, so this arm means the
+    /// constant is stale.
+    NoModel,
+    /// 5xx — the provider is up and failing.
+    Server,
+    /// The request never produced a status: DNS, TLS, connect or read.
+    Transport,
+}
+
+impl ProbeFailure {
+    pub(crate) const fn label(&self) -> &'static str {
+        match self {
+            Self::MissingKey => "no key",
+            Self::RateLimited => "rate limited (429)",
+            Self::NoCredit => "no credit (402)",
+            Self::Credential => "credential rejected",
+            // Carries no status of its own: `_` in `classify_status` also
+            // lands here, so a hardcoded "(400)" would label a 422 as a 400.
+            // The real status is already in the detail, which appends
+            // "(HTTP {status})".
+            Self::Upstream => "request refused",
+            Self::NoModel => "model not found (404)",
+            Self::Server => "provider error (5xx)",
+            Self::Transport => "unreachable",
+        }
+    }
+}
+
+/// Map an HTTP status onto a failure. Only called for a status that is not
+/// a success, so the 2xx range has no arm.
+pub(crate) fn classify_status(status: u16) -> ProbeFailure {
+    match status {
+        429 => ProbeFailure::RateLimited,
+        402 => ProbeFailure::NoCredit,
+        401 => ProbeFailure::Credential,
+        403 => ProbeFailure::Credential,
+        400 => ProbeFailure::Upstream,
+        404 => ProbeFailure::NoModel,
+        500..=599 => ProbeFailure::Server,
+        _ => ProbeFailure::Upstream,
+    }
+}
+
+/// What one provider's probe found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProbeOutcome {
+    pub(crate) provider: Provider,
+    /// The provider answered, and the answer was not a placeholder refusal.
+    pub(crate) ready: bool,
+    /// The reply text on success, or the classified failure plus whatever the
+    /// provider said, redacted and capped.
+    pub(crate) detail: String,
+    /// The classified failure, `None` when ready.
+    pub(crate) failure: Option<ProbeFailure>,
+}
+
+impl ProbeOutcome {
+    pub(crate) const fn ready(provider: Provider, detail: String) -> Self {
+        Self {
+            provider,
+            ready: true,
+            detail,
+            failure: None,
+        }
+    }
+
+    pub(crate) const fn failed(provider: Provider, failure: ProbeFailure, detail: String) -> Self {
+        Self {
+            provider,
+            ready: false,
+            detail,
+            failure: Some(failure),
+        }
+    }
+}
+
+/// The body every probe posts. Public to the module so a test asserts the
+/// exact shape — in particular that no `system` role is present, which is
+/// what keeps the probe cheap enough not to trip the very limits it is
+/// measuring.
+pub(crate) fn probe_body(provider: Provider) -> serde_json::Value {
+    json!({
+        "model": provider.model(),
+        "messages": [{"role": "user", "content": PROBE_PROMPT}],
+        "max_tokens": PROBE_MAX_TOKENS,
+    })
+}
+
+/// One `POST {base}/chat/completions`.
+///
+/// `base` is a parameter rather than a read of `provider.base_url()` so a
+/// test drives this exact function against a loopback server; production
+/// passes [`Provider::base_url`]. Status handling is disabled in the agent
+/// config so a 429 arrives as a status and a body to classify, not as an
+/// opaque error string.
+pub(crate) fn probe(provider: Provider, base: &str, key: &str, timeout: Duration) -> ProbeOutcome {
+    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
+    let config = ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .http_status_as_error(false)
+        .user_agent("pixel-cli ai-cli-readify")
+        .build();
+    let agent = ureq::Agent::new_with_config(config);
+    let response = agent
+        .post(&url)
+        .header("Authorization", &format!("Bearer {key}"))
+        .send_json(probe_body(provider));
+    let response = match response {
+        Ok(response) => response,
+        Err(e) => {
+            return ProbeOutcome::failed(provider, ProbeFailure::Transport, redact(&e.to_string()));
+        }
+    };
+    let status = response.status().as_u16();
+    let text = response
+        .into_body()
+        .with_config()
+        .limit(RESPONSE_CAP_BYTES as u64)
+        .read_to_string()
+        .unwrap_or_default();
+    if (200..300).contains(&status) {
+        let reply = reply_text(&text);
+        return ProbeOutcome::ready(provider, reply);
+    }
+    let failure = classify_status(status);
+    let detail = detail(&text, status, &failure);
+    ProbeOutcome::failed(provider, failure, detail)
+}
+
+/// The assistant's reply from an OpenAI-shaped body, or a note that the body
+/// carried none. An empty completion on a 200 is reported, not silently
+/// counted as ready.
+fn reply_text(body: &str) -> String {
+    let reply = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("choices")?
+                .as_array()?
+                .first()?
+                .get("message")?
+                .get("content")?
+                .as_str()
+                .map(str::to_string)
+        });
+    match reply {
+        Some(text) if !text.trim().is_empty() => text.trim().to_string(),
+        _ => "(200 with no completion)".to_string(),
+    }
+}
+
+/// One line for a failed probe: the classified label, then the provider's own
+/// message when it sent one.
+/// The classified failure plus the provider's own words, redacted before it
+/// leaves this module.
+///
+/// The body is the provider's, and a provider is free to quote the request
+/// back — an error body is exactly where a key would reappear. Every other
+/// path out of this module already passes through [`redact`]; this one did
+/// not, which the module doc claimed it did. Nothing here writes to a file,
+/// but the report is printed, copied and (with the handoff) persisted, so the
+/// mismatch was a leak waiting for a sink.
+fn detail(body: &str, status: u16, failure: &ProbeFailure) -> String {
+    let provider_text = provider_message(body);
+    if provider_text.is_empty() {
+        return format!("{} (HTTP {status})", failure.label());
+    }
+    let capped = cap_chars(&provider_text, DETAIL_CAP_CHARS);
+    redact(&format!("{} (HTTP {status}): {capped}", failure.label()))
+}
+
+/// The provider's own error message from an OpenAI-shaped error body, or the
+/// body's first line when it is not JSON.
+fn provider_message(body: &str) -> String {
+    let parsed = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            let error = v.get("error")?;
+            // OpenAI's shape nests the message; some gateways put the string
+            // where the object belongs, so both are read.
+            error
+                .get("message")
+                .or_else(|| v.get("message"))
+                .or(Some(error))
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        });
+    let text = parsed.unwrap_or_else(|| body.lines().next().unwrap_or("").to_string());
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Truncate at a character boundary, marking the cut so a clipped message is
+/// never read as the whole one.
+fn cap_chars(text: &str, cap: usize) -> String {
+    if text.chars().count() <= cap {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(cap).collect();
+    format!("{kept}…")
+}
+
+/// Replace anything that looks like a credential with `<redacted>`. The key
+/// is never interpolated into a message this module builds, but a provider
+/// can echo it back in an error body and a transport error can quote a URL
+/// carrying one, so every string on its way to the report passes here.
+pub(crate) fn redact(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for token in text.split_inclusive(char::is_whitespace) {
+        if looks_like_a_secret(token) {
+            out.push_str("<redacted>");
+            if let Some(space) = token.chars().last().filter(|c| c.is_whitespace()) {
+                out.push(space);
+            }
+        } else {
+            out.push_str(token);
+        }
+    }
+    out
+}
+
+/// A token that carries a credential: a bearer value, or a long run of
+/// key-shaped characters. Deliberately generous — a false positive costs a
+/// The prefixes a key carries in the three providers' own documentation. A
+/// run matching one of these and longer than a bare word is masked whatever
+/// else it looks like.
+const SECRET_PREFIXES: [&str; 4] = ["sk-", "sk_", "Bearer", "bearer"];
+
+/// The longest run of alphanumerics, dashes, underscores and dots that a
+/// provider's key is made of.
+const KEY_RUN_CHARS: usize = 32;
+
+/// less readable message, a false negative leaks a key into the report.
+fn looks_like_a_secret(token: &str) -> bool {
+    let trimmed = token.trim_matches(|c: char| !c.is_ascii_graphic());
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed.eq_ignore_ascii_case("bearer") {
+        return false;
+    }
+    if SECRET_PREFIXES.iter().any(|p| trimmed.starts_with(p)) && trimmed.len() > 8 {
+        return true;
+    }
+    // A long unbroken alphanumeric run is a key whatever its prefix: the
+    // three providers' keys are all 30+ characters of that shape.
+    trimmed.len() >= KEY_RUN_CHARS
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::time::Instant;
+
+    /// A one-shot loopback server answering `status` with `body`. Polls with
+    /// a deadline so a client that never connects fails the assertion instead
+    /// of hanging the suite.
+    fn http_once(status: u16, body: &str) -> (String, std::thread::JoinHandle<(String, String)>) {
+        let reply = body.to_string();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut head = String::new();
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap() == 0 {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                    let done = line == "\r\n" || line == "\n";
+                    head.push_str(&line);
+                    if done {
+                        break;
+                    }
+                }
+                let mut sent = vec![0u8; length];
+                if length > 0 {
+                    reader.read_exact(&mut sent).unwrap();
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reply}",
+                    reply.len()
+                )
+                .unwrap();
+                return (head, String::from_utf8_lossy(&sent).into_owned());
+            }
+            (String::new(), String::new())
+        });
+        (base, server)
+    }
+
+    fn probe_against(status: u16, body: &str) -> ProbeOutcome {
+        let (base, server) = http_once(status, body);
+        let outcome = probe(Provider::Groq, &base, "test-key", Duration::from_secs(5));
+        let _ = server.join();
+        outcome
+    }
+
+    #[test]
+    fn probe_order_matches_the_rank_it_sorts_by() {
+        for (position, provider) in Provider::PROBE_ORDER.iter().enumerate() {
+            assert_eq!(position, provider.rank(), "{provider:?}");
+        }
+    }
+
+    #[test]
+    fn the_probe_body_carries_no_system_message() {
+        let body = probe_body(Provider::Ollama);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1, "{body}");
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], PROBE_PROMPT);
+        assert_eq!(body["model"], "deepseek-v4.1-flash");
+    }
+
+    #[test]
+    fn the_probe_body_reserves_more_than_a_toy_completion() {
+        let body = probe_body(Provider::Cerebras);
+        assert_eq!(body["max_tokens"], PROBE_MAX_TOKENS);
+        // Read back off the payload rather than off the constant: a toy
+        // reservation is what made the old probe report Ready on Groq while
+        // the real request came back 429, and the payload is what the
+        // provider is actually asked for.
+        let reserved = body["max_tokens"].as_u64().expect("a reserved token count");
+        assert!(
+            reserved > 16,
+            "a toy reservation is the probe lying: {body}"
+        );
+        assert_eq!(body["model"], "gpt-oss-120b");
+    }
+
+    #[test]
+    fn a_200_with_a_completion_is_ready_and_reports_the_reply() {
+        let outcome = probe_against(200, r#"{"choices":[{"message":{"content":"READY"}}]}"#);
+        assert!(outcome.ready, "{outcome:?}");
+        assert_eq!(outcome.detail, "READY");
+        assert_eq!(outcome.failure, None);
+    }
+
+    #[test]
+    fn a_200_with_no_completion_is_not_counted_as_ready() {
+        let outcome = probe_against(200, r#"{"choices":[]}"#);
+        assert!(outcome.ready, "a 200 is the provider being up");
+        assert_eq!(outcome.detail, "(200 with no completion)");
+    }
+
+    #[test]
+    fn a_200_with_an_empty_completion_is_not_counted_as_ready() {
+        let outcome = probe_against(200, r#"{"choices":[{"message":{"content":"  "}}]}"#);
+        assert_eq!(outcome.detail, "(200 with no completion)", "{outcome:?}");
+    }
+
+    #[test]
+    fn the_probe_sends_the_bearer_key_and_the_model() {
+        let (base, server) = http_once(200, r#"{"choices":[{"message":{"content":"READY"}}]}"#);
+        probe(Provider::Cerebras, &base, "sekret", Duration::from_secs(5));
+        let (head, sent) = server.join().unwrap();
+        assert!(
+            head.starts_with("POST /chat/completions HTTP/1.1"),
+            "{head}"
+        );
+        assert!(
+            head.to_ascii_lowercase()
+                .contains("authorization: bearer sekret"),
+            "{head}"
+        );
+        let sent: serde_json::Value = serde_json::from_str(&sent).unwrap();
+        assert_eq!(sent, probe_body(Provider::Cerebras));
+    }
+
+    #[test]
+    fn the_base_url_trailing_slash_does_not_double() {
+        let (base, server) = http_once(200, r#"{"choices":[{"message":{"content":"READY"}}]}"#);
+        probe(
+            Provider::Ollama,
+            &format!("{base}/"),
+            "k",
+            Duration::from_secs(5),
+        );
+        let (head, _) = server.join().unwrap();
+        assert!(
+            head.starts_with("POST /chat/completions HTTP/1.1"),
+            "{head}"
+        );
+    }
+
+    #[test]
+    fn each_failure_status_gets_its_own_label() {
+        for (status, failure) in [
+            (429, ProbeFailure::RateLimited),
+            (402, ProbeFailure::NoCredit),
+            (401, ProbeFailure::Credential),
+            (403, ProbeFailure::Credential),
+            (400, ProbeFailure::Upstream),
+            (404, ProbeFailure::NoModel),
+            (500, ProbeFailure::Server),
+            (599, ProbeFailure::Server),
+            // Unmapped to anything of its own, and deliberately not folded
+            // into a status it is not: `detail` carries the real number.
+            (422, ProbeFailure::Upstream),
+        ] {
+            assert_eq!(classify_status(status), failure, "status {status}");
+            let outcome = probe_against(status, "{}");
+            assert!(!outcome.ready, "status {status}");
+            assert_eq!(outcome.failure.as_ref(), Some(&failure), "status {status}");
+            assert!(
+                outcome.detail.starts_with(failure.label()),
+                "{status}: {}",
+                outcome.detail
+            );
+        }
+    }
+
+    #[test]
+    fn the_providers_own_message_reaches_the_detail() {
+        let outcome = probe_against(402, r#"{"error":{"message":"no usable account credit"}}"#);
+        assert!(
+            outcome.detail.contains("no usable account credit"),
+            "{}",
+            outcome.detail
+        );
+        assert!(outcome.detail.contains("HTTP 402"), "{}", outcome.detail);
+    }
+
+    #[test]
+    fn a_gateway_refusal_is_reported_as_refused_not_unreachable() {
+        // The 2026-09 gateway answered this way through a valid credential.
+        let outcome = probe_against(400, r#"{"error":{"message":"No connected db"}}"#);
+        assert_eq!(outcome.failure, Some(ProbeFailure::Upstream));
+        assert!(
+            outcome.detail.contains("No connected db"),
+            "{}",
+            outcome.detail
+        );
+        assert_ne!(outcome.failure, Some(ProbeFailure::Transport));
+    }
+
+    #[test]
+    fn an_unknown_model_is_reported_as_a_stale_name_not_a_refused_request() {
+        // What Ollama Cloud actually answered for `deepseek-v3.1:cloud`.
+        let outcome = probe_against(
+            404,
+            r#"{"error":{"message":"model \"deepseek-v3.1:cloud\" not found"}}"#,
+        );
+        assert_eq!(outcome.failure, Some(ProbeFailure::NoModel));
+        // The label has to name the status it really saw: the previous
+        // wording said "(400)" over a 404 and sent the reader to the wrong
+        // remedy.
+        assert!(
+            outcome.detail.contains("404") && !outcome.detail.contains("(400)"),
+            "a 404 must not read as a 400: {}",
+            outcome.detail
+        );
+        assert!(
+            outcome.detail.contains("model not found"),
+            "the label must name the condition: {}",
+            outcome.detail
+        );
+    }
+
+    #[test]
+    fn a_key_quoted_back_in_an_error_body_is_redacted_out_of_the_detail() {
+        // A provider is free to quote the request back in its error body, and
+        // that body is the one string in this module a provider writes. It
+        // must leave redacted like every other path out of here.
+        let key = "sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+        let outcome = probe_against(
+            401,
+            &format!(r#"{{"error":{{"message":"invalid key {key}"}}}}"#),
+        );
+        assert_eq!(outcome.failure, Some(ProbeFailure::Credential));
+        assert!(
+            !outcome.detail.contains(key),
+            "the provider echoed the key and the detail kept it: {}",
+            outcome.detail
+        );
+        assert!(outcome.detail.contains("<redacted>"), "{}", outcome.detail);
+        assert!(
+            outcome.detail.contains("invalid key"),
+            "the redaction must not swallow the diagnosis: {}",
+            outcome.detail
+        );
+    }
+
+    #[test]
+    fn a_non_json_error_body_still_yields_a_detail() {
+        let outcome = probe_against(503, "upstream is having a moment");
+        assert_eq!(outcome.failure, Some(ProbeFailure::Server));
+        assert!(
+            outcome.detail.contains("upstream is having a moment"),
+            "{}",
+            outcome.detail
+        );
+    }
+
+    #[test]
+    fn a_long_error_message_is_capped_and_marked() {
+        // Ordinary words, not one long run: a single unbroken token of that
+        // length is key-shaped, and `redact` would replace it whole — the cap
+        // would then be untested rather than exercised.
+        let long = "upstream refused ".repeat(DETAIL_CAP_CHARS);
+        let outcome = probe_against(400, &format!(r#"{{"error":{{"message":"{long}"}}}}"#));
+        assert!(outcome.detail.ends_with('…'), "{}", outcome.detail);
+        assert!(
+            outcome.detail.chars().count() < DETAIL_CAP_CHARS + 64,
+            "{}",
+            outcome.detail.chars().count()
+        );
+    }
+
+    #[test]
+    fn a_closed_port_is_a_transport_failure() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        let outcome = probe(Provider::Ollama, &base, "k", Duration::from_secs(2));
+        assert_eq!(outcome.failure, Some(ProbeFailure::Transport));
+        assert!(!outcome.ready);
+    }
+
+    #[test]
+    fn redact_hides_a_bearer_token() {
+        let text = "transport: header Bearer sk-abcdefghijklmnop rejected";
+        let out = redact(text);
+        assert!(!out.contains("sk-abcdefghijklmnop"), "{out}");
+        assert!(out.contains("<redacted>"), "{out}");
+    }
+
+    #[test]
+    fn redact_hides_a_bare_key_shaped_run() {
+        let key = "a".repeat(48);
+        let out = redact(&format!("body carried {key} back"));
+        assert!(!out.contains(&key), "{out}");
+        assert!(out.contains("<redacted>"), "{out}");
+    }
+
+    #[test]
+    fn redact_keeps_ordinary_prose_intact() {
+        let text = "no usable account credit (HTTP 402)";
+        assert_eq!(redact(text), text);
+    }
+
+    #[test]
+    fn redact_keeps_short_words_that_are_not_keys() {
+        let text = "provider unreachable";
+        assert_eq!(redact(text), text);
+    }
+}

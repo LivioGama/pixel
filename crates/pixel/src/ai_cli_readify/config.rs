@@ -1,0 +1,541 @@
+//! The per-agent config writers.
+//!
+//! Each writer merges rather than replaces: an agent's config holds the
+//! user's own settings (Codex's `developer_instructions`, the Claude hooks
+//! `pixel install` writes, Antigravity's workspace trust list), and a
+//! readiness run must not be the thing that deletes them. Every write is a
+//! read-modify-write through a parser, to a temp file, then a rename — an
+//! agent may be reading the file while we rewrite it.
+
+use std::{
+    fs,
+    io::{self},
+    path::Path,
+};
+
+use serde_json::{Map, Value};
+use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
+
+use super::agents::DEFAULT_CLAUDE_MODEL;
+use super::provider::Provider;
+
+/// Codex's provider name for the recording route. One literal name across
+/// all three providers: the apply path rewrites one block, and a Codex
+/// reinstall never has to guess which of three names is current.
+pub(crate) const MODEL_PROVIDER_NAME: &str = "recording_cloud";
+
+/// Where the recording gateway listens. Claude and Antigravity are pointed
+/// at it; Codex goes straight at the provider's own OpenAI-compatible base.
+pub(crate) const GATEWAY_URL: &str = "http://127.0.0.1:4000";
+
+/// The env var the gateway reads its own bearer token from — the name
+/// `gateway.yaml` spells (`master_key: os.environ/RECORDING_GATEWAY_KEY`),
+/// so the report tells the user to export a variable their gateway actually
+/// reads. A name that resolves to nothing exports an empty token, which
+/// reaches the proxy unauthenticated and looks exactly like a wrong key.
+///
+/// It belongs to the **shell**, not to a config file: Claude Code reads a
+/// settings-file `env` value directly from the file without expanding it,
+/// and a settings-file value then replaces the same variable inherited from
+/// the shell — so writing `${RECORDING_GATEWAY_KEY}` there injects that
+/// literal string and clobbers the real credential. The apply path leaves
+/// both this and the header to the shell and names them in its report
+/// instead.
+pub(crate) const GATEWAY_TOKEN_ENV: &str = "RECORDING_GATEWAY_KEY";
+
+/// The env var Claude Code reads extra request headers from. Claude
+/// authenticates against the Anthropic API with its own `x-api-key`, and a
+/// run pointed at the gateway with the base URL alone presents neither that
+/// nor the proxy's key, so it arrives unauthenticated.
+///
+/// The header is what the reference exports, and it works: the route accepts
+/// `x-litellm-api-key: Bearer …`, `x-api-key: …` and `Authorization: Bearer
+/// …` alike (all answered 200 on 2026-09-30; no credential at all answered
+/// 500). It is not the *only* one that works — `ANTHROPIC_AUTH_TOKEN` alone
+/// authenticates — which is why the report names both.
+pub(crate) const CLAUDE_CUSTOM_HEADERS_ENV: &str = "ANTHROPIC_CUSTOM_HEADERS";
+
+/// The value [`CLAUDE_CUSTOM_HEADERS_ENV`] must carry. It resolves nothing
+/// in a config file, so this is the exact line the report tells the user to
+/// export — with the token left as a shell expansion, which is where that
+/// expansion actually happens.
+pub(crate) fn gateway_header() -> String {
+    format!("x-litellm-api-key: Bearer ${{{GATEWAY_TOKEN_ENV}}}")
+}
+
+/// The model slots Claude Code reads. All four are pinned to the alias the
+/// probe uses, and `CLAUDE_SUBAGENT_MODEL_ENV` with them: the gateway's model
+/// list carries that alias, not Anthropic's own model names, so a slot left at
+/// the user's default asks the proxy for a model it cannot map and comes back
+/// 404. An unpinned subagent is the same 404 one turn later.
+pub(crate) const CLAUDE_MODEL_SLOTS: [&str; 4] = [
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+];
+
+/// The env var Claude Code picks a subagent's model from, outside the four
+/// slots above because it is not a slot a user sets but a separate override.
+pub(crate) const CLAUDE_SUBAGENT_MODEL_ENV: &str = "CLAUDE_CODE_SUBAGENT_MODEL";
+
+pub(crate) const CODEX_CONFIG_FILE: &str = "config.toml";
+pub(crate) const CLAUDE_SETTINGS_FILE: &str = ".claude/settings.json";
+pub(crate) const DEVIN_CONFIG_FILE: &str = ".config/devin/config.json";
+
+/// Claude's own state file — a dotfile beside `~/.claude/`, not
+/// `settings.json` inside it. This is where Claude records that onboarding
+/// finished and that a folder's trust dialog was accepted, which is what the
+/// approval path has to answer; `CLAUDE_SETTINGS_FILE` above is the file this
+/// command writes the provider route into. Two files, two jobs.
+pub(crate) const CLAUDE_ONBOARDING_FILE: &str = ".claude.json";
+
+/// The Antigravity CLI's own settings, distinct from the IDE's
+/// `~/.gemini/config/config.json` that `pixel install` writes plugins into.
+pub(crate) fn antigravity_settings(home: &Path) -> std::path::PathBuf {
+    home.join(".gemini/antigravity-cli/settings.json")
+}
+
+pub(crate) fn claude_settings(home: &Path) -> std::path::PathBuf {
+    home.join(CLAUDE_SETTINGS_FILE)
+}
+
+pub(crate) fn codex_config(home: &Path) -> std::path::PathBuf {
+    home.join(".codex").join(CODEX_CONFIG_FILE)
+}
+
+pub(crate) fn devin_config(home: &Path) -> std::path::PathBuf {
+    home.join(DEVIN_CONFIG_FILE)
+}
+
+/// Read a file that may not exist yet. A missing file is an empty starting
+/// point, not an error: the first readiness run is what creates it.
+fn read_or(path: &Path, missing: &str) -> Result<String, String> {
+    match fs::read_to_string(path) {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(missing.to_string()),
+        Err(e) => Err(format!("read {}: {e}", path.display())),
+    }
+}
+
+/// Write `text` through a temp file and a rename, creating the directory.
+/// The temp name carries the real extension so a tool watching the directory
+/// does not try to parse a half-written file.
+fn write_atomically(path: &Path, extension: &str, text: String) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let tmp = path.with_extension(extension);
+    fs::write(&tmp, text).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .map_err(|e| format!("rename {} into {}: {e}", tmp.display(), path.display()))
+}
+
+/// Point Codex at `provider`: the model, the provider name, and the
+/// `[model_providers.recording_cloud]` block that carries the base URL and
+/// the name of the env var holding the key.
+pub(crate) fn write_codex(path: &Path, provider: Provider) -> Result<String, String> {
+    let original = read_or(path, "")?;
+    let mut doc: DocumentMut = original
+        .parse()
+        .map_err(|e| format!("{} is not valid TOML: {e} — not touched", path.display()))?;
+    doc["model"] = Item::Value(TomlValue::from(provider.model()));
+    doc["model_provider"] = Item::Value(TomlValue::from(MODEL_PROVIDER_NAME));
+    let mut route = Table::new();
+    route["name"] = Item::Value(TomlValue::from(MODEL_PROVIDER_NAME));
+    route["base_url"] = Item::Value(TomlValue::from(provider.base_url()));
+    route["env_key"] = Item::Value(TomlValue::from(provider.key_env()));
+    route["wire_api"] = Item::Value(TomlValue::from("chat"));
+    // Merged into, never replaced. `[model_providers.<other>]` blocks are the
+    // user's own routes, and leaving them alone is what the sibling
+    // `write_claude` does with `env`; assigning a fresh table over this key
+    // deleted every one of them on an `--apply`.
+    let root = doc.as_table_mut();
+    if !root.contains_key("model_providers") {
+        root.insert("model_providers", Item::Table(Table::new()));
+    }
+    let providers = root
+        .get_mut("model_providers")
+        .and_then(Item::as_table_like_mut)
+        .ok_or_else(|| {
+            format!(
+                "`model_providers` in {} is not a table — not touched",
+                path.display()
+            )
+        })?;
+    providers.insert(MODEL_PROVIDER_NAME, Item::Table(route));
+    write_atomically(path, "toml.pixel-tmp", doc.to_string())?;
+    Ok(format!(
+        "model={} via {} in {}",
+        provider.model(),
+        provider.name(),
+        path.display()
+    ))
+}
+
+/// Point Claude Code at the recording gateway. The `env` object is merged
+/// into: whatever the user or `pixel install` put there survives.
+pub(crate) fn write_claude(path: &Path, provider: Provider) -> Result<String, String> {
+    let original = read_or(path, "{}")?;
+    let mut value: Value = serde_json::from_str(&original)
+        .map_err(|e| format!("{} is not valid JSON: {e} — not touched", path.display()))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| format!("{} is not a JSON object — not touched", path.display()))?;
+    let env = match object
+        .entry("env".to_string())
+        .or_insert_with(|| Value::Object(Map::new()))
+    {
+        Value::Object(map) => map,
+        // Covers both a user's `"env": "…"` and any non-object written
+        // there: either way the file is left exactly as it was found.
+        _ => {
+            return Err(format!(
+                "`env` in {} is not an object — not touched",
+                path.display()
+            ));
+        }
+    };
+    env.insert(
+        "ANTHROPIC_BASE_URL".to_string(),
+        Value::String(GATEWAY_URL.to_string()),
+    );
+    // The credential and the header are deliberately *not* written here.
+    // Claude Code reads a settings-file `env` value literally — it expands
+    // nothing — and that literal then replaces the same variable inherited
+    // from the shell, so an entry like `${RECORDING_GATEWAY_TOKEN}` would
+    // both fail to resolve and destroy the working value. The two names go
+    // out in the report instead, for the user to export. Keys a user already
+    // has are left alone, as everywhere else here.
+    for slot in CLAUDE_MODEL_SLOTS {
+        env.insert(
+            slot.to_string(),
+            Value::String(DEFAULT_CLAUDE_MODEL.to_string()),
+        );
+    }
+    env.insert(
+        CLAUDE_SUBAGENT_MODEL_ENV.to_string(),
+        Value::String(DEFAULT_CLAUDE_MODEL.to_string()),
+    );
+    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    write_atomically(path, "json.pixel-tmp", format!("{text}\n"))?;
+    Ok(format!(
+        "ANTHROPIC_BASE_URL={GATEWAY_URL}, {DEFAULT_CLAUDE_MODEL} in the model slots, via {} in {}; export ANTHROPIC_AUTH_TOKEN=\"${GATEWAY_TOKEN_ENV}\" and {CLAUDE_CUSTOM_HEADERS_ENV}=\"{}\" in your shell — a settings file expands neither",
+        provider.name(),
+        path.display(),
+        gateway_header()
+    ))
+}
+
+/// Point the Antigravity CLI at the recording gateway, creating its settings
+/// file when the CLI has never run.
+pub(crate) fn write_antigravity(path: &Path, provider: Provider) -> Result<String, String> {
+    let original = read_or(path, "{}")?;
+    let mut value: Value = serde_json::from_str(&original)
+        .map_err(|e| format!("{} is not valid JSON: {e} — not touched", path.display()))?;
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| format!("{} is not a JSON object — not touched", path.display()))?;
+    object.insert(
+        "AGY_LLM_GATEWAY_URL".to_string(),
+        Value::String(GATEWAY_URL.to_string()),
+    );
+    let text = serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?;
+    write_atomically(path, "json.pixel-tmp", format!("{text}\n"))?;
+    Ok(format!(
+        "AGY_LLM_GATEWAY_URL={GATEWAY_URL} via {} in {}",
+        provider.name(),
+        path.display()
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A scratch directory removed on drop. `tempfile` is not a dependency of
+    /// this crate and one test-local RAII guard is cheaper than adding it.
+    pub(crate) struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        pub(crate) fn new() -> Self {
+            // The counter, not the clock, is what makes the name unique.
+            // `SystemTime::now()` resolves to a microsecond or coarser
+            // depending on the platform, so two tests starting in the same
+            // tick were handed the same directory: each wrote its fixtures
+            // into the other's and the pair failed intermittently, on a
+            // different test each run.
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("pixel-readify-{}-{seq}", std::process::id()));
+            fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        pub(crate) fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn codex_gets_the_model_provider_and_route_block() {
+        let home = Scratch::new();
+        let path = codex_config(home.path());
+        write_codex(&path, Provider::Groq).unwrap();
+        let doc: DocumentMut = fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(doc["model"].as_str(), Some("openai/gpt-oss-120b"));
+        assert_eq!(doc["model_provider"].as_str(), Some(MODEL_PROVIDER_NAME));
+        let route = &doc["model_providers"][MODEL_PROVIDER_NAME];
+        assert_eq!(
+            route["base_url"].as_str(),
+            Some("https://api.groq.com/openai/v1")
+        );
+        assert_eq!(route["env_key"].as_str(), Some("GROQ_API_KEY"));
+        assert_eq!(route["wire_api"].as_str(), Some("chat"));
+    }
+
+    #[test]
+    fn codex_keeps_the_users_own_keys() {
+        let home = Scratch::new();
+        let path = codex_config(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "developer_instructions = \"pixel prompt\"\nmodel = \"stale\"\napproval_policy = \"never\"\n",
+        )
+        .unwrap();
+        write_codex(&path, Provider::Cerebras).unwrap();
+        let doc: DocumentMut = fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(doc["developer_instructions"].as_str(), Some("pixel prompt"));
+        assert_eq!(doc["approval_policy"].as_str(), Some("never"));
+        assert_eq!(doc["model"].as_str(), Some("gpt-oss-120b"));
+    }
+
+    /// A user's own provider blocks are theirs. This writer owns exactly one
+    /// route and rewrites that; the first version assigned a fresh table over
+    /// the whole `model_providers` key, so an `--apply` deleted every other
+    /// provider the user had. `codex_keeps_the_users_own_keys` did not catch
+    /// it: it writes only top-level keys, so the bug survived a test named
+    /// for the thing it broke.
+    #[test]
+    fn codex_keeps_a_users_other_model_providers() {
+        let home = Scratch::new();
+        let path = codex_config(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "[model_providers.local_llama]\nname = \"llama\"\nbase_url = \"http://127.0.0.1:11434/v1\"\n",
+        )
+        .unwrap();
+        write_codex(&path, Provider::Groq).unwrap();
+        let doc: DocumentMut = fs::read_to_string(&path).unwrap().parse().unwrap();
+        assert_eq!(
+            doc["model_providers"]["local_llama"]["base_url"].as_str(),
+            Some("http://127.0.0.1:11434/v1"),
+            "the provider the user already had survived: {doc}"
+        );
+        assert_eq!(
+            doc["model_providers"][MODEL_PROVIDER_NAME]["base_url"].as_str(),
+            Some("https://api.groq.com/openai/v1")
+        );
+    }
+
+    /// `model_providers` holding something that is not a table is refused
+    /// rather than clobbered: this command writes one route, and a value it
+    /// cannot merge into is a file it must leave alone.
+    #[test]
+    fn codex_refuses_a_model_providers_that_is_not_a_table() {
+        let home = Scratch::new();
+        let path = codex_config(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let broken = "model_providers = \"nonsense\"\n";
+        fs::write(&path, broken).unwrap();
+        let error = write_codex(&path, Provider::Groq).unwrap_err();
+        assert!(error.contains("not a table"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), broken, "file touched");
+    }
+
+    #[test]
+    fn codex_refuses_to_rewrite_a_file_that_does_not_parse() {
+        let home = Scratch::new();
+        let path = codex_config(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let broken = "this is not = = toml\n";
+        fs::write(&path, broken).unwrap();
+        let error = write_codex(&path, Provider::Groq).unwrap_err();
+        assert!(error.contains("not valid TOML"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), broken, "file touched");
+    }
+
+    #[test]
+    fn codex_apply_is_idempotent() {
+        let home = Scratch::new();
+        let path = codex_config(home.path());
+        write_codex(&path, Provider::Ollama).unwrap();
+        let first = fs::read_to_string(&path).unwrap();
+        write_codex(&path, Provider::Ollama).unwrap();
+        assert_eq!(first, fs::read_to_string(&path).unwrap());
+    }
+
+    #[test]
+    fn claude_gets_the_gateway_and_the_model_slots() {
+        let home = Scratch::new();
+        let path = claude_settings(home.path());
+        write_claude(&path, Provider::Ollama).unwrap();
+        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["env"]["ANTHROPIC_BASE_URL"], GATEWAY_URL);
+        for slot in CLAUDE_MODEL_SLOTS {
+            assert_eq!(
+                value["env"][slot], DEFAULT_CLAUDE_MODEL,
+                "{slot} left at the user's default asks the gateway for a model it cannot map"
+            );
+        }
+        assert_eq!(
+            value["env"][CLAUDE_SUBAGENT_MODEL_ENV], DEFAULT_CLAUDE_MODEL,
+            "an unpinned subagent is the same 404 one turn later"
+        );
+    }
+
+    #[test]
+    fn claude_leaves_the_credential_to_the_shell() {
+        // The load-bearing half of the fix. Claude Code expands nothing in a
+        // settings-file `env` value, and such a value replaces the same
+        // variable inherited from the shell — so an entry here would inject
+        // the literal `${RECORDING_GATEWAY_TOKEN}` *and* overwrite the real
+        // credential the shell already exported. Neither key may appear.
+        let home = Scratch::new();
+        let path = claude_settings(home.path());
+        write_claude(&path, Provider::Ollama).unwrap();
+        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        for key in [CLAUDE_CUSTOM_HEADERS_ENV, "ANTHROPIC_AUTH_TOKEN"] {
+            assert!(
+                value["env"].get(key).is_none(),
+                "{key} must stay in the shell: {}",
+                value["env"]
+            );
+        }
+    }
+
+    #[test]
+    fn the_report_names_the_two_exports_the_shell_owes() {
+        let home = Scratch::new();
+        let path = claude_settings(home.path());
+        let report = write_claude(&path, Provider::Ollama).unwrap();
+        assert!(report.contains(GATEWAY_TOKEN_ENV), "{report}");
+        assert!(report.contains(CLAUDE_CUSTOM_HEADERS_ENV), "{report}");
+        assert!(report.contains(&gateway_header()), "{report}");
+    }
+
+    #[test]
+    fn the_gateway_header_names_the_litellm_key_and_expands_the_token() {
+        // The header name is the contract with the proxy: LiteLLM reads
+        // `x-litellm-api-key`, and a spelling drift here is a 400 from the
+        // gateway, not a silent fallback. Pinned literally for that reason,
+        // and the token is pinned as an expansion — a shell expands it, which
+        // is the whole reason this line is an export and not a file entry.
+        assert_eq!(
+            gateway_header(),
+            format!("x-litellm-api-key: Bearer ${{{GATEWAY_TOKEN_ENV}}}")
+        );
+    }
+
+    #[test]
+    fn the_settings_file_never_names_the_token() {
+        // Stronger than "an expansion, not a value": the token's name does
+        // not belong in this file at all. An expansion here resolves to
+        // nothing *and* replaces the shell's real value, so the file that
+        // must not carry the secret is the file that must not mention it.
+        let home = Scratch::new();
+        let path = claude_settings(home.path());
+        write_claude(&path, Provider::Groq).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains(GATEWAY_TOKEN_ENV), "{text}");
+        assert!(!text.contains("litellm"), "{text}");
+    }
+
+    #[test]
+    fn claude_keeps_the_keys_pixel_install_wrote() {
+        let home = Scratch::new();
+        let path = claude_settings(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            r#"{"env":{"PIXEL_MARKER":"1","ANTHROPIC_BASE_URL":"http://old"},"hooks":{"Stop":[]}}"#,
+        )
+        .unwrap();
+        write_claude(&path, Provider::Ollama).unwrap();
+        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["env"]["PIXEL_MARKER"], "1");
+        assert!(value["hooks"]["Stop"].is_array());
+        assert_eq!(value["env"]["ANTHROPIC_BASE_URL"], GATEWAY_URL);
+    }
+
+    #[test]
+    fn claude_refuses_a_settings_file_that_does_not_parse() {
+        let home = Scratch::new();
+        let path = claude_settings(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, "{not json").unwrap();
+        let error = write_claude(&path, Provider::Ollama).unwrap_err();
+        assert!(error.contains("not valid JSON"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "{not json");
+    }
+
+    #[test]
+    fn claude_refuses_an_env_that_is_not_an_object() {
+        let home = Scratch::new();
+        let path = claude_settings(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"env":"nope"}"#).unwrap();
+        let error = write_claude(&path, Provider::Ollama).unwrap_err();
+        assert!(error.contains("not an object"), "{error}");
+    }
+
+    #[test]
+    fn antigravity_gets_the_gateway_and_keeps_workspace_trust() {
+        let home = Scratch::new();
+        let path = antigravity_settings(home.path());
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"trustedWorkspaces":["/w"]}"#).unwrap();
+        write_antigravity(&path, Provider::Groq).unwrap();
+        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["AGY_LLM_GATEWAY_URL"], GATEWAY_URL);
+        assert_eq!(value["trustedWorkspaces"][0], "/w");
+    }
+
+    #[test]
+    fn antigravity_creates_the_file_when_the_cli_never_ran() {
+        let home = Scratch::new();
+        let path = antigravity_settings(home.path());
+        assert!(!path.exists());
+        write_antigravity(&path, Provider::Groq).unwrap();
+        let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["AGY_LLM_GATEWAY_URL"], GATEWAY_URL);
+    }
+
+    #[test]
+    fn the_antigravity_ide_config_is_a_different_file_from_the_cli_settings() {
+        let home = Scratch::new();
+        assert_ne!(
+            antigravity_settings(home.path()),
+            home.path().join(".gemini/config/config.json"),
+            "the CLI reads its own settings, not the IDE's"
+        );
+    }
+
+    #[test]
+    fn devin_config_path_is_the_verified_only_target() {
+        let home = Scratch::new();
+        assert_eq!(
+            devin_config(home.path()),
+            home.path().join(DEVIN_CONFIG_FILE)
+        );
+    }
+}

@@ -1,0 +1,643 @@
+//! Auto-approval: clearing the gate an agent puts in front of its own first
+//! turn.
+//!
+//! Three of the four agents gate a fresh workspace. Codex asks about the
+//! folder's trust level and about the hooks it would run there; Claude Code
+//! asks for onboarding and for the trust dialog; Antigravity and Devin read a
+//! trust list and never write one. The reference this port mirrors clears the
+//! first two unconditionally — it runs inside a throwaway recording sandbox
+//! whose workspaces are clones made for the recording, so "trust this folder"
+//! there is answered about a directory that will be deleted.
+//!
+//! This port keeps the mechanism and refuses the assumption. A trust write
+//! outlives the run: it means "run this folder's hooks and code without
+//! asking me again", and which folders get that is the user's decision, not
+//! this command's. So the writes happen only under `--approve`, only for the
+//! one workspace named on the command line, and the report says which of the
+//! two happened rather than leaving the difference invisible.
+//!
+//! Two things are deliberately *not* done here, both because the reference
+//! refuses them and its reasoning survives the move out of the sandbox:
+//!
+//! - **No hash is read back from disk.** Codex's app-server computes the hash
+//!   of each hook as it stands now. A hash stored in a config file records
+//!   what that hook used to be, so trusting it would approve whatever
+//!   replaced it. The hash written here is the one the server just reported.
+//! - **No hash is written into `config.toml` by hand.** Both Codex writes go
+//!   through Codex's own `config/batchWrite` RPC, so the server applies its
+//!   own rules and its own file versioning to a file it owns.
+
+use std::{fs, path::Path, time::Duration};
+
+use serde::Serialize;
+use serde_json::{Map, Value};
+use toml_edit::{DocumentMut, Item};
+
+use super::Agent;
+use super::config::{CLAUDE_ONBOARDING_FILE, codex_config};
+use super::rpc::{self, MergeStrategy};
+
+/// The Codex config key the `config/batchWrite` RPC addresses hook trust by.
+const HOOKS_STATE_KEY: &str = "hooks.state";
+
+/// The `[projects."<path>"]` key Codex records a folder's trust under, and
+/// the value that means "do not ask again".
+const TRUST_LEVEL_KEY: &str = "trust_level";
+const TRUSTED: &str = "trusted";
+
+/// Claude's own spellings, in `~/.claude.json`.
+const ONBOARDED_FIELD: &str = "hasCompletedOnboarding";
+const TRUST_FIELD: &str = "hasTrustDialogAccepted";
+const PROJECTS_FIELD: &str = "projects";
+
+/// What one agent's approval attempt did, in the terms the report prints.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Approval {
+    pub(crate) agent: &'static str,
+    /// True when nothing is left asking — including the case where there was
+    /// nothing to answer.
+    pub(crate) approved: bool,
+    /// What was written, or why nothing was.
+    pub(crate) detail: String,
+}
+
+impl Approval {
+    fn done(agent: Agent, detail: String) -> Self {
+        Self {
+            agent: agent.name(),
+            approved: true,
+            detail,
+        }
+    }
+
+    fn refused(agent: Agent, detail: String) -> Self {
+        Self {
+            agent: agent.name(),
+            approved: false,
+            detail,
+        }
+    }
+}
+
+/// Approve `agent`'s startup gate for `workspace`.
+///
+/// `timeout` bounds each app-server exchange, not the whole call: Codex needs
+/// two of them, and a slow server on the first should not eat the second's
+/// budget.
+pub(crate) fn approve(home: &Path, agent: Agent, workspace: &Path, timeout: Duration) -> Approval {
+    match agent {
+        Agent::Codex => codex(home, workspace, timeout),
+        Agent::Claude => claude(home, workspace),
+        // The reference reads these two agents' trust state and never writes
+        // it — Antigravity's `trustedWorkspaces` and Devin's
+        // `trusted_workspaces.json` have no writer anywhere in it. Inventing
+        // one here would be this command claiming a mechanism neither agent
+        // has been shown to accept, so the report names the prompt instead.
+        Agent::Antigravity | Agent::Devin => Approval::refused(
+            agent,
+            format!(
+                "{}: no approval path — its trust state is read-only here; accept its workspace prompt by hand",
+                agent.name()
+            ),
+        ),
+    }
+}
+
+/// Codex's two gates, cleared through its own app-server.
+fn codex(home: &Path, workspace: &Path, timeout: Duration) -> Approval {
+    match clear_codex(home, workspace, timeout) {
+        Ok(detail) => Approval::done(Agent::Codex, detail),
+        Err(detail) => Approval::refused(Agent::Codex, detail),
+    }
+}
+
+fn clear_codex(home: &Path, workspace: &Path, timeout: Duration) -> Result<String, String> {
+    let real = fs::canonicalize(workspace)
+        .map_err(|e| format!("codex: cannot resolve {}: {e}", workspace.display()))?
+        .to_string_lossy()
+        .into_owned();
+    let mut written = Vec::new();
+
+    let entries = rpc::hooks_list(workspace, timeout)?;
+    let state = match rpc::hook_state(&entries) {
+        // An enabled hook the server reported no current hash for cannot be
+        // trusted by this command, and guessing at one is the whole thing the
+        // RPC exists to avoid. Say so instead of writing a partial map.
+        None => {
+            return Err(
+                "codex: an enabled hook has no current hash from the app-server — review it with /hooks"
+                    .to_string(),
+            )
+        }
+        Some(Value::Object(state)) => state,
+        Some(other) => {
+            return Err(format!(
+                "codex: hook state came back as {other}, not an object — not written"
+            ))
+        }
+    };
+    if !state.is_empty() {
+        let count = state.len();
+        rpc::config_batch_write(
+            workspace,
+            HOOKS_STATE_KEY.to_string(),
+            Value::Object(state),
+            MergeStrategy::Upsert,
+            timeout,
+        )?;
+        written.push(format!(
+            "{count} enabled hook(s) trusted at their current hashes"
+        ));
+    }
+
+    if workspace_trusted(&codex_config(home), &real) {
+        written.push(format!("{real} was already trusted"));
+    } else {
+        rpc::config_batch_write(
+            workspace,
+            rpc::trust_key_path(&real),
+            Value::String(TRUSTED.to_string()),
+            MergeStrategy::Replace,
+            timeout,
+        )?;
+        written.push(format!("{real} marked {TRUSTED}"));
+    }
+
+    Ok(format!("codex: {}", written.join("; ")))
+}
+
+/// Whether Codex's config already records `real` as trusted.
+///
+/// A file that cannot be read answers `false`: the write that follows is the
+/// server's own, and it is the server's job to refuse a config it cannot
+/// apply to.
+fn workspace_trusted(config: &Path, real: &str) -> bool {
+    fs::read_to_string(config).is_ok_and(|text| workspace_trusted_in(&text, real))
+}
+
+/// The decision, split from the read so it can be tested without a file.
+fn workspace_trusted_in(text: &str, real: &str) -> bool {
+    let Ok(doc) = text.parse::<DocumentMut>() else {
+        return false;
+    };
+    doc.get(PROJECTS_FIELD)
+        .and_then(Item::as_table_like)
+        .and_then(|projects| projects.get(real))
+        .and_then(Item::as_table_like)
+        .and_then(|project| project.get(TRUST_LEVEL_KEY))
+        .and_then(Item::as_str)
+        == Some(TRUSTED)
+}
+
+/// Claude's onboarding and trust dialog, recorded in `~/.claude.json`.
+fn claude(home: &Path, workspace: &Path) -> Approval {
+    let path = home.join(CLAUDE_ONBOARDING_FILE);
+    // Canonical, as the Codex path above already is. `~/.claude.json` keys
+    // `projects` on the real path, so a relative or symlinked `--workspace`
+    // wrote an entry Claude Code never looks up: the write succeeded, the
+    // report said trusted, and the prompt still stood. The reference
+    // canonicalises for the same reason (`realpath` in main.ts).
+    let workspace = match fs::canonicalize(workspace) {
+        Ok(real) => real.to_string_lossy().into_owned(),
+        Err(e) => {
+            return Approval::refused(
+                Agent::Claude,
+                format!("claude: cannot resolve {}: {e}", workspace.display()),
+            );
+        }
+    };
+    let config = match fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<Value>(&text) {
+            Ok(value) => value,
+            Err(e) => {
+                return Approval::refused(
+                    Agent::Claude,
+                    format!(
+                        "claude: {} is not valid JSON ({e}) — not touched",
+                        path.display()
+                    ),
+                );
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Value::Object(Map::new()),
+        Err(e) => {
+            return Approval::refused(
+                Agent::Claude,
+                format!("claude: cannot read {}: {e}", path.display()),
+            );
+        }
+    };
+
+    match claude_trusted(&config, &workspace) {
+        Err(reason) => Approval::refused(
+            Agent::Claude,
+            format!("claude: {reason} in {} — not touched", path.display()),
+        ),
+        Ok(None) => Approval::done(
+            Agent::Claude,
+            format!("claude: {workspace} was already onboarded and trusted"),
+        ),
+        Ok(Some(next)) => match write_private(&path, &next) {
+            Ok(()) => Approval::done(
+                Agent::Claude,
+                format!(
+                    "claude: recorded onboarding and workspace trust for {workspace} in {}",
+                    path.display()
+                ),
+            ),
+            Err(e) => Approval::refused(Agent::Claude, format!("claude: {e}")),
+        },
+    }
+}
+
+/// Whether the config's `projects` object already marks `workspace` trusted.
+///
+/// An absent `projects`, or an absent entry for the workspace, is `false` —
+/// the flags are missing, not corrupt. A `projects` that is present but is not
+/// an object, or an entry that is not, is an error: that file holds something
+/// this command did not write and must not overwrite.
+fn already_trusted(object: &Map<String, Value>, workspace: &str) -> Result<bool, String> {
+    let Some(projects) = object.get(PROJECTS_FIELD) else {
+        return Ok(false);
+    };
+    let projects = projects
+        .as_object()
+        .ok_or_else(|| format!("`{PROJECTS_FIELD}` is not an object"))?;
+    let Some(entry) = projects.get(workspace) else {
+        return Ok(false);
+    };
+    Ok(entry
+        .as_object()
+        .ok_or_else(|| format!("`{PROJECTS_FIELD}.{workspace}` is not an object"))?
+        .get(TRUST_FIELD)
+        == Some(&Value::Bool(true)))
+}
+
+/// The Claude config that records onboarding and workspace trust, or the
+/// reason it cannot be produced.
+///
+/// `Ok(None)` means the file already records both and there is nothing to
+/// write — a different outcome from `Ok(Some(_))`, and a different one again
+/// from `Err`: an unreadable shape is a refusal, not a no-op, and collapsing
+/// the three would report a file this command declined to touch as a file
+/// that needed nothing.
+///
+/// Both fields are set whenever either is missing, as the reference does:
+/// they are the two halves of one dialog's outcome, and an onboarding flag
+/// without the trust flag leaves the prompt standing.
+pub(crate) fn claude_trusted(config: &Value, workspace: &str) -> Result<Option<Value>, String> {
+    let object = config
+        .as_object()
+        .ok_or_else(|| "the file is not a JSON object".to_string())?;
+    let trusted = already_trusted(object, workspace)?;
+    if object.get(ONBOARDED_FIELD) == Some(&Value::Bool(true)) && trusted {
+        return Ok(None);
+    }
+
+    let mut next = config.clone();
+    let object = next
+        .as_object_mut()
+        .expect("checked to be an object above, and cloning preserves the shape");
+    object.insert(ONBOARDED_FIELD.to_string(), Value::Bool(true));
+    let projects = object
+        .entry(PROJECTS_FIELD.to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let entry = projects
+        .as_object_mut()
+        .expect("checked to be an object above, and cloning preserves the shape")
+        .entry(workspace.to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    entry
+        .as_object_mut()
+        .expect("checked to be an object above, and cloning preserves the shape")
+        .insert(TRUST_FIELD.to_string(), Value::Bool(true));
+    Ok(Some(next))
+}
+
+/// Write `value` as JSON to `path`, readable only by its owner, through a
+/// temp file and a rename.
+///
+/// `~/.claude.json` carries the user's own Claude state and the reference
+/// writes it `0600`; a readiness run is not the thing that widens that. The
+/// rename keeps a reader from seeing half a document, and the temp file
+/// carries the real extension so a watcher does not try to parse it.
+fn write_private(path: &Path, value: &Value) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let text = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("cannot serialise {}: {e}", path.display()))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, format!("{text}\n")).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("chmod {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .map_err(|e| format!("rename {} into {}: {e}", tmp.display(), path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config(value: Value) -> Value {
+        value
+    }
+
+    /// A directory this test owns. Named per test, so two of them cannot
+    /// share one, and emptied on the way in so a rerun starts clean.
+    fn own_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pixel-approve-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create the test directory");
+        dir
+    }
+
+    #[test]
+    fn a_codex_approval_for_an_unresolvable_workspace_refuses_before_asking_the_server() {
+        // The order matters and is the point of the assertion: a path that
+        // cannot be resolved must not reach the app-server at all, or a typo
+        // in `--workspace` becomes an RPC against a folder nobody named.
+        let approval = approve(
+            Path::new("/nonexistent-home"),
+            Agent::Codex,
+            Path::new("/nonexistent-workspace-does-not-exist"),
+            Duration::from_secs(1),
+        );
+        assert!(!approval.approved, "{approval:?}");
+        assert_eq!(approval.agent, "codex");
+        assert!(
+            approval
+                .detail
+                .contains("/nonexistent-workspace-does-not-exist"),
+            "the refusal must name the path it could not resolve: {approval:?}"
+        );
+    }
+
+    #[test]
+    fn a_claude_approval_records_both_facts_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = own_dir("claude-fresh");
+        let workspace = own_dir("claude-fresh-workspace");
+        // The command records the workspace's canonical path, so the key to
+        // read back is that one and not the path handed in.
+        let real = fs::canonicalize(&workspace).unwrap();
+        let key = real.to_string_lossy();
+        let approval = approve(&home, Agent::Claude, &workspace, Duration::from_secs(1));
+        assert!(approval.approved, "{approval:?}");
+
+        let path = home.join(CLAUDE_ONBOARDING_FILE);
+        let mode = fs::metadata(&path)
+            .expect("the file was written")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "~/.claude.json must stay owner-only");
+        let written: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(written["hasCompletedOnboarding"], Value::Bool(true));
+        assert_eq!(
+            written["projects"][key.as_ref()]["hasTrustDialogAccepted"],
+            Value::Bool(true)
+        );
+
+        // A second run has nothing left to do and says so, rather than
+        // reporting a write it did not make.
+        let again = approve(&home, Agent::Claude, &workspace, Duration::from_secs(1));
+        assert!(again.approved, "{again:?}");
+        assert!(
+            again.detail.contains("already"),
+            "an idempotent run must read as one: {again:?}"
+        );
+        fs::remove_dir_all(&home).unwrap();
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+
+    /// The entry is keyed on the workspace's real path. Written under the
+    /// string the caller typed, a relative or symlinked `--workspace`
+    /// recorded an entry Claude Code never looks up: the report said trusted
+    /// and the prompt still stood.
+    #[test]
+    fn a_claude_approval_records_the_workspace_by_its_canonical_path() {
+        let home = own_dir("claude-canonical");
+        let workspace = own_dir("claude-canonical-workspace");
+        let link = std::env::temp_dir().join(format!(
+            "pixel-approve-{}-claude-canonical-link",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&link);
+        std::os::unix::fs::symlink(&workspace, &link).expect("create the symlink");
+
+        let approval = approve(&home, Agent::Claude, &link, Duration::from_secs(1));
+        assert!(approval.approved, "{approval:?}");
+
+        let written: Value =
+            serde_json::from_str(&fs::read_to_string(home.join(CLAUDE_ONBOARDING_FILE)).unwrap())
+                .unwrap();
+        let real = fs::canonicalize(&workspace).unwrap();
+        assert_eq!(
+            written["projects"][real.to_string_lossy().as_ref()]["hasTrustDialogAccepted"],
+            Value::Bool(true),
+            "the entry is keyed on the real path: {written}"
+        );
+        assert!(
+            written["projects"][link.to_string_lossy().as_ref()].is_null(),
+            "the symlink is not a key Claude Code reads: {written}"
+        );
+        fs::remove_file(&link).unwrap();
+        fs::remove_dir_all(&workspace).unwrap();
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_claude_approval_refuses_a_file_it_cannot_parse_instead_of_replacing_it() {
+        let home = own_dir("claude-corrupt");
+        // A real directory: with an unresolvable one the refusal would be
+        // about the path and this test would pass without ever reaching the
+        // parse it is named for.
+        let workspace = own_dir("claude-corrupt-workspace");
+        let path = home.join(CLAUDE_ONBOARDING_FILE);
+        fs::write(&path, "not json at all").unwrap();
+        let approval = approve(&home, Agent::Claude, &workspace, Duration::from_secs(1));
+        assert!(!approval.approved, "{approval:?}");
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "not json at all",
+            "a file this command cannot read is not a file it may overwrite"
+        );
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_claude_approval_refuses_a_projects_table_of_the_wrong_shape() {
+        let home = own_dir("claude-shape");
+        let workspace = own_dir("claude-shape-workspace");
+        let path = home.join(CLAUDE_ONBOARDING_FILE);
+        fs::write(&path, r#"{"projects": "not a table"}"#).unwrap();
+        let approval = approve(&home, Agent::Claude, &workspace, Duration::from_secs(1));
+        assert!(!approval.approved, "{approval:?}");
+        assert!(
+            fs::read_to_string(&path).unwrap().contains("not a table"),
+            "the file was replaced: {approval:?}"
+        );
+        fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_config_that_already_records_both_facts_needs_no_write() {
+        let existing = config(serde_json::json!({
+            "hasCompletedOnboarding": true,
+            "projects": { "/work/repo": { "hasTrustDialogAccepted": true, "other": 7 } },
+        }));
+        assert_eq!(
+            claude_trusted(&existing, "/work/repo").unwrap(),
+            None,
+            "an already-trusted workspace must not be rewritten"
+        );
+    }
+
+    #[test]
+    fn a_missing_onboarding_flag_is_added_and_the_rest_is_kept() {
+        let existing = config(serde_json::json!({
+            "projects": { "/work/repo": { "hasTrustDialogAccepted": true } },
+            "theme": "dark",
+        }));
+        let next = claude_trusted(&existing, "/work/repo")
+            .unwrap()
+            .expect("a write is owed");
+        assert_eq!(next["hasCompletedOnboarding"], Value::Bool(true));
+        assert_eq!(
+            next["theme"],
+            Value::String("dark".to_string()),
+            "an unrelated key must survive the write"
+        );
+        assert_eq!(
+            next["projects"]["/work/repo"]["hasTrustDialogAccepted"],
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn a_missing_trust_flag_is_added_alongside_a_workspace_the_file_never_saw() {
+        let existing = config(serde_json::json!({
+            "hasCompletedOnboarding": true,
+            "projects": { "/work/other": { "hasTrustDialogAccepted": true } },
+        }));
+        let next = claude_trusted(&existing, "/work/repo")
+            .unwrap()
+            .expect("a write is owed");
+        assert_eq!(
+            next["projects"]["/work/repo"]["hasTrustDialogAccepted"],
+            Value::Bool(true)
+        );
+        assert_eq!(
+            next["projects"]["/work/other"]["hasTrustDialogAccepted"],
+            Value::Bool(true),
+            "trusting one workspace must not forget another"
+        );
+    }
+
+    #[test]
+    fn an_empty_config_gains_both_facts_for_the_named_workspace() {
+        let next = claude_trusted(&Value::Object(Map::new()), "/work/repo")
+            .unwrap()
+            .expect("a write is owed");
+        assert_eq!(next["hasCompletedOnboarding"], Value::Bool(true));
+        assert_eq!(
+            next["projects"]["/work/repo"]["hasTrustDialogAccepted"],
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn a_trust_flag_that_is_not_true_is_not_trust() {
+        // `false` is the interesting one: it is what Claude writes for a
+        // workspace the user explicitly declined, and reading it as trust
+        // would leave the prompt standing while the report claimed otherwise.
+        let existing = config(serde_json::json!({
+            "hasCompletedOnboarding": true,
+            "projects": { "/work/repo": { "hasTrustDialogAccepted": false } },
+        }));
+        let next = claude_trusted(&existing, "/work/repo")
+            .unwrap()
+            .expect("a write is owed");
+        assert_eq!(
+            next["projects"]["/work/repo"]["hasTrustDialogAccepted"],
+            Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn a_config_that_is_not_an_object_is_refused_rather_than_replaced() {
+        assert!(claude_trusted(&Value::String("nonsense".to_string()), "/work/repo").is_err());
+        assert!(claude_trusted(&serde_json::json!([1, 2]), "/work/repo").is_err());
+    }
+
+    #[test]
+    fn a_projects_value_of_the_wrong_shape_is_refused_rather_than_overwritten() {
+        let existing = config(serde_json::json!({ "projects": "not a table" }));
+        let err = claude_trusted(&existing, "/work/repo").unwrap_err();
+        assert!(err.contains("projects"), "{err}");
+    }
+
+    #[test]
+    fn an_agent_with_no_approval_path_says_so_instead_of_claiming_success() {
+        for agent in [Agent::Antigravity, Agent::Devin] {
+            let approval = approve(
+                Path::new("/nonexistent-home"),
+                agent,
+                Path::new("/work/repo"),
+                Duration::from_secs(1),
+            );
+            assert!(!approval.approved, "{approval:?}");
+            assert_eq!(approval.agent, agent.name());
+            assert!(
+                approval.detail.contains("no approval path"),
+                "the absence of a write must read as a decision: {approval:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_already_recorded_trust_level_is_read_back() {
+        assert!(workspace_trusted_in(
+            "[projects.\"/work/repo\"]\ntrust_level = \"trusted\"\n",
+            "/work/repo"
+        ));
+    }
+
+    #[test]
+    fn a_config_without_the_projects_table_is_not_trusted() {
+        assert!(!workspace_trusted_in("model = \"x\"\n", "/work/repo"));
+    }
+
+    #[test]
+    fn an_explicit_refusal_is_not_trust() {
+        assert!(!workspace_trusted_in(
+            "[projects.\"/work/repo\"]\ntrust_level = \"untrusted\"\n",
+            "/work/repo"
+        ));
+    }
+
+    #[test]
+    fn another_folders_trust_does_not_cover_this_one() {
+        assert!(!workspace_trusted_in(
+            "[projects.\"/work/other\"]\ntrust_level = \"trusted\"\n",
+            "/work/repo"
+        ));
+    }
+
+    #[test]
+    fn a_trust_level_of_the_wrong_type_is_not_trust() {
+        assert!(!workspace_trusted_in(
+            "[projects.\"/work/repo\"]\ntrust_level = true\n",
+            "/work/repo"
+        ));
+    }
+
+    #[test]
+    fn an_unparsable_config_is_not_evidence_of_trust() {
+        assert!(!workspace_trusted_in("this is not toml [", "/work/repo"));
+    }
+}
