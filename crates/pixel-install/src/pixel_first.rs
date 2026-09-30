@@ -50,15 +50,15 @@ pub(crate) fn install_rules(repo: &Path, dry_run: bool) -> Result<InstallStep> {
     Ok(InstallStep {
         id: "rules.pixel-first".into(),
         status: CheckStatus::Green,
-        summary: install::dry_run_summary(
-            dry_run,
-            if changed {
+        summary: {
+            let msg = if changed {
                 "Pixel-first project retrieval guidance installed"
             } else {
                 "Pixel-first project retrieval guidance already current"
-            },
-        ),
-        detail: Some(format!("file={}", path.display())),
+            };
+            if dry_run { format!("[dry-run] {}", msg) } else { msg.to_string() }
+        },
+        detail: Some(format!("file={}", path.display()))
     })
 }
 
