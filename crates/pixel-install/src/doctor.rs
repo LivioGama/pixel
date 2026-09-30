@@ -445,9 +445,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     // agent prompt itself. Verify the whole lifecycle contract: matchers,
     // commands and the executable this binary's install would write, not
     // just a `pixel` substring.
-    runner.check(
+    runner.check_status(
         "install.claude-hooks",
-        || -> std::result::Result<DoctorCheckDetail, String> {
+        || -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
             let path = home.join(".claude/settings.json");
             if !path.is_file() {
                 return Err(format!(
@@ -537,10 +537,11 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
                     stacked.join(", ")
                 ));
             }
-            Ok(DoctorCheckDetail {
-                summary: format!("claude lifecycle hooks configured in {}", path.display()),
-                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
-            })
+            Ok(claude_hooks_owner_check(
+                &path,
+                &exe,
+                &crate::routing::pixel_hooks_running_other_binaries(&value, &exe),
+            ))
         },
     );
 
@@ -1286,6 +1287,43 @@ fn pi_guard_check(
         ),
     })
 }
+/// The final verdict of `install.claude-hooks` once every hook is present
+/// and registered once: yellow when they run `others` rather than `exe`, the
+/// managed binary. A side build ([`config::is_side_build`]) never judges it:
+/// the home install is the managed binary's, and its hooks running that one
+/// are the expected state, not drift.
+fn claude_hooks_owner_check(
+    path: &Path,
+    exe: &Path,
+    others: &[PathBuf],
+) -> (CheckStatus, DoctorCheckDetail) {
+    if others.is_empty() || config::is_side_build(exe) {
+        return (
+            CheckStatus::Green,
+            DoctorCheckDetail {
+                summary: format!("claude lifecycle hooks configured in {}", path.display()),
+                detail: Some(serde_json::json!({ "path": path.display().to_string() })),
+            },
+        );
+    }
+    let others: Vec<String> = others.iter().map(|p| p.display().to_string()).collect();
+    (
+        CheckStatus::Yellow,
+        DoctorCheckDetail {
+            summary: format!(
+                "claude lifecycle hooks in {} run {}, not this pixel ({}); every session uses that binary — run `pixel install` to point them here",
+                path.display(),
+                others.join(", "),
+                exe.display()
+            ),
+            detail: Some(serde_json::json!({
+                "path": path.display().to_string(),
+                "running": others,
+            })),
+        },
+    )
+}
+
 /// `install.rtk-backup`: yellow when `orphan` names a global RTK backup no
 /// pixel guard delegates to, with the command that removes it.
 fn rtk_backup_check(orphan: Option<PathBuf>) -> (CheckStatus, DoctorCheckDetail, Remedy) {
@@ -2092,10 +2130,11 @@ mod tests {
     use super::{
         CHECKS, CheckSpec, CheckStatus, DoctorCheck, DoctorReport, DoctorSummary,
         PLACEHOLDER_DUMMY, Remedy, Repair, RepairOutcome, RepairStatus, VARIADIC_SENTINEL,
-        age_secs, capped, catalogue_steps, extract_rule_commands, fix_for, judge_repair,
-        names_check, normalize_rule_command, one_line, probe_daemon_epistemics, render_catalogue,
-        render_repairs, repair_for, repair_plan, rtk_backup_check, run_repair, scenario_mismatches,
-        selected, shell_word, spec, split_home_repairs, validate_selection,
+        age_secs, capped, catalogue_steps, claude_hooks_owner_check, extract_rule_commands,
+        fix_for, judge_repair, names_check, normalize_rule_command, one_line,
+        probe_daemon_epistemics, render_catalogue, render_repairs, repair_for, repair_plan,
+        rtk_backup_check, run_repair, scenario_mismatches, selected, shell_word, spec,
+        split_home_repairs, validate_selection,
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
@@ -2286,6 +2325,40 @@ mod tests {
     #[should_panic(expected = "doctor check `nope` is missing from CHECKS")]
     fn spec_should_panic_on_an_uncatalogued_id() {
         let _ = spec("nope");
+    }
+
+    /// Hooks that run another binary are yellow for the managed `pixel`,
+    /// naming that binary and the `pixel install` that points them back;
+    /// green when they run this one, and green for a side build, whose
+    /// sessions are meant to run the managed binary.
+    #[test]
+    fn claude_hooks_owner_check_should_flag_hooks_running_another_binary() {
+        let settings = Path::new("/h/.claude/settings.json");
+        let release = Path::new("/h/.local/share/mise/installs/pixel/0.6.1/bin/pixel");
+        let dev = PathBuf::from("/h/.local/bin/pixel-dev");
+        let (status, detail) = claude_hooks_owner_check(settings, release, &[]);
+        assert_eq!(status, CheckStatus::Green);
+        assert_eq!(
+            detail.summary,
+            "claude lifecycle hooks configured in /h/.claude/settings.json"
+        );
+        let (status, detail) =
+            claude_hooks_owner_check(settings, release, std::slice::from_ref(&dev));
+        assert_eq!(status, CheckStatus::Yellow);
+        assert_eq!(
+            detail.summary,
+            "claude lifecycle hooks in /h/.claude/settings.json run /h/.local/bin/pixel-dev, not this pixel (/h/.local/share/mise/installs/pixel/0.6.1/bin/pixel); every session uses that binary — run `pixel install` to point them here"
+        );
+        assert_eq!(
+            detail.detail.unwrap()["running"],
+            serde_json::json!(["/h/.local/bin/pixel-dev"])
+        );
+        let (status, _) = claude_hooks_owner_check(settings, &dev, &[release.to_path_buf()]);
+        assert_eq!(
+            status,
+            CheckStatus::Green,
+            "a side build does not judge the home install"
+        );
     }
 
     #[test]

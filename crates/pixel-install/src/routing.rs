@@ -88,22 +88,25 @@ pub(crate) fn quoted_executable(exe: &Path) -> String {
     format!("'{}'", exe.to_string_lossy().replace('\'', "'\\''"))
 }
 
-/// The file name of an unquoted executable path, or of one single-quoted the
-/// way [`quoted_executable`] writes it. An unquoted token holding whitespace
-/// is a command line, not an executable, and has none.
-fn executable_name(executable: &str) -> Option<String> {
-    let unquoted = if let Some(inner) = executable
+/// The path of an unquoted executable token, or of one single-quoted the way
+/// [`quoted_executable`] writes it. An unquoted token holding whitespace is a
+/// command line, not an executable, and has none.
+fn unquoted_executable(executable: &str) -> Option<PathBuf> {
+    if let Some(inner) = executable
         .strip_prefix('\'')
         .and_then(|s| s.strip_suffix('\''))
     {
-        inner.replace("'\\''", "'")
-    } else {
-        if executable.chars().any(char::is_whitespace) {
-            return None;
-        }
-        executable.to_string()
-    };
-    Path::new(&unquoted)
+        return Some(PathBuf::from(inner.replace("'\\''", "'")));
+    }
+    if executable.chars().any(char::is_whitespace) {
+        return None;
+    }
+    Some(PathBuf::from(executable))
+}
+
+/// The file name of an executable token (see [`unquoted_executable`]).
+fn executable_name(executable: &str) -> Option<String> {
+    unquoted_executable(executable)?
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
 }
@@ -1341,6 +1344,42 @@ pub(crate) fn stacked_pixel_hooks(value: &Value, exe: &Path) -> Vec<String> {
     stacked
 }
 
+/// The executables pixel's `run-hook` entries in a settings value run that
+/// are not `exe`, each once, in the order met. A `pixel-dev install` leaves
+/// every hook on the side build and a package-manager upgrade can leave them
+/// on the previous version's path; either way the hooks are complete and
+/// counted once, so only the executable tells the managed binary that its
+/// sessions are not running it. Two paths name the same binary when they
+/// canonicalize to one file (a symlink, a shim-less PATH entry).
+pub(crate) fn pixel_hooks_running_other_binaries(value: &Value, exe: &Path) -> Vec<PathBuf> {
+    let Some(events) = value.get("hooks").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let own = exe.canonicalize().ok();
+    let mut others: Vec<PathBuf> = Vec::new();
+    for command in events
+        .values()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|group| group.get("hooks").and_then(Value::as_array))
+        .flatten()
+        .filter_map(|hook| hook.get("command").and_then(Value::as_str))
+        .filter(|command| is_pixel_hook(command, exe))
+    {
+        let Some(path) = command
+            .rsplit_once(" run-hook ")
+            .and_then(|(executable, _)| unquoted_executable(executable))
+        else {
+            continue;
+        };
+        let same = path == exe || (own.is_some() && path.canonicalize().ok() == own);
+        if !same && !others.contains(&path) {
+            others.push(path);
+        }
+    }
+    others
+}
+
 /// Whether a Pixel `PreToolUse` command in a settings value contains `verb`
 /// (`run-hook guard --provider claude`): the guard is registered, not merely
 /// some other Pixel hook.
@@ -1893,6 +1932,78 @@ mod tests {
         );
         assert_eq!(again, vec![rtk]);
         assert_eq!(value, once);
+    }
+
+    /// A token quoted by [`quoted_executable`] comes back as the path it
+    /// quoted, apostrophes included; a bare token is its own path unless it
+    /// holds whitespace, which makes it a command line.
+    #[test]
+    fn unquoted_executable_should_invert_quoted_executable() {
+        let odd = Path::new("/opt/it's here/pixel-dev");
+        assert_eq!(
+            unquoted_executable(&quoted_executable(odd)),
+            Some(odd.to_path_buf())
+        );
+        assert_eq!(
+            unquoted_executable("/usr/local/bin/pixel"),
+            Some(PathBuf::from("/usr/local/bin/pixel"))
+        );
+        assert_eq!(unquoted_executable("/opt/my tools/pixel"), None);
+    }
+
+    /// The executables pixel's hooks run besides this binary: the side
+    /// build's path once however many hooks name it, never a foreign hook, a
+    /// legacy script or this binary itself, whether a hook names it by the
+    /// same path or through a symlink.
+    #[test]
+    #[cfg(unix)]
+    fn pixel_hooks_running_other_binaries_should_name_each_other_executable_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        let exe = bin.join("pixel");
+        fs::write(&exe, "").unwrap();
+        let link = dir.path().join("pixel");
+        std::os::unix::fs::symlink(&exe, &link).unwrap();
+        let dev = dir.path().join("dev dir/pixel-dev");
+        let hook = |exe: &Path, verb: &str| json!({"hooks":[{"type":"command","command":format!("{} run-hook {verb}", quoted_executable(exe))}]});
+        let value = json!({"hooks":{
+            "SessionStart":[
+                hook(&dev, "session-start"),
+                {"hooks":[{"type":"command","command":"herdr hook session-start --agent claude"}]},
+                {"hooks":[{"type":"command","command":"/opt/foreign/pixel-dev-helper run-hook session-start"}]},
+            ],
+            "UserPromptSubmit":[
+                hook(&dev, "prompt-submit --provider claude"),
+                hook(&exe, "prompt-submit --provider claude"),
+            ],
+            "PostToolUse":[hook(&link, "post-tool-use --provider claude")],
+        }});
+        assert_eq!(
+            pixel_hooks_running_other_binaries(&value, &exe),
+            vec![dev.clone()]
+        );
+        let mut from_dev = pixel_hooks_running_other_binaries(&value, &dev);
+        from_dev.sort();
+        let mut expected = vec![exe.clone(), link];
+        expected.sort();
+        assert_eq!(
+            from_dev, expected,
+            "a binary that does not exist on disk compares by path alone"
+        );
+        let missing = dir.path().join("gone/pixel");
+        assert_eq!(
+            pixel_hooks_running_other_binaries(
+                &json!({"hooks":{"SessionStart":[hook(&missing, "session-start")]}}),
+                &dir.path().join("also-gone/pixel")
+            ),
+            vec![missing],
+            "two missing binaries are not the same one"
+        );
+        assert_eq!(
+            pixel_hooks_running_other_binaries(&Value::Null, &exe),
+            Vec::<PathBuf>::new()
+        );
     }
 
     /// Doctor names each stacked pixel hook with its count, whichever of
