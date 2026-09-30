@@ -88,6 +88,8 @@ pixel doctor .     # optional health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
+On Linux, Homebrew gives every formula its own `glibc` and `gcc` (gcc alone is over 400 MB) when the system glibc is older than the one its CI builds with (2.39 on Homebrew 7: Ubuntu 22.04 and Debian 12 are older). Pixel is a static binary and needs neither; on such a system, `curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh` installs it without them.
+
 Once a day, a command run at a terminal prints one yellow line when a newer release is out, with the command that updates your install (`brew`, `mise` or `install.sh`); hooks and agents never see it, and `PIXEL_NO_UPDATE_CHECK=1` turns it off.
 
 Other channels, per-agent plugins and manual setup are in the [docs](https://pixel-cli.dev/docs/).

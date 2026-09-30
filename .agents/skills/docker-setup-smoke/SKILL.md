@@ -40,7 +40,13 @@ sh .agents/skills/docker-setup-smoke/scripts/run.sh --agents --source main
 - **`--brew`**: `brew install LivioGama/tap/pixel` in the pinned `homebrew/brew`
   image, latest formula. Homebrew's prefix is private to its `linuxbrew` user, so
   that user runs the checks; uninstall must leave the Cellar binary to Homebrew.
-  `brew-deps.txt` lists what the formula pulled in.
+  `brew-deps.txt` lists what the formula pulled in, and `brew-host.txt` whether
+  Homebrew judges the host's glibc or libstdc++ older than its CI's: then it gives
+  every formula, bottled or not, an implicit `gcc` and `glibc`. A control formula
+  with no dependency (`local/smoke/control`) measures what the host adds
+  (`brew-host-deps.txt`); a dependency of pixel beyond it fails the run. The image
+  (Ubuntu 22.04, glibc 2.35) is such a host: its 12 are the control's, and a `NOTE`
+  says so.
 - **Source** (`--source`, `--pr`): fetch from `https://github.com/LivioGama/pixel.git`
   inside the container, check out the fetched commit detached, and build with
   pinned Rust 1.98.1, `--locked --no-default-features --features model2vec`, debug
