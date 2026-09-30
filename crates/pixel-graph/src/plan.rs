@@ -1135,36 +1135,47 @@ fn auth_marker_hits(text: &str) -> Vec<(&'static str, u32)> {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
     for &marker in AUTH_MARKERS {
+        // The post-match offset is computed with `checked_add` so a
+        // `+` → `-` cargo-mutants flip cannot underflow to a value that
+        // leaves `from` unchanged. Underflow on `at + marker.len()` (e.g.
+        // when `at == marker.len()` for an early match) would otherwise
+        // make `from = next` and the loop would spin forever, surfacing
+        // as a cargo-mutants TIMEOUT. `checked_add` collapses any overflow
+        // to `bytes.len()`, which terminates the loop on the next `find`.
         let mut from = 0;
         while let Some(off) = text[from..].find(marker) {
             let at = from + off;
-            // `from` strictly advances past the match — without this, a
-            // mutant that breaks the `+ / len()` expression could leave
-            // `from` equal to its starting value and spin forever.
-            let next = at + marker.len();
+            let end = at.checked_add(marker.len()).unwrap_or(bytes.len());
             let left_ok = at == 0 || !is_ident_byte(bytes[at - 1]);
-            let right_ok = next >= bytes.len() || !bytes[next].is_ascii_lowercase();
+            let right_ok = end >= bytes.len() || !bytes[end].is_ascii_lowercase();
             if left_ok && right_ok {
                 out.push((marker, line_at(text, at)));
                 break;
             }
-            from = next;
+            // Strict advance: even if `end` saturated to `bytes.len()`
+            // (overflow case) the loop terminates on the next `find`;
+            // otherwise `end` is the byte past the match.
+            from = end;
         }
     }
     out
 }
 
 /// Lines with an `auth(` call site — the next-auth style gate. The left
-/// identifier boundary keeps `oauth(` and `reauth()` out, and the paren must
+/// identifier boundary keeps `oauth()` and `reauth()` out, and the paren must
 /// be immediate so prose like `auth (the token)` is not a call.
 fn auth_call_hits(text: &str) -> Vec<u32> {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
+    let auth_len = "auth".len();
     let mut from = 0;
     while let Some(off) = text[from..].find("auth") {
         let at = from + off;
-        // `from` strictly advances past the match — see `auth_marker_hits`.
-        let next = at + "auth".len();
+        // `checked_add` for the same reason as `auth_marker_hits`: a
+        // `+` → `-` flip on `at + "auth".len()` when `at == 4` (the
+        // first match in the unit fixture) yields `next = 0`, which makes
+        // `from = next` and the loop spins forever.
+        let next = at.checked_add(auth_len).unwrap_or(bytes.len());
         if (at == 0 || !is_ident_byte(bytes[at - 1])) && next < bytes.len() && bytes[next] == b'(' {
             out.push(line_at(text, at));
         }
