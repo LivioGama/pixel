@@ -1,11 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 if [[ ${1:-} == --help ]]; then
-    echo "Usage: bash $0 [vX.Y.Z | --source main | --source SHA | --pr NUMBER | --installer | --brew]"
+    echo "Usage: bash $0 [--agents] [vX.Y.Z | --source main | --source SHA | --pr NUMBER | --installer | --brew]"
     echo 'Default: v0.6.1. Source builds use the fetched commit, not the PR merge ref.'
     echo '--installer and --brew install the latest published release through install.sh or the tap.'
+    echo '--agents then runs Claude Code, Codex and pi sessions against a scripted fake model.'
     exit 0
 fi
+agents=0
+if [[ ${1:-} == --agents ]]; then
+    agents=1
+    shift
+fi
+# Pinned so a session's evidence names the agent build it exercised.
+node_version=v24.21.0
+agent_packages='@anthropic-ai/claude-code@2.1.285 @openai/codex@0.159.2 @earendil-works/pi-coding-agent@0.99.1'
 mode=release
 release=v0.6.1
 source_ref=''
@@ -59,6 +68,12 @@ case $mode in
         ;;
 esac
 image="pixel-setup-smoke:$mode"
+if [[ $agents == 0 ]]; then
+    node_version=''
+    agent_packages=''
+else
+    image+=-agents
+fi
 trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
@@ -66,6 +81,7 @@ echo "Evidence: $evidence"
 {
     printf 'checkout: %s\nmode: %s\nrelease: %s\nsource-ref: %s\nbase: %s\nuser: %s\n' \
         "$(git -C "$repo" rev-parse HEAD)" "$mode" "$release" "$source_ref" "$base" "$user"
+    printf 'agents: %s\nnode: %s\nagent-packages: %s\n' "$agents" "$node_version" "$agent_packages"
     printf 'command: bash %q' "$0"
     if [[ $# -gt 0 ]]; then printf ' %q' "$@"; fi
     printf '\n'
@@ -73,7 +89,8 @@ echo "Evidence: $evidence"
 } > "$evidence/identity.txt"
 # Only the environment is built: no context is sent, pixel is fetched at run time.
 if ! docker build --progress plain --build-arg "BASE=$base" \
-    --build-arg "APT_SOURCE_PARTS=$apt_source_parts" --tag "$image" - \
+    --build-arg "APT_SOURCE_PARTS=$apt_source_parts" --build-arg "NODE_VERSION=$node_version" \
+    --build-arg "AGENT_PACKAGES=$agent_packages" --tag "$image" - \
     < "$scripts/Dockerfile" > "$evidence/build.log" 2>&1; then
     echo 1 > "$evidence/exit-status.txt"
     cat "$evidence/build.log"
@@ -89,8 +106,10 @@ docker run --name "$container" \
     --mount "type=bind,src=$scripts,dst=/checks,readonly" \
     --env "PIXEL_RELEASE=$release" --env "PIXEL_SOURCE_REF=$source_ref" \
     --env "PIXEL_BOOTSTRAP=$bootstrap" --env "PIXEL_BOOTSTRAP_TIMEOUT=$budget" \
-    --env "PIXEL_TEST_USER=$user" "$image" \
-    sh -ec 'timeout "$PIXEL_BOOTSTRAP_TIMEOUT" sh "/checks/$PIXEL_BOOTSTRAP"; timeout 300 su - "$PIXEL_TEST_USER" -s /bin/sh -c "sh /checks/checks.sh"' \
+    --env "PIXEL_TEST_USER=$user" --env "PIXEL_AGENTS=$agents" "$image" \
+    sh -ec 'timeout "$PIXEL_BOOTSTRAP_TIMEOUT" sh "/checks/$PIXEL_BOOTSTRAP"
+        timeout 300 su - "$PIXEL_TEST_USER" -s /bin/sh -c "sh /checks/checks.sh"
+        if [ "$PIXEL_AGENTS" = 1 ]; then timeout 600 su - "$PIXEL_TEST_USER" -s /bin/sh -c "sh /checks/agents.sh"; fi' \
     > "$evidence/run.log" 2>&1
 status=$?
 set -e

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Verify binary selection and failed-run evidence without starting Docker."""
+"""Verify mode selection, failed-run evidence and the fake model script without Docker."""
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -98,9 +99,32 @@ if sys.argv[1] == 'run':
                 self.assertTrue(any(arg.startswith(base) for arg in build))
                 self.assertIn(apt, build)
 
+    def test_agents_flag_adds_pinned_agent_clis_and_runs_the_sessions_after_the_checks(self):
+        result, calls = self.run_case('--agents', '--pr', '427')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        build = next(call for call in calls if call[0] == 'build')
+        self.assertIn('NODE_VERSION=v24.21.0', build)
+        packages = next(arg for arg in build if arg.startswith('AGENT_PACKAGES='))
+        for pinned in ('@anthropic-ai/claude-code@2.', '@openai/codex@0.', '@earendil-works/pi-coding-agent@0.'):
+            self.assertIn(pinned, packages)
+        self.assertIn('pixel-setup-smoke:source-agents', build)
+        run = next(call for call in calls if call[0] == 'run')
+        self.assertIn('PIXEL_AGENTS=1', run)
+        self.assertIn('PIXEL_SOURCE_REF=refs/pull/427/head', run)
+        self.assertLess(run[-1].index('checks.sh'), run[-1].index('agents.sh'))
+
+    def test_without_agents_flag_no_node_or_agent_cli_is_installed(self):
+        result, calls = self.run_case('v0.6.1')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        build = next(call for call in calls if call[0] == 'build')
+        self.assertIn('NODE_VERSION=', build)
+        self.assertIn('AGENT_PACKAGES=', build)
+        self.assertIn('PIXEL_AGENTS=0', next(call for call in calls if call[0] == 'run'))
+
     def test_ambiguous_or_invalid_selectors_never_provision_a_container(self):
         for args in [('v0.6.1', '--source', 'main'), ('--pr', '0'), ('--source', 'bad'), ('--pr', '427;echo'),
-                     ('--brew', 'v0.6.1'), ('--installer', '--brew')]:
+                     ('--brew', 'v0.6.1'), ('--installer', '--brew'), ('--brew', '--agents'),
+                     ('--agents', '--agents')]:
             with self.subTest(args=args):
                 result, calls = self.run_case(*args)
                 self.assertEqual(result.returncode, 2)
@@ -122,6 +146,40 @@ if sys.argv[1] == 'run':
         evidence = next((self.root / 'repo/target/docker-setup-smoke').iterdir())
         self.assertEqual((evidence / 'exit-status.txt').read_text(), '1\n')
         self.assertIn('build output retained', (evidence / 'build.log').read_text())
+
+
+class FakeModelScript(unittest.TestCase):
+    """The scripted model must walk both wire formats through the same steps."""
+
+    def setUp(self):
+        os.environ['FAKE_LLM_COMMANDS'] = 'pixel search-content -F x\ngrep -rn x'
+        spec = importlib.util.spec_from_file_location('fake_llm', Path(__file__).with_name('fake-llm.py'))
+        self.llm = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.llm)
+
+    def test_messages_calls_each_command_in_order_then_answers(self):
+        tools = [{'name': 'Read'}, {'name': 'Bash'}]
+        blocks, stop = self.llm.anthropic_turn({'tools': tools, 'messages': [{'role': 'user', 'content': 'q'}]})
+        self.assertEqual((blocks[0]['input']['command'], stop), ('pixel search-content -F x', 'tool_use'))
+        result = {'role': 'user', 'content': [{'type': 'tool_result', 'content': 'ok'}]}
+        blocks, stop = self.llm.anthropic_turn({'tools': tools, 'messages': [result]})
+        self.assertEqual((blocks[0]['input']['command'], stop), ('grep -rn x', 'tool_use'))
+        blocks, stop = self.llm.anthropic_turn({'tools': tools, 'messages': [result, result]})
+        self.assertEqual((blocks, stop), ([{'type': 'text', 'text': 'FAKE_LLM_DONE'}], 'end_turn'))
+
+    def test_a_request_without_a_shell_tool_gets_the_final_answer(self):
+        blocks, stop = self.llm.anthropic_turn({'tools': [{'name': 'Read'}], 'messages': []})
+        self.assertEqual(stop, 'end_turn')
+
+    def test_responses_fills_the_shell_tool_shape_codex_offers(self):
+        shapes = [({'cmd': {'type': 'string'}}, {'cmd': 'pixel search-content -F x'}),
+                  ({'command': {'type': 'array'}}, {'command': ['bash', '-lc', 'pixel search-content -F x']})]
+        for props, expected in shapes:
+            tool = {'type': 'function', 'name': 'exec_command', 'parameters': {'properties': props}}
+            item = self.llm.responses_turn({'tools': [tool], 'input': []})[0]
+            self.assertEqual(json.loads(item['arguments']), expected)
+        done = self.llm.responses_turn({'tools': [tool], 'input': [{'type': 'function_call_output'}] * 2})
+        self.assertEqual(done[0]['content'][0]['text'], 'FAKE_LLM_DONE')
 
 
 if __name__ == '__main__':

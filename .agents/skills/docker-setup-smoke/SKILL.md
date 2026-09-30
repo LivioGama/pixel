@@ -1,6 +1,6 @@
 ---
 name: docker-setup-smoke
-description: Replay Pixel's new-user setup in Docker without an LLM — install through a release archive, install.sh, the Homebrew tap, or sources from main, a PR head or a pinned commit; then personal Claude/Codex/pi settings kept, idempotent reinstall, first pixel audit, doctor and --fix, project install, disabled classify and uninstall. Use for Linux setup smoke checks, not macOS behavior or real model inference.
+description: Replay Pixel's new-user setup in Docker without an LLM — install through a release archive, install.sh, the Homebrew tap, or sources from main, a PR head or a pinned commit; then personal Claude/Codex/pi settings kept, idempotent reinstall, first pixel audit, doctor and --fix, project install, disabled classify and uninstall; with --agents, Claude Code, Codex and pi sessions against a scripted fake model show whether each receives the Pixel prompt, runs pixel and routes grep. Use for Linux setup smoke checks, not macOS behavior or real model inference.
 ---
 
 # Docker setup smoke
@@ -25,6 +25,8 @@ bash .agents/skills/docker-setup-smoke/scripts/run.sh --source main
 bash .agents/skills/docker-setup-smoke/scripts/run.sh --pr 427
 # Replay the exact source SHA recorded by a prior run:
 bash .agents/skills/docker-setup-smoke/scripts/run.sh --source <40-character-SHA>
+# Any of the above, then agent sessions against the fake model:
+bash .agents/skills/docker-setup-smoke/scripts/run.sh --agents --source main
 ```
 
 ## Binary modes
@@ -74,6 +76,38 @@ A personal `PreToolUse` hook matching Bash makes `pixel install --repo` skip the
 Claude guard (yellow `claude guard not installed`); the fixture matches
 Edit|Write so the guard is installed.
 
+## Agent sessions (`--agents`)
+
+The image then also carries Node and pinned agent CLIs (`node_version` and
+`agent_packages` in `run.sh`: Node v24.21.0, Claude Code 2.1.285, Codex 0.159.2,
+pi 0.99.1). After `checks.sh`, `agents.sh` reinstalls Pixel over the restored
+personal settings, installs it in a copy of the project, and runs one
+non-interactive session per agent: `claude -p`, `codex exec`, `pi --print`.
+
+No model or key is involved. `fake-llm.py` listens on `127.0.0.1:8765` inside the
+container and speaks Anthropic Messages (Claude Code, and pi through a
+`models.json` provider) and OpenAI Responses (Codex through `-c
+model_providers.smoke=…`). It plays a fixed script: call the agent's shell tool
+with `pixel search-content -F helper_1 src`, then with `grep -rn helper_1 src`,
+then answer `FAKE_LLM_DONE`. Every request is logged to
+`<agent>-requests.jsonl`, which is the evidence of what the agent sent a model.
+
+The project is trusted the way a user accepting the prompt would: a Codex
+`projects."<path>".trust_level="trusted"` override and pi `--approve`. Without
+it, neither loads project-level configuration.
+
+Asserted per agent: exit and final answer, the Pixel prompt in the first model
+request (`Pixel Retrieval Layer` for Claude's SessionStart context,
+`pixel:managed:begin` for Codex developer instructions and pi's
+`APPEND_SYSTEM.md`), both tool results fed back, and a new `search-content` row
+in the project's `.pixel/actions.jsonl` from the model's pixel call. Reported,
+not asserted: whether the guard routed the native `grep` (a new `search-compat`
+row), and whether Claude received the prompt only as a `<persisted-output>`
+preview because the hook output exceeded its inline limit.
+
+A scripted model shows the harness wiring — prompt delivery, hooks, guards, the
+binary on the agent's PATH — not whether a real model follows the prompt.
+
 ## Environment and isolation
 
 `scripts/Dockerfile` holds the environment only: the pinned base image, curl,
@@ -101,18 +135,19 @@ Report the tested binary's version and commit separately from the runner checkou
 SHA. Source mode tests fetched upstream code, not uncommitted local changes.
 
 Not covered: macOS (Homebrew on macOS included), shells other than bash,
-interactive setup, real agent sessions or model inference.
+interactive setup and agent TUIs, real model inference or a model's compliance.
 
 Prerequisites: Bash, Git, a running Docker engine with BuildKit (Docker Desktop's
 default) and network access to GitHub, Docker Hub and crates.io, plus Debian or
 Ubuntu mirrors until the smoke image is cached. The image build is not
 time-bounded; bootstrap is bounded to 5 minutes (release, installer), 15 minutes
-(brew) or 30 minutes (source), and checks to 5 minutes. CPU/memory limits are
-4 CPUs/6 GiB.
+(brew) or 30 minutes (source), checks to 5 minutes and agent sessions to 10.
+`--agents` also needs nodejs.org and the npm registry until its image is cached.
+CPU/memory limits are 4 CPUs/6 GiB.
 On failure inspect the saved evidence and fix the cause before replaying.
 
 When changing the runner, run `python3 scripts/test-runner.py` from this skill
 directory and ShellCheck on its shell scripts. The contract tests verify mode
-selection, invalid-selector rejection, failed-build and failed-run evidence
-without Docker; also replay the lifecycle in Docker for the modes affected by the
+selection, invalid-selector rejection, failed-build and failed-run evidence and
+the fake model's script in both wire formats without Docker; also replay the lifecycle in Docker for the modes affected by the
 change.
