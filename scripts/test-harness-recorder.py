@@ -235,10 +235,21 @@ class RecorderContract(unittest.TestCase):
         bare = self.root / "harness-recordings-media.git"
         subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        # A GitHub-shaped configured URL so the recorder derives owner/repo
+        # from remote.origin.url; rewritten to the local bare repo so the
+        # plumbing below still talks to it.
         subprocess.run(["git", "-C", str(self.repo), "remote", "add",
-                        "origin", str(bare)], check=True)
+                        "origin", "https://github.com/o/r"], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "config",
+                        f"url.{bare}.insteadOf", "https://github.com/o/r"],
+                       check=True)
         subprocess.run(["git", "-C", str(self.repo), "commit", "-q",
                         "--allow-empty", "-m", "base"], check=True)
+        subprocess.run(
+            ["git", "-C", str(self.repo), "push", "-q", "origin",
+             "HEAD:refs/heads/harness-recordings-media"],
+            check=True,
+        )
         r = self.run_recorder(*self.base_flags("claude"), "--gif", "--post", "42")
         self.assertEqual(r.returncode, 0, r.stderr)
         comment = (self.out / "comment-claude-locate.md").read_text()

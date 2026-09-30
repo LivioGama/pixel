@@ -21,16 +21,18 @@ set -u
 PR="${1:-}"
 PROMPT="${2:-Create the \"story\" feature}"
 VM="pixel"
-SHOOT4="/Users/livio/Downloads/shoot4"
-OUTDIR="$SHOOT4"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RECORDER="$SCRIPT_DIR/harness-recorder.sh"
+OUTDIR="${HARNESS_OUTDIR:-$SCRIPT_DIR/shoot4}"
 REPO_ORIGIN="git@github.com:LivioGama/facebook-clone.git"
 AGY_MAC_REPO="${AGY_MAC_REPO:-$HOME/Documents/facebook-clone-agy}"
 GRID_BEGIN="<!-- sandbox-grid:begin -->"
 GRID_END="<!-- sandbox-grid:end -->"
 
 die() { echo "harness-sandbox-shoot: $*" >&2; exit 2; }
+trap 'rm -f "$OUTDIR/media-index"' EXIT
+# Every shell these run through re-parses the prompt/repo: quote once here.
+qprompt=$(printf '%q' "$PROMPT")
 command -v orb >/dev/null 2>&1 || die "orb not found (OrbStack)"
 command -v gh >/dev/null 2>&1 || die "gh not found"
 command -v agg >/dev/null 2>&1 || die "agg not found (brew install agg)"
@@ -74,6 +76,8 @@ pixel build-index "$AGY_MAC_REPO" >/dev/null 2>&1 || true
 # ── 3. Shoot: four recorders in parallel (SKIP_SHOOT=1 reuses casts) ───────
 mkdir -p "$OUTDIR"
 if [ -z "${SKIP_SHOOT:-}" ]; then
+    qoutdir=$(printf '%q' "$OUTDIR")
+    qrecorder=$(printf '%q' "$RECORDER")
     for spec in "claude|/home/livio/facebook-clone-claude-code|vm" \
                 "codex|/home/livio/facebook-clone-codex|vm" \
                 "pi|/home/livio/facebook-clone-devin|vm" \
@@ -82,13 +86,15 @@ if [ -z "${SKIP_SHOOT:-}" ]; then
         rest="${spec#*|}"
         repo="${rest%%|*}"
         host="${rest##*|}"
+        qprovider=$(printf '%q' "$provider")
+        qrepo=$(printf '%q' "$repo")
         if [ "$host" = "vm" ]; then
-            orb -m "$VM" bash -lc "cd /Users/livio/Downloads && env IS_SANDBOX=1 \
-                HARNESS_PROMPT_FULL=\"$PROMPT\" HARNESS_OUTDIR=/Users/livio/Downloads/shoot4 \
+            orb -m "$VM" bash -lc "env IS_SANDBOX=1 \
+                HARNESS_PROMPT_FULL=$qprompt HARNESS_OUTDIR=$qoutdir \
                 HARNESS_INTERACTIVE_MAX=300 HARNESS_INTERACTIVE_TMUX=1 \
                 PATH=/home/linuxbrew/.linuxbrew/bin:/home/livio/.local/bin:\$PATH \
-                bash /Users/livio/Downloads/harness-recorder.sh \
-                --provider $provider --repo $repo --scenario rns --interactive" \
+                bash $qrecorder \
+                --provider $qprovider --repo $qrepo --scenario rns --interactive" \
                 > "$OUTDIR/shoot-$provider.log" 2>&1 &
         else
             HARNESS_PROMPT_FULL="$PROMPT" HARNESS_OUTDIR="$OUTDIR" \
@@ -127,13 +133,13 @@ done
 # ── 5. Live 2x2 grid tmux (detached; the script attaches at the end) ───────
 tmux kill-session -t shoot-grid 2>/dev/null || true
 tmux new-session -d -s shoot-grid -n grid \
-    "orb -m $VM bash -lc 'cd /home/livio/facebook-clone-claude-code && exec claude --dangerously-skip-permissions \"$PROMPT\"'"
+    "orb -m $VM bash -lc $(printf '%q' "cd /home/livio/facebook-clone-claude-code && exec claude --dangerously-skip-permissions $qprompt")"
 tmux split-window -h -t shoot-grid \
-    "orb -m $VM bash -lc 'cd /home/livio/facebook-clone-codex && exec codex'"
+    "orb -m $VM bash -lc $(printf '%q' "cd /home/livio/facebook-clone-codex && exec codex $qprompt")"
 tmux split-window -v -t shoot-grid.0 \
-    "orb -m $VM bash -lc 'cd /home/livio/facebook-clone-devin && exec pi \"$PROMPT\"'"
+    "orb -m $VM bash -lc $(printf '%q' "cd /home/livio/facebook-clone-devin && exec pi $qprompt")"
 tmux split-window -v -t shoot-grid.1 \
-    "cd '$AGY_MAC_REPO' && exec bash -c '$HOME/.local/bin/agy -i=\"$PROMPT\" --dangerously-skip-permissions'"
+    "cd $(printf '%q' "$AGY_MAC_REPO") && exec bash -c $(printf '%q' "$HOME/.local/bin/agy -i=$qprompt --dangerously-skip-permissions")"
 tmux select-layout -t shoot-grid tiled
 echo "  live grid running"
 
@@ -145,29 +151,39 @@ if [ -n "$PR" ]; then
     }
     base=$(git rev-parse -q --verify FETCH_HEAD)
     export GIT_INDEX_FILE="$OUTDIR/media-index"
-    git read-tree "$(git rev-parse "$base^{tree}")"
+    git read-tree "$(git rev-parse "$base^{tree}")" || die "media read-tree failed"
     for provider in claude codex pi agy; do
         gif="$OUTDIR/harness-$provider-rns.gif"
         [ -s "$gif" ] || continue
-        blob=$(git hash-object -w "$gif")
-        git update-index --add --cacheinfo 100644,$blob,recordings/grid/$provider-rns.gif
+        blob=$(git hash-object -w "$gif") || die "media hash-object failed ($provider)"
+        git update-index --add --cacheinfo "100644,$blob,recordings/grid/$provider-rns.gif" \
+            || die "media update-index failed ($provider)"
     done
-    tree=$(git write-tree)
+    tree=$(git write-tree) || die "media write-tree failed"
     unset GIT_INDEX_FILE
+    rm -f "$OUTDIR/media-index"
     commit=$(git -c user.email=pixel-recorder@local -c user.name=pixel-recorder \
         commit-tree "$tree" -p "$base" -m "sandbox grid: story-feature shoots for PR #$PR")
     git push -q origin "$commit:refs/heads/harness-recordings-media" || die "media push failed"
     echo "  media branch updated"
 
     gh pr view "$PR" --json body -q .body > "$OUTDIR/pr-body-current.md" 2>/dev/null || true
-    python3 - "$PR" "$OUTDIR" "$GRID_BEGIN" "$GRID_END" << 'PY'
+    if ! python3 - "$PR" "$OUTDIR" "$GRID_BEGIN" "$GRID_END" << 'PY'
 import json, subprocess, sys
 pr, outdir, begin_m, end_m = sys.argv[1:5]
-body = subprocess.run(["gh", "pr", "view", pr, "--json", "body", "-q", ".body"],
-                      capture_output=True, text=True).stdout
+result = subprocess.run(["gh", "pr", "view", pr, "--json", "body", "-q", ".body"],
+                        capture_output=True, text=True)
+if result.returncode != 0:
+    raise SystemExit("gh pr view failed")
+body = result.stdout
 rows = ""
 for p in ("claude", "codex", "pi", "agy"):
-    m = json.load(open(f"{outdir}/meta-{p}-rns.json"))
+    try:
+        with open(f"{outdir}/meta-{p}-rns.json") as f:
+            m = json.load(f)
+    except FileNotFoundError:
+        rows += f"| {p} | n/a | n/a |\n"
+        continue
     rows += f"| {p} | {m['pixel_calls']} | {round(m['wall_ms'] / 1000)}s |\n"
 grid = "\n".join([
     begin_m,
@@ -189,6 +205,9 @@ else:
     body = body.rstrip() + "\n\n---\n\n" + grid + "\n"
 open(f"{outdir}/pr-body.md", "w").write(body)
 PY
+    then
+        die "PR description retrieval failed"
+    fi
     gh pr edit "$PR" --body-file "$OUTDIR/pr-body.md" || die "pr edit failed"
     echo "  PR description updated"
 fi

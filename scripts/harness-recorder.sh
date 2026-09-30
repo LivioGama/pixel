@@ -527,12 +527,14 @@ body_file="$OUTDIR/comment-$BASE.md"
 media_branch_raw_url() {
     git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || return 0
     git -C "$REPO" ls-remote --exit-code origin refs/heads/harness-recordings-media >/dev/null 2>&1
-    remote_url=$(git -C "$REPO" remote get-url origin 2>/dev/null) || return 0
-    owner_repo=${remote_url#git@github.com:}
-    owner_repo=${owner_repo#https://github.com:}
-    owner_repo=${owner_repo#https://github.com/}
+    remote_url=$(git -C "$REPO" config --get remote.origin.url 2>/dev/null) || return 0
+    case "$remote_url" in
+        git@github.com:*) owner_repo=${remote_url#git@github.com:} ;;
+        https://github.com/*) owner_repo=${remote_url#https://github.com/} ;;
+        ssh://git@github.com/*) owner_repo=${remote_url#ssh://git@github.com/} ;;
+        *) return 0 ;;
+    esac
     owner_repo=${owner_repo%.git}
-    [ "$owner_repo" = "$remote_url" ] && return 0
     local blob tree commit base parent branch_path="$2"
     blob=$(git -C "$REPO" hash-object -w "$1") || return 0
     git -C "$REPO" fetch -q origin harness-recordings-media 2>/dev/null
