@@ -19,9 +19,8 @@ use toml_edit::{DocumentMut, Item, Table, Value as TomlValue};
 use super::agents::DEFAULT_CLAUDE_MODEL;
 use super::provider::Provider;
 
-/// Codex's provider name for the recording route. One literal name across
-/// all three providers: the apply path rewrites one block, and a Codex
-/// reinstall never has to guess which of three names is current.
+/// Codex's provider name for the recording route. One literal name, so a
+/// Codex reinstall never has to guess which name the apply path wrote.
 pub(crate) const MODEL_PROVIDER_NAME: &str = "recording_cloud";
 
 /// Where the recording gateway listens. Claude and Antigravity are pointed
@@ -288,16 +287,13 @@ mod tests {
     fn codex_gets_the_model_provider_and_route_block() {
         let home = Scratch::new();
         let path = codex_config(home.path());
-        write_codex(&path, Provider::Groq).unwrap();
+        write_codex(&path, Provider::Ollama).unwrap();
         let doc: DocumentMut = fs::read_to_string(&path).unwrap().parse().unwrap();
-        assert_eq!(doc["model"].as_str(), Some("openai/gpt-oss-120b"));
+        assert_eq!(doc["model"].as_str(), Some("deepseek-v4.1-flash"));
         assert_eq!(doc["model_provider"].as_str(), Some(MODEL_PROVIDER_NAME));
         let route = &doc["model_providers"][MODEL_PROVIDER_NAME];
-        assert_eq!(
-            route["base_url"].as_str(),
-            Some("https://api.groq.com/openai/v1")
-        );
-        assert_eq!(route["env_key"].as_str(), Some("GROQ_API_KEY"));
+        assert_eq!(route["base_url"].as_str(), Some("https://ollama.com/v1"));
+        assert_eq!(route["env_key"].as_str(), Some("OLLAMA_API_KEY"));
         assert_eq!(route["wire_api"].as_str(), Some("chat"));
     }
 
@@ -311,11 +307,11 @@ mod tests {
             "developer_instructions = \"pixel prompt\"\nmodel = \"stale\"\napproval_policy = \"never\"\n",
         )
         .unwrap();
-        write_codex(&path, Provider::Cerebras).unwrap();
+        write_codex(&path, Provider::Ollama).unwrap();
         let doc: DocumentMut = fs::read_to_string(&path).unwrap().parse().unwrap();
         assert_eq!(doc["developer_instructions"].as_str(), Some("pixel prompt"));
         assert_eq!(doc["approval_policy"].as_str(), Some("never"));
-        assert_eq!(doc["model"].as_str(), Some("gpt-oss-120b"));
+        assert_eq!(doc["model"].as_str(), Some("deepseek-v4.1-flash"));
     }
 
     /// A user's own provider blocks are theirs. This writer owns exactly one
@@ -334,7 +330,7 @@ mod tests {
             "[model_providers.local_llama]\nname = \"llama\"\nbase_url = \"http://127.0.0.1:11434/v1\"\n",
         )
         .unwrap();
-        write_codex(&path, Provider::Groq).unwrap();
+        write_codex(&path, Provider::Ollama).unwrap();
         let doc: DocumentMut = fs::read_to_string(&path).unwrap().parse().unwrap();
         assert_eq!(
             doc["model_providers"]["local_llama"]["base_url"].as_str(),
@@ -343,7 +339,7 @@ mod tests {
         );
         assert_eq!(
             doc["model_providers"][MODEL_PROVIDER_NAME]["base_url"].as_str(),
-            Some("https://api.groq.com/openai/v1")
+            Some("https://ollama.com/v1")
         );
     }
 
@@ -357,7 +353,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let broken = "model_providers = \"nonsense\"\n";
         fs::write(&path, broken).unwrap();
-        let error = write_codex(&path, Provider::Groq).unwrap_err();
+        let error = write_codex(&path, Provider::Ollama).unwrap_err();
         assert!(error.contains("not a table"), "{error}");
         assert_eq!(fs::read_to_string(&path).unwrap(), broken, "file touched");
     }
@@ -369,7 +365,7 @@ mod tests {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let broken = "this is not = = toml\n";
         fs::write(&path, broken).unwrap();
-        let error = write_codex(&path, Provider::Groq).unwrap_err();
+        let error = write_codex(&path, Provider::Ollama).unwrap_err();
         assert!(error.contains("not valid TOML"), "{error}");
         assert_eq!(fs::read_to_string(&path).unwrap(), broken, "file touched");
     }
@@ -454,7 +450,7 @@ mod tests {
         // must not carry the secret is the file that must not mention it.
         let home = Scratch::new();
         let path = claude_settings(home.path());
-        write_claude(&path, Provider::Groq).unwrap();
+        write_claude(&path, Provider::Ollama).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         assert!(!text.contains(GATEWAY_TOKEN_ENV), "{text}");
         assert!(!text.contains("litellm"), "{text}");
@@ -504,7 +500,7 @@ mod tests {
         let path = antigravity_settings(home.path());
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, r#"{"trustedWorkspaces":["/w"]}"#).unwrap();
-        write_antigravity(&path, Provider::Groq).unwrap();
+        write_antigravity(&path, Provider::Ollama).unwrap();
         let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(value["AGY_LLM_GATEWAY_URL"], GATEWAY_URL);
         assert_eq!(value["trustedWorkspaces"][0], "/w");
@@ -515,7 +511,7 @@ mod tests {
         let home = Scratch::new();
         let path = antigravity_settings(home.path());
         assert!(!path.exists());
-        write_antigravity(&path, Provider::Groq).unwrap();
+        write_antigravity(&path, Provider::Ollama).unwrap();
         let value: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(value["AGY_LLM_GATEWAY_URL"], GATEWAY_URL);
     }

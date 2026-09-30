@@ -2,10 +2,10 @@
 //!
 //! The command's job is to say what is true, so the tests here are about
 //! what it refuses to claim as much as what it reports. Every run in this
-//! file is pointed at an empty HOME with no provider keys, which is the one
-//! state that needs no network: three classified failures and four agents
-//! that could not reach a model. A test that reached a real provider would
-//! be a test about the machine, not about the command.
+//! file is pointed at an empty HOME with no provider key, which is the one
+//! state that needs no network: one classified failure and four agents that
+//! could not reach a model. A test that reached a real provider would be a
+//! test about the machine, not about the command.
 
 use crate::support::{neutral_home, pixel_command};
 
@@ -17,8 +17,6 @@ fn readify(args: &[&str]) -> std::process::Output {
     command.env("HOME", neutral_home());
     for key in [
         "OLLAMA_API_KEY",
-        "GROQ_API_KEY",
-        "CEREBRAS_API_KEY",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
         "ANTHROPIC_CUSTOM_HEADERS",
@@ -41,7 +39,7 @@ fn report(args: &[&str]) -> serde_json::Value {
 }
 
 #[test]
-fn the_json_report_names_all_three_providers_in_priority_order() {
+fn the_json_report_names_the_provider() {
     let report = report(&["ai-cli-readify", "--json", "--timeout", "1"]);
     let providers: Vec<&str> = report["providers"]
         .as_array()
@@ -49,10 +47,7 @@ fn the_json_report_names_all_three_providers_in_priority_order() {
         .iter()
         .map(|row| row["provider"].as_str().unwrap())
         .collect();
-    // The order is the priority order, not the completion order: the three
-    // probes run concurrently and the report must not reflect which socket
-    // answered first.
-    assert_eq!(providers, ["ollama", "groq", "cerebras"]);
+    assert_eq!(providers, ["ollama"]);
 }
 
 #[test]
@@ -201,12 +196,16 @@ fn approvals_are_not_attempted_without_the_flag_and_the_report_says_so() {
 }
 
 #[test]
-fn the_approve_flag_clears_nothing_when_the_agent_binaries_are_absent() {
+fn the_approve_flag_clears_only_the_gate_it_can_reach_with_no_binary_on_path() {
     // `--approve` is the one flag that writes a trust decision, so the case
-    // where it must write nothing is run with a PATH that cannot reach
-    // `codex`, against a HOME it could have written into. Nothing here is
-    // asserted about *why* each agent failed beyond the one path this
-    // command owns: the point is that a missing binary is not an approval.
+    // where it writes nothing is run with a PATH that cannot reach any agent
+    // binary, against a HOME it could have written into. What decides each
+    // answer is what that agent's gate *is*: Codex's is an exchange with its
+    // own app-server, so no binary means no approval; Claude's is a key in
+    // `~/.claude.json` that Claude Code reads the next time it runs, so a
+    // missing binary is not in its way and the write still happens. An
+    // absent binary is neither an approval nor a refusal — each row has to
+    // say which of the two it is.
     let mut command = pixel_command();
     command
         .args(["ai-cli-readify", "--json", "--approve", "--timeout", "1"])
@@ -214,8 +213,6 @@ fn the_approve_flag_clears_nothing_when_the_agent_binaries_are_absent() {
         .env("PATH", empty_path());
     for key in [
         "OLLAMA_API_KEY",
-        "GROQ_API_KEY",
-        "CEREBRAS_API_KEY",
         "ANTHROPIC_API_KEY",
         "ANTHROPIC_AUTH_TOKEN",
     ] {
@@ -231,19 +228,63 @@ fn the_approve_flag_clears_nothing_when_the_agent_binaries_are_absent() {
         .as_array()
         .expect("--approve reports one row per agent");
     assert_eq!(rows.len(), 4, "{report}");
-    for row in rows {
-        assert_eq!(row["approved"], false, "{row}");
+    let row = |agent: &str| -> &serde_json::Value {
+        rows.iter()
+            .find(|row| row["agent"] == agent)
+            .unwrap_or_else(|| panic!("no approval row for {agent}: {report}"))
+    };
+
+    // Codex runs its gate through its own app-server, so with none on PATH
+    // there is nothing to clear — and the row owes the reason rather than a
+    // silent success.
+    let codex = row("codex");
+    assert_eq!(codex["approved"], false, "{codex}");
+    assert!(
+        !codex["detail"].as_str().unwrap().trim().is_empty(),
+        "a gate that was not cleared must say why: {codex}"
+    );
+
+    // Claude's gate is that file, and writing it involves no process.
+    let claude = row("claude");
+    assert_eq!(claude["approved"], true, "{claude}");
+
+    // The two the reference never wrote: their trust state is read-only
+    // here, so neither the flag nor a binary could have changed it.
+    for agent in ["antigravity", "devin"] {
+        let entry = row(agent);
+        assert_eq!(entry["approved"], false, "{entry}");
         assert!(
-            !row["detail"].as_str().unwrap().trim().is_empty(),
-            "a gate that was not cleared must say why: {row}"
+            entry["detail"]
+                .as_str()
+                .unwrap()
+                .contains("no approval path"),
+            "{entry}"
         );
     }
-    for path in ["codex/config.toml", ".claude.json"] {
-        assert!(
-            !neutral_home().join(path).exists(),
-            "--approve must not create {path} when it cleared nothing"
-        );
-    }
+
+    // The report and the disk have to agree: the folder Codex would have
+    // written holds no file at all, and Claude's holds the facts its two
+    // dialogs ask about, keyed on the workspace.
+    assert!(
+        !neutral_home().join("codex/config.toml").exists(),
+        "--approve cleared no Codex gate, so it must have written none"
+    );
+    let written: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(neutral_home().join(".claude.json"))
+            .expect("claude's gate was cleared, so the file is there"),
+    )
+    .expect("the file this command writes is JSON");
+    assert_eq!(written["hasCompletedOnboarding"], true, "{written}");
+    let projects = written["projects"]
+        .as_object()
+        .expect("trust is recorded per workspace");
+    assert!(!projects.is_empty(), "{written}");
+    assert!(
+        projects
+            .values()
+            .all(|entry| entry["hasTrustDialogAccepted"] == true),
+        "{written}"
+    );
 }
 
 #[test]

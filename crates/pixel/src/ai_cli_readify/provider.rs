@@ -1,4 +1,4 @@
-//! The three providers, the honest probe, and the failure classification.
+//! The provider, the honest probe, and the failure classification.
 //!
 //! The probe is honest because it is representative: it sends the same shape
 //! of request an agent's first real turn sends, so a provider that answers a
@@ -6,11 +6,10 @@
 //! that means no system message and a `max_tokens` reservation in the range
 //! a real turn books — a 16-token reservation costs nothing against a
 //! tokens-per-minute budget and reports Ready on a provider whose next real
-//! request comes back 429. The 2026-09 run against the three providers failed
-//! in three different ways (Ollama 429 session limit, Groq fine on the toy
-//! probe and rate-limited on the real request, Cerebras 402 with a valid
-//! credential), which is what this module's classification exists to say out
-//! loud instead of collapsing into "unreachable".
+//! request comes back 429. Ollama Cloud answers both ways this module's
+//! classification exists to tell apart: a 429 session limit, and a 404 for a
+//! model name it stopped serving — each reported as its own condition instead
+//! of collapsed into "unreachable".
 
 use std::time::Duration;
 
@@ -39,34 +38,12 @@ pub(crate) const PROBE_PROMPT: &str = "Reply exactly READY.";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Provider {
     Ollama,
-    Groq,
-    Cerebras,
 }
 
 impl Provider {
-    /// The priority order the winner is chosen in. It is applied to the
-    /// probe *results*, after all three probes have run concurrently, so the
-    /// wall-clock is parallel while the choice stays deterministic. Reading
-    /// it through this association rather than a free constant keeps one
-    /// source of truth for both the order and each provider's `rank`.
-    pub(crate) const PROBE_ORDER: [Provider; 3] = [Self::Ollama, Self::Groq, Self::Cerebras];
-
-    /// Position in [`Provider::PROBE_ORDER`]. The single source of truth for
-    /// both the ordering of the report and the `Ord` impl that lets the key
-    /// map iterate in priority order; a test ties the two together.
-    pub(crate) const fn rank(self) -> usize {
-        match self {
-            Self::Ollama => 0,
-            Self::Groq => 1,
-            Self::Cerebras => 2,
-        }
-    }
-
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Ollama => "ollama",
-            Self::Groq => "groq",
-            Self::Cerebras => "cerebras",
         }
     }
 
@@ -74,24 +51,20 @@ impl Provider {
     pub(crate) const fn base_url(self) -> &'static str {
         match self {
             Self::Ollama => "https://ollama.com/v1",
-            Self::Groq => "https://api.groq.com/openai/v1",
-            Self::Cerebras => "https://api.cerebras.ai/v1",
         }
     }
 
     /// The model an agent is pointed at when this provider wins.
     ///
-    /// These are names the provider currently serves, and Ollama's changes
-    /// without notice: `deepseek-v3.1:cloud` was answered with `404 model not
-    /// found`, which demoted the highest-priority provider on every run while
-    /// the report blamed the request. `deepseek-v4.1-flash` is the name
-    /// `GET https://ollama.com/v1/models` returns. A 404 here now reports
-    /// itself as [`ProbeFailure::NoModel`] rather than as a refused request.
+    /// A name the provider currently serves, and Ollama's changes without
+    /// notice: `deepseek-v3.1:cloud` was answered with `404 model not found`,
+    /// which failed the probe on every run while the report blamed the
+    /// request. `deepseek-v4.1-flash` is the name
+    /// `GET https://ollama.com/v1/models` returns. A 404 here reports itself
+    /// as [`ProbeFailure::NoModel`] rather than as a refused request.
     pub(crate) const fn model(self) -> &'static str {
         match self {
             Self::Ollama => "deepseek-v4.1-flash",
-            Self::Groq => "openai/gpt-oss-120b",
-            Self::Cerebras => "gpt-oss-120b",
         }
     }
 
@@ -100,21 +73,7 @@ impl Provider {
     pub(crate) const fn key_env(self) -> &'static str {
         match self {
             Self::Ollama => "OLLAMA_API_KEY",
-            Self::Groq => "GROQ_API_KEY",
-            Self::Cerebras => "CEREBRAS_API_KEY",
         }
-    }
-}
-
-impl Ord for Provider {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.rank().cmp(&other.rank())
-    }
-}
-
-impl PartialOrd for Provider {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
     }
 }
 
@@ -359,9 +318,9 @@ pub(crate) fn redact(text: &str) -> String {
 
 /// A token that carries a credential: a bearer value, or a long run of
 /// key-shaped characters. Deliberately generous — a false positive costs a
-/// The prefixes a key carries in the three providers' own documentation. A
-/// run matching one of these and longer than a bare word is masked whatever
-/// else it looks like.
+/// The prefixes a key carries in the provider's own documentation. A run
+/// matching one of these and longer than a bare word is masked whatever else
+/// it looks like.
 const SECRET_PREFIXES: [&str; 4] = ["sk-", "sk_", "Bearer", "bearer"];
 
 /// The longest run of alphanumerics, dashes, underscores and dots that a
@@ -381,7 +340,7 @@ fn looks_like_a_secret(token: &str) -> bool {
         return true;
     }
     // A long unbroken alphanumeric run is a key whatever its prefix: the
-    // three providers' keys are all 30+ characters of that shape.
+    // provider's key is 30+ characters of that shape.
     trimmed.len() >= KEY_RUN_CHARS
         && trimmed
             .chars()
@@ -450,16 +409,9 @@ mod tests {
 
     fn probe_against(status: u16, body: &str) -> ProbeOutcome {
         let (base, server) = http_once(status, body);
-        let outcome = probe(Provider::Groq, &base, "test-key", Duration::from_secs(5));
+        let outcome = probe(Provider::Ollama, &base, "test-key", Duration::from_secs(5));
         let _ = server.join();
         outcome
-    }
-
-    #[test]
-    fn probe_order_matches_the_rank_it_sorts_by() {
-        for (position, provider) in Provider::PROBE_ORDER.iter().enumerate() {
-            assert_eq!(position, provider.rank(), "{provider:?}");
-        }
     }
 
     #[test]
@@ -474,18 +426,18 @@ mod tests {
 
     #[test]
     fn the_probe_body_reserves_more_than_a_toy_completion() {
-        let body = probe_body(Provider::Cerebras);
+        let body = probe_body(Provider::Ollama);
         assert_eq!(body["max_tokens"], PROBE_MAX_TOKENS);
         // Read back off the payload rather than off the constant: a toy
-        // reservation is what made the old probe report Ready on Groq while
-        // the real request came back 429, and the payload is what the
-        // provider is actually asked for.
+        // reservation is what lets a probe report Ready while the real
+        // request comes back 429, and the payload is what the provider is
+        // actually asked for.
         let reserved = body["max_tokens"].as_u64().expect("a reserved token count");
         assert!(
             reserved > 16,
             "a toy reservation is the probe lying: {body}"
         );
-        assert_eq!(body["model"], "gpt-oss-120b");
+        assert_eq!(body["model"], "deepseek-v4.1-flash");
     }
 
     #[test]
@@ -512,7 +464,7 @@ mod tests {
     #[test]
     fn the_probe_sends_the_bearer_key_and_the_model() {
         let (base, server) = http_once(200, r#"{"choices":[{"message":{"content":"READY"}}]}"#);
-        probe(Provider::Cerebras, &base, "sekret", Duration::from_secs(5));
+        probe(Provider::Ollama, &base, "sekret", Duration::from_secs(5));
         let (head, sent) = server.join().unwrap();
         assert!(
             head.starts_with("POST /chat/completions HTTP/1.1"),
@@ -524,7 +476,7 @@ mod tests {
             "{head}"
         );
         let sent: serde_json::Value = serde_json::from_str(&sent).unwrap();
-        assert_eq!(sent, probe_body(Provider::Cerebras));
+        assert_eq!(sent, probe_body(Provider::Ollama));
     }
 
     #[test]

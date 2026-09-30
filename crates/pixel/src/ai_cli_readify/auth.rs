@@ -301,7 +301,6 @@ mod tests {
             agent: agent.name(),
             provider: Some("ollama"),
             ready,
-            tried: vec!["ollama"],
             detail: detail.to_string(),
             blocker: None,
         }

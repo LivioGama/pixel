@@ -4,13 +4,11 @@
 //!
 //! The shape of a run is two waves, not a queue:
 //!
-//! 1. the three providers are probed concurrently, and the winner is the
-//!    highest-priority one that answered — so the wall clock is the slowest
-//!    provider, not their sum;
-//! 2. each selected agent is probed in its own thread, and a lane that meets
-//!    a classified failure (a throttled or exhausted provider) re-loops onto
-//!    the next provider in priority order rather than reporting the whole
-//!    agent unready.
+//! 1. the provider is probed once, and it is the winner exactly when it
+//!    answered;
+//! 2. each selected agent is probed in its own thread against that provider,
+//!    and a lane whose probe found no provider at all is reported blocked
+//!    rather than launched at nothing.
 //!
 //! A third, optional step follows: under `--approve`, the agent's own startup
 //! gate is cleared for the one workspace named on the command line. It is
@@ -94,7 +92,6 @@ pub(crate) struct Options {
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct ProviderRow {
     pub(crate) provider: &'static str,
-    pub(crate) priority: usize,
     pub(crate) ready: bool,
     /// The reply, or the classified reason there was none.
     pub(crate) detail: String,
@@ -107,8 +104,6 @@ pub(crate) struct AgentRow {
     /// The provider that answered, when one did.
     pub(crate) provider: Option<&'static str>,
     pub(crate) ready: bool,
-    /// Providers the lane walked before settling, in order.
-    pub(crate) tried: Vec<&'static str>,
     pub(crate) detail: String,
     /// A startup prompt or an auth wall that stopped the probe.
     pub(crate) blocker: Option<&'static str>,
@@ -184,46 +179,31 @@ where
     }
 }
 
-/// Probe every provider concurrently and return the rows in priority order
-/// plus the winner.
+/// Probe the provider and return its row plus the winner, the provider
+/// exactly when it answered.
 ///
 /// `probe_one` is the seam a test drives with a fake: the production call is
-/// [`provider::probe`], and a test substitutes a closure that answers per
-/// provider without a socket.
-fn probe_providers_with<F>(timeout: Duration, probe_one: F) -> (Vec<ProviderRow>, Option<Provider>)
+/// [`provider::probe`], and a test substitutes a closure that answers without
+/// a socket.
+fn probe_providers_with<F>(timeout: Duration, probe_one: F) -> (ProviderRow, Option<Provider>)
 where
-    F: Fn(Provider, Duration) -> ProbeOutcome + Sync,
+    F: Fn(Provider, Duration) -> ProbeOutcome,
 {
-    let rows: Mutex<Vec<ProviderRow>> = Mutex::new(Vec::new());
-    std::thread::scope(|scope| {
-        for provider in Provider::PROBE_ORDER {
-            let rows = &rows;
-            let probe_one = &probe_one;
-            scope.spawn(move || {
-                let outcome = outcome_for_key(provider, key_for(provider), timeout, probe_one);
-                let row = ProviderRow {
-                    provider: provider.name(),
-                    priority: provider.rank(),
-                    ready: outcome.ready,
-                    detail: outcome.detail,
-                    failure: outcome.failure.as_ref().map(ProbeFailure::label),
-                };
-                rows.lock().expect("provider rows mutex").push(row);
-            });
-        }
-    });
-    let mut rows = rows.into_inner().expect("provider rows mutex");
-    rows.sort_by_key(|row| row.priority);
-    let winner = rows
-        .iter()
-        .find(|row| row.ready)
-        .map(|row| Provider::PROBE_ORDER[row.priority]);
-    (rows, winner)
+    let provider = Provider::Ollama;
+    let outcome = outcome_for_key(provider, key_for(provider), timeout, &probe_one);
+    let winner = outcome.ready.then_some(provider);
+    let row = ProviderRow {
+        provider: provider.name(),
+        ready: outcome.ready,
+        detail: outcome.detail,
+        failure: outcome.failure.as_ref().map(ProbeFailure::label),
+    };
+    (row, winner)
 }
 
 /// The production provider probe: send one real completion through whichever
 /// key the environment holds.
-fn probe_providers(timeout: Duration) -> (Vec<ProviderRow>, Option<Provider>) {
+fn probe_providers(timeout: Duration) -> (ProviderRow, Option<Provider>) {
     probe_providers_with(timeout, |provider, timeout| match key_for(provider) {
         Some(key) => probe(provider, provider.base_url(), &key, timeout),
         // `outcome_for_key` already turned a missing key into its own
@@ -308,7 +288,7 @@ where
         let Some(provider) = provider else {
             return blocked_by(
                 "no provider answered",
-                "every provider in priority order failed or had no key",
+                "the provider failed or had no key in the environment",
             );
         };
         let _ = provider;
@@ -394,26 +374,15 @@ fn diagnose_startup(agent: Agent, answer_prompts: bool, timeout: Duration) -> Op
     outcome.blocker
 }
 
-/// The providers a lane may walk: the ones that answered, in priority order,
-/// so the winner is first.
+/// Probe the selected agents concurrently, each lane against the one provider
+/// that answered.
 ///
-/// A provider that just failed is deliberately absent. Walking it again
-/// would spend another timeout to learn what the probe two seconds ago
-/// already established, and with no provider ready the list is empty — which
-/// is what keeps an agent from being launched at all when there is nowhere
-/// for it to go.
-fn lane_order(rows: &[ProviderRow]) -> Vec<Provider> {
-    rows.iter()
-        .filter(|row| row.ready)
-        .map(|row| Provider::PROBE_ORDER[row.priority])
-        .collect()
-}
-
-/// Probe the selected agents concurrently, each lane re-looping through the
-/// provider order on a classified failure.
+/// `provider` is `None` when the probe found nothing to point a lane at, and
+/// then no agent is launched: a lane with nowhere to go is reported blocked
+/// rather than run at nothing.
 fn probe_lane<F, D>(
     agents: &[Agent],
-    providers: &[Provider],
+    provider: Option<Provider>,
     timeout: Duration,
     answer_prompts: bool,
     run: &F,
@@ -429,70 +398,36 @@ where
             let agent = *agent;
             let rows = &rows;
             scope.spawn(move || {
-                let mut tried: Vec<&'static str> = Vec::new();
-                let mut last: Option<AgentProbe> = None;
-                let candidates: Vec<Option<Provider>> =
-                    if agent == Agent::Devin || providers.is_empty() {
-                        vec![None]
-                    } else {
-                        providers.iter().copied().map(Some).collect()
-                    };
-                for provider in candidates {
-                    // Devin's own auth is the only probe it gets.
-                    let provider_name = if agent == Agent::Devin {
-                        None
-                    } else {
-                        provider.map(Provider::name)
-                    };
-                    let probe_result = probe_agent_with(
-                        agent,
-                        provider,
-                        timeout,
-                        answer_prompts,
-                        run,
-                        &|agent, answer| diagnose(agent, answer, timeout),
-                    );
-                    if let Some(name) = provider_name {
-                        tried.push(name);
-                    }
-                    if probe_result.ready {
-                        rows.lock().expect("agent rows mutex").push(AgentRow {
-                            agent: agent.name(),
-                            provider: provider_name,
-                            ready: true,
-                            tried,
-                            detail: probe_result.detail,
-                            blocker: None,
-                        });
-                        return;
-                    }
-                    // A prompt or an auth wall is not the provider's fault:
-                    // walking the rest of the order would spend two more
-                    // minutes to learn the same thing.
-                    if probe_result.blocker.is_some() {
-                        rows.lock().expect("agent rows mutex").push(AgentRow {
-                            agent: agent.name(),
-                            provider: provider_name,
-                            ready: false,
-                            tried,
-                            detail: probe_result.detail,
-                            blocker: probe_result.blocker,
-                        });
-                        return;
-                    }
-                    last = Some(probe_result);
-                }
-                let detail = last.map_or_else(
-                    || "no provider to probe".to_string(),
-                    |probe_result| probe_result.detail,
+                // Devin's own auth is the only probe it gets, so its lane
+                // carries no provider name.
+                let provider_name = if agent == Agent::Devin {
+                    None
+                } else {
+                    provider.map(Provider::name)
+                };
+                let probe_result = probe_agent_with(
+                    agent,
+                    provider,
+                    timeout,
+                    answer_prompts,
+                    run,
+                    &|agent, answer| diagnose(agent, answer, timeout),
                 );
+                // A lane that answered, or that a startup prompt stopped,
+                // still ran against the provider, so the row names it; one
+                // that simply failed names none, and its `detail` carries the
+                // reason.
+                let reported = if probe_result.ready || probe_result.blocker.is_some() {
+                    provider_name
+                } else {
+                    None
+                };
                 rows.lock().expect("agent rows mutex").push(AgentRow {
                     agent: agent.name(),
-                    provider: None,
-                    ready: false,
-                    tried,
-                    detail,
-                    blocker: None,
+                    provider: reported,
+                    ready: probe_result.ready,
+                    detail: probe_result.detail,
+                    blocker: probe_result.blocker,
                 });
             });
         }
@@ -536,22 +471,21 @@ fn write_configs(home: &std::path::Path, provider: Provider, agents: &[Agent]) -
 }
 
 pub(crate) fn run(options: &Options) -> Result<Report, String> {
-    let (providers, winner) = probe_providers(options.timeout);
+    let (provider_row, winner) = probe_providers(options.timeout);
     let agents = if options.agents.is_empty() {
         Agent::ALL.to_vec()
     } else {
         options.agents.clone()
     };
-    let order = lane_order(&providers);
     let rows = probe_lane(
         &agents,
-        &order,
+        winner,
         options.timeout,
         options.answer_prompts,
         &run_capture,
         &diagnose_startup,
     );
-    let auth_chain = auth_chain_for(options, &rows, &order);
+    let auth_chain = auth_chain_for(options, &rows, winner);
     let home = home_dir()?;
     let (applied, pending) = match (winner, options.apply) {
         (Some(provider), true) => (write_configs(&home, provider, &agents), Vec::new()),
@@ -562,7 +496,7 @@ pub(crate) fn run(options: &Options) -> Result<Report, String> {
         .approve
         .then(|| clear_gates(&home, &agents, &options.workspace, options.timeout));
     Ok(Report {
-        providers,
+        providers: vec![provider_row],
         selected: winner.map(Provider::name),
         agents: rows,
         applied,
@@ -583,13 +517,17 @@ pub(crate) fn run(options: &Options) -> Result<Report, String> {
 /// reached only under `--authenticate`, is the one thing with no test under
 /// it.
 #[cfg_attr(test, mutants::skip)] // runs a real login; the decision it branches on is tested
-fn auth_chain_for(options: &Options, rows: &[AgentRow], order: &[Provider]) -> Option<AuthChain> {
+fn auth_chain_for(
+    options: &Options,
+    rows: &[AgentRow],
+    provider: Option<Provider>,
+) -> Option<AuthChain> {
     options.authenticate.then(|| {
         if auth::should_authenticate(rows, options.authenticate) {
             auth::authenticate(options.account.as_deref(), || {
                 probe_lane(
                     &[Agent::Claude],
-                    order,
+                    provider,
                     options.timeout,
                     options.answer_prompts,
                     &run_capture,
@@ -738,9 +676,6 @@ pub(crate) fn print_report(report: &Report) {
         if let Some(blocker) = row.blocker {
             println!("  {:<12} blocked: {blocker}", "");
         }
-        if row.tried.len() > 1 {
-            println!("  {:<12} tried: {}", "", row.tried.join(" -> "));
-        }
     }
     if !report.applied.is_empty() {
         println!("\napplied");
@@ -817,39 +752,24 @@ mod tests {
     }
 
     #[test]
-    fn every_requested_agent_completes_a_real_round_trip() {
-        let (rows, winner) = probe_providers_with(Duration::from_secs(1), |provider, _| {
-            if provider == Provider::Groq {
-                ready(provider)
-            } else {
-                throttled(provider)
-            }
-        });
-        assert_eq!(winner, Some(Provider::Groq));
-        assert_eq!(rows.len(), 3);
-        assert!(rows.iter().any(|row| row.ready), "{rows:?}");
-        assert!(!rows[0].ready, "the top-priority provider was throttled");
-        assert_eq!(rows[0].failure, Some("rate limited (429)"));
-        assert_eq!(rows[0].provider, "ollama", "rows are in priority order");
-    }
-
-    #[test]
-    fn the_winner_is_the_highest_priority_provider_that_answered() {
-        let (_, winner) = probe_providers_with(Duration::from_secs(1), |provider, _| {
-            if provider == Provider::Cerebras {
-                ready(provider)
-            } else {
-                throttled(provider)
-            }
-        });
-        assert_eq!(winner, Some(Provider::Cerebras));
-    }
-
-    #[test]
-    fn ollama_beats_groq_when_both_answer() {
-        let (_, winner) =
+    fn a_ready_provider_is_the_winner_and_its_row_says_so() {
+        let (row, winner) =
             probe_providers_with(Duration::from_secs(1), |provider, _| ready(provider));
         assert_eq!(winner, Some(Provider::Ollama));
+        assert_eq!(row.provider, "ollama");
+        assert!(row.ready, "{row:?}");
+        assert_eq!(row.detail, "READY");
+        assert_eq!(row.failure, None);
+    }
+
+    #[test]
+    fn a_provider_that_did_not_answer_is_not_the_winner() {
+        let (row, winner) =
+            probe_providers_with(Duration::from_secs(1), |provider, _| throttled(provider));
+        assert_eq!(winner, None);
+        assert!(!row.ready, "{row:?}");
+        assert_eq!(row.provider, "ollama");
+        assert_eq!(row.failure, Some("rate limited (429)"));
     }
 
     #[test]
@@ -861,7 +781,7 @@ mod tests {
             *probed.lock().unwrap() += 1;
             ready(provider)
         };
-        let outcome = outcome_for_key(Provider::Groq, None, Duration::from_secs(1), &probe_one);
+        let outcome = outcome_for_key(Provider::Ollama, None, Duration::from_secs(1), &probe_one);
         assert!(!outcome.ready, "{outcome:?}");
         assert_eq!(outcome.failure, Some(ProbeFailure::MissingKey));
         assert_eq!(
@@ -875,7 +795,7 @@ mod tests {
     fn a_provider_with_a_key_is_probed() {
         let probe_one = |provider: Provider, _timeout: Duration| ready(provider);
         let outcome = outcome_for_key(
-            Provider::Groq,
+            Provider::Ollama,
             Some("k".to_string()),
             Duration::from_secs(1),
             &probe_one,
@@ -884,19 +804,10 @@ mod tests {
         assert_eq!(outcome.failure, None);
     }
 
-    #[test]
-    fn no_provider_answering_selects_nothing() {
-        let (rows, winner) =
-            probe_providers_with(Duration::from_secs(1), |provider, _| throttled(provider));
-        assert_eq!(winner, None);
-        assert!(rows.iter().all(|row| !row.ready), "{rows:?}");
-    }
-
     /// A row as the probe records one: `detail` opens with the label.
     fn failed_row(detail: &str, failure: &'static str) -> ProviderRow {
         ProviderRow {
             provider: "ollama",
-            priority: 0,
             ready: false,
             detail: detail.to_string(),
             failure: Some(failure),
@@ -938,8 +849,7 @@ mod tests {
     #[test]
     fn a_ready_row_prints_its_reply_alone() {
         let row = ProviderRow {
-            provider: "groq",
-            priority: 1,
+            provider: "ollama",
             ready: true,
             detail: "READY".to_string(),
             failure: None,
@@ -947,65 +857,13 @@ mod tests {
         assert_eq!(provider_line(&row), "READY");
     }
 
-    /// The rows a lane order is built from, ready or not.
-    fn rows(ready: &[Provider]) -> Vec<ProviderRow> {
-        Provider::PROBE_ORDER
-            .iter()
-            .map(|provider| ProviderRow {
-                provider: provider.name(),
-                priority: provider.rank(),
-                ready: ready.contains(provider),
-                detail: String::new(),
-                failure: None,
-            })
-            .collect()
-    }
-
     #[test]
-    fn a_lane_walks_only_the_providers_that_answered() {
-        // Cerebras is ready and Groq is not, so the lane is Cerebras alone:
-        // re-probing a provider that just failed costs a timeout to learn
-        // what the probe already established.
-        assert_eq!(
-            lane_order(&rows(&[Provider::Cerebras])),
-            vec![Provider::Cerebras]
-        );
-    }
-
-    #[test]
-    fn a_lane_walks_the_ready_providers_in_priority_order() {
-        assert_eq!(
-            lane_order(&rows(&[Provider::Ollama, Provider::Cerebras])),
-            vec![Provider::Ollama, Provider::Cerebras],
-            "the winner comes first, then the rest by priority"
-        );
-    }
-
-    #[test]
-    fn no_provider_ready_leaves_the_lane_empty() {
-        assert_eq!(lane_order(&rows(&[])), Vec::<Provider>::new());
-    }
-
-    #[test]
-    fn a_throttled_provider_hands_the_lane_to_the_next_one() {
-        let attempts = Mutex::new(Vec::new());
-        let run = |_argv: &[String], _timeout: Duration| {
-            let n = {
-                let mut guard = attempts.lock().unwrap();
-                guard.push(1);
-                guard.len()
-            };
-            // The first provider a lane walks reports a rate limit; the
-            // second answers.
-            if n % 2 == 1 {
-                Ok((true, r#"{"message":"429 too many requests"}"#.to_string()))
-            } else {
-                Ok((true, r#"{"text":"READY"}"#.to_string()))
-            }
-        };
+    fn a_lane_that_answers_reports_the_provider_it_used() {
+        let run =
+            |_argv: &[String], _timeout: Duration| Ok((true, r#"{"text":"READY"}"#.to_string()));
         let rows = probe_lane(
             &[Agent::Codex],
-            &[Provider::Ollama, Provider::Groq],
+            Some(Provider::Ollama),
             Duration::from_secs(1),
             false,
             &run,
@@ -1013,16 +871,36 @@ mod tests {
         );
         assert_eq!(rows.len(), 1);
         assert!(rows[0].ready, "{rows:?}");
-        assert_eq!(rows[0].provider, Some("groq"));
-        assert_eq!(rows[0].tried, vec!["ollama", "groq"]);
+        assert_eq!(rows[0].provider, Some("ollama"));
     }
 
     #[test]
-    fn a_lane_stops_at_a_blocker_instead_of_walking_every_provider() {
+    fn a_lane_that_fails_against_the_provider_names_none() {
+        let run = |_argv: &[String], _timeout: Duration| {
+            Ok((true, r#"{"message":"429 too many requests"}"#.to_string()))
+        };
+        let rows = probe_lane(
+            &[Agent::Codex],
+            Some(Provider::Ollama),
+            Duration::from_secs(1),
+            false,
+            &run,
+            &|_, _, _| None,
+        );
+        assert!(!rows[0].ready, "{rows:?}");
+        assert_eq!(rows[0].provider, None, "{rows:?}");
+        assert!(
+            !rows[0].detail.is_empty(),
+            "the failure has to carry its reason: {rows:?}"
+        );
+    }
+
+    #[test]
+    fn a_lane_stops_at_a_blocker() {
         let run = |_argv: &[String], _timeout: Duration| Ok((false, String::new()));
         let rows = probe_lane(
             &[Agent::Claude],
-            &[Provider::Ollama, Provider::Groq, Provider::Cerebras],
+            Some(Provider::Ollama),
             Duration::from_secs(1),
             false,
             &run,
@@ -1033,7 +911,7 @@ mod tests {
             rows[0].blocker,
             Some("Workspace trust confirmation required")
         );
-        assert_eq!(rows[0].tried, vec!["ollama"], "a blocker ends the lane");
+        assert_eq!(rows[0].provider, Some("ollama"), "{rows:?}");
     }
 
     #[test]
@@ -1045,14 +923,13 @@ mod tests {
         };
         let rows = probe_lane(
             &[Agent::Devin],
-            &[Provider::Ollama],
+            Some(Provider::Ollama),
             Duration::from_secs(1),
             false,
             &run,
             &|_, _, _| None,
         );
         assert_eq!(rows[0].provider, None, "{rows:?}");
-        assert_eq!(rows[0].tried.len(), 0, "{rows:?}");
         assert_eq!(seen.lock().unwrap().as_slice(), ["devin auth status"]);
         // The assertion this test was missing: it ran Devin's auth command,
         // saw a logged-in line, and still reported the row unready, because
@@ -1069,7 +946,7 @@ mod tests {
         };
         let rows = probe_lane(
             &[Agent::Codex],
-            &[],
+            None,
             Duration::from_secs(1),
             false,
             &run,
@@ -1077,6 +954,7 @@ mod tests {
         );
         assert!(!rows[0].ready, "{rows:?}");
         assert_eq!(rows[0].blocker, Some("no provider answered"));
+        assert_eq!(rows[0].provider, None, "{rows:?}");
         assert_eq!(*ran.lock().unwrap(), 0, "nothing should have been spawned");
     }
 
@@ -1085,7 +963,7 @@ mod tests {
         let run = |_argv: &[String], _timeout: Duration| Ok((true, "READY".to_string()));
         let rows = probe_lane(
             &[Agent::Devin, Agent::Codex],
-            &[Provider::Groq],
+            Some(Provider::Ollama),
             Duration::from_secs(1),
             false,
             &run,
@@ -1114,15 +992,14 @@ mod tests {
     fn a_report_is_all_ready_only_when_every_agent_is() {
         let row = |ready: bool| AgentRow {
             agent: "codex",
-            provider: Some("groq"),
+            provider: Some("ollama"),
             ready,
-            tried: vec!["groq"],
             detail: String::new(),
             blocker: None,
         };
         let mut report = Report {
             providers: Vec::new(),
-            selected: Some("groq"),
+            selected: Some("ollama"),
             agents: vec![row(true)],
             applied: Vec::new(),
             pending: Vec::new(),
@@ -1136,11 +1013,9 @@ mod tests {
     }
 
     #[test]
-    fn each_provider_reads_its_own_key_variable() {
-        // The report names the variable a user has to set, so the three must
-        // stay distinct and must be the providers' own names.
+    fn the_provider_reads_its_own_key_variable() {
+        // The report names the variable a user has to set, so it has to be
+        // the provider's own name.
         assert_eq!(Provider::Ollama.key_env(), "OLLAMA_API_KEY");
-        assert_eq!(Provider::Groq.key_env(), "GROQ_API_KEY");
-        assert_eq!(Provider::Cerebras.key_env(), "CEREBRAS_API_KEY");
     }
 }

@@ -362,9 +362,9 @@ enum Command {
     },
     /// Probe provider readiness for Codex, Claude Code, Antigravity, and
     /// Devin by sending one real `POST /chat/completions` ("Reply exactly
-    /// READY.", a 1024-token reservation, 20 s timeout) to Ollama Cloud →
-    /// Groq → Cerebras in priority order. The first 200 OK wins. With
-    /// `--apply`, the winning provider is written into
+    /// READY.", a 1024-token reservation, 20 s timeout) to Ollama Cloud. A
+    /// 200 OK means the provider is ready. With
+    /// `--apply`, the provider that answered is written into
     /// `~/.codex/config.toml` (`model`, `model_provider`,
     /// `[model_providers.recording_cloud]`),
     /// `~/.claude/settings.json` (`env.ANTHROPIC_BASE_URL` and the model
