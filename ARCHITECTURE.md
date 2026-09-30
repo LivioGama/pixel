@@ -536,9 +536,15 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   request touching `crates/`, sharded), `mutants-nightly.yml` (a whole-tree
   rotation), `cross-build.yml` (the three release lanes), `release.yml`,
   `release-prepare-scope.yml` and `pages.yml` (the website).
-- After any change to `crates/` the project rule in `CLAUDE.md` applies:
-  rebuild, reinstall the binary atomically, re-index, reinstall hooks, and
-  run `pixel doctor`.
+- Local agent validation uses targeted checks during editing and the full
+  gates once a reviewable unit is ready (CONTRIBUTING.md, "Agent validation
+  workflow"). Background gates validate an unchanged checkout or a committed
+  worktree snapshot with its own build output; results identify the SHA.
+- Once an implementation unit is finished, the project rule in `AGENTS.md`
+  applies: rebuild, reinstall the binary atomically, re-index, reinstall
+  hooks, and run `pixel doctor`. Intermediate edits do not trigger this
+  loop; a check that exercises new installed behavior needs it first, and
+  later changes to the binary or installed rules require it again.
 
 ## Release gate
 
