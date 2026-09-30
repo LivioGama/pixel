@@ -877,15 +877,14 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&flows);
         std::fs::create_dir_all(&flows).unwrap();
-        // Four `auth`-tagged flows -- the gate label shows three and adds
-        // `+1 more` for the fourth. The mutation `len() > 3` -> `len() < 3`
-        // suppresses the suffix entirely and a `len() > 3` -> `len() >= 3`
-        // mutation renders `+0 more` at exactly 3.
+        // Three `auth`-tagged flows (the cap boundary): the gate label
+        // lists all three and must NOT emit ` +0 more`. A `>` -> `>=`
+        // mutant renders `+0 more` at exactly 3, which this fixture
+        // pins.
         for (name, tags) in [
             ("zeta-auth", r#"["auth"]"#),
             ("alpha-auth", r#"["auth"]"#),
             ("mu-auth", r#"["auth"]"#),
-            ("theta-auth", r#"["auth"]"#),
         ] {
             std::fs::write(
                 flows.join(format!("{name}.json")),
@@ -903,6 +902,56 @@ mod tests {
         let gates = gates_of(&prereqs, &[]);
         // SAFETY: same serialisation contract as the set_var above;
         // restores the env so the next test in this binary starts clean.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&flows);
+        assert_eq!(gates.len(), 1);
+        // Three flows: the cap is 3, the suffix must NOT appear.
+        assert!(
+            gates[0]
+                .label
+                .contains("run one of: `pixel flow run `alpha-auth`, `mu-auth`, `zeta-auth`"),
+            "{}",
+            gates[0].label
+        );
+        assert!(
+            !gates[0].label.contains("more"),
+            "exactly 3 flows must not append `more`: {}",
+            gates[0].label
+        );
+    }
+
+    /// Four `auth`-tagged flows (cap + 1): the gate label shows three
+    /// names and appends `+1 more` for the fourth. Pins `> 3` on the
+    /// cap arithmetic (a `>=` mutant renders `+0 more` at 4 too).
+    #[test]
+    fn gates_of_auth_lists_three_names_and_appends_one_more_at_four() {
+        let flows =
+            std::env::temp_dir().join(format!("px-plan-gate-4-{}-{}", std::process::id(), line!()));
+        let _ = std::fs::remove_dir_all(&flows);
+        std::fs::create_dir_all(&flows).unwrap();
+        for (name, tags) in [
+            ("zeta-auth", r#"["auth"]"#),
+            ("alpha-auth", r#"["auth"]"#),
+            ("mu-auth", r#"["auth"]"#),
+            ("theta-auth", r#"["auth"]"#),
+        ] {
+            std::fs::write(
+                flows.join(format!("{name}.json")),
+                format!(
+                    r#"{{"name":"{name}","title":"t","description":"d","tags":{tags},"steps":[],"created_unix":1,"revised_unix":1}}"#
+                ),
+            )
+            .unwrap();
+        }
+        // SAFETY: serialised by the test runner.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", &flows);
+        }
+        let prereqs = [prereq(PrereqKind::Auth, "src/page.tsx", "getServerSession")];
+        let gates = gates_of(&prereqs, &[]);
+        // SAFETY: as above.
         unsafe {
             std::env::remove_var("PIXEL_FLOW_DIR");
         }
