@@ -52,14 +52,26 @@ orb -m "$VM" bash -lc '
     /home/linuxbrew/.linuxbrew/bin/pixel install >/dev/null 2>&1 || true
     python3 - << "PY"
 import json, os
+# pre-accept every consent Claude Code can raise: folder trust, bypass-mode
+# warning, dangerous-mode prompt — for every shoot repo, so a session never
+# stops to ask (the keys are the ones the manual acceptances wrote).
+repos = ["/home/livio/facebook-clone-claude-code",
+         "/home/livio/facebook-clone-codex",
+         "/home/livio/facebook-clone-devin"]
 p = os.path.expanduser("~/.claude.json")
 d = json.load(open(p)) if os.path.exists(p) and os.path.getsize(p) else {}
 d["bypassPermissionsModeAccepted"] = True
 d.setdefault("projects", {})
-d["projects"]["/home/livio/facebook-clone-claude-code"] = d["projects"].get(
-    "/home/livio/facebook-clone-claude-code", {})
-d["projects"]["/home/livio/facebook-clone-claude-code"]["bypassPermissionsModeAccepted"] = True
+for repo in repos:
+    proj = d["projects"].setdefault(repo, {})
+    proj["bypassPermissionsModeAccepted"] = True
+    proj["hasTrustDialogAccepted"] = True
 json.dump(d, open(p, "w"))
+sp = os.path.expanduser("~/.claude/settings.json")
+s = json.load(open(sp)) if os.path.exists(sp) and os.path.getsize(sp) else {}
+s["skipDangerousModePermissionPrompt"] = True
+json.dump(s, open(sp, "w"))
+print("  claude consents pre-accepted for", len(repos), "repos")
 PY
 ' || die "sandbox prep failed"
 echo "harness-sandbox-shoot: sandbox ready ($(orb -m $VM bash -lc 'pixel --version' | head -1))"
@@ -91,14 +103,14 @@ if [ -z "${SKIP_SHOOT:-}" ]; then
         if [ "$host" = "vm" ]; then
             orb -m "$VM" bash -lc "env IS_SANDBOX=1 \
                 HARNESS_PROMPT_FULL=$qprompt HARNESS_OUTDIR=$qoutdir \
-                HARNESS_INTERACTIVE_MAX=300 HARNESS_INTERACTIVE_TMUX=1 \
+                HARNESS_INTERACTIVE_MAX=\"${HARNESS_INTERACTIVE_MAX:-300}\" HARNESS_INTERACTIVE_TMUX=1 \
                 PATH=/home/linuxbrew/.linuxbrew/bin:/home/livio/.local/bin:\$PATH \
                 bash $qrecorder \
                 --provider $qprovider --repo $qrepo --scenario rns --interactive" \
                 > "$OUTDIR/shoot-$provider.log" 2>&1 &
         else
             HARNESS_PROMPT_FULL="$PROMPT" HARNESS_OUTDIR="$OUTDIR" \
-                HARNESS_INTERACTIVE_MAX=300 HARNESS_INTERACTIVE_IDLE=90 \
+                HARNESS_INTERACTIVE_MAX="${HARNESS_INTERACTIVE_MAX:-300}" HARNESS_INTERACTIVE_IDLE="${HARNESS_INTERACTIVE_IDLE:-90}" \
                 HARNESS_INTERACTIVE_TMUX=1 \
                 bash "$RECORDER" \
                 --provider "$provider" --repo "$repo" --scenario rns --interactive \
