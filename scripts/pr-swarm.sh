@@ -610,8 +610,14 @@ cmd_up() {
             echo "pr-swarm up: refusing to create a worktree from inside $CACHE" >&2; exit 2
         fi
         if [ -z "$(wt_lookup "$wt")" ]; then
-            git -C "$REPO" worktree add -B "pr/$num" "$wt" "origin/$branch" >&2 \
-                || { echo "pr-swarm up: git worktree add failed for $wt" >&2; exit 2; }
+            if git -C "$REPO" show-ref --verify --quiet "refs/heads/pr/$num"; then
+    git -C "$REPO" worktree add "$wt" "pr/$num" >&2
+else
+    git -C "$REPO" worktree add -b "pr/$num" "$wt" "origin/$branch" >&2
+fi || {
+    echo "pr-swarm up: git worktree add failed for $wt" >&2
+    exit 2
+}
             gather_worktrees
         fi
     else

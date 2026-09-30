@@ -7,10 +7,11 @@ paths:
 # One rmux Pane Per Open-PR Worktree
 
 Loaded when `scripts/pr-swarm.sh` or the Claude settings are in play. This
-page **documents** the swarm; it does not automate it. A rule file is inert
-text no tool executes — the automation is `scripts/pr-swarm.sh` plus its
-`SessionStart` hook entry in `.claude/settings.json`, and nothing here runs on
-its own.
+This page **documents** the swarm; it does not register its hook. To enable
+automatic startup, add the repository's `scripts/pr-swarm.sh hook-session-start`
+command to the user's Claude `SessionStart` configuration, such as
+`~/.claude/settings.json`. Do not commit `.claude/settings.json`; it is
+per-worktree, tool-local configuration.
 
 ## The tool
 
