@@ -158,9 +158,12 @@ fi
 [ -s "$PROMPT_FILE" ] || die "prompt file is empty: $PROMPT_FILE"
 
 # ── The harness command. Its stdout goes to the video; the machine format
-#    also lands in $LOG (stdout for claude) for pixel-call counting.
+#    also lands in $LOG (stdout for claude) for pixel-call counting. The
+#    filter colors the stream the video shows (the transcript strips ANSI on
+#    convert): green marks a pixel call, cyan any other tool, dim the noise.
 FILTER='
 import json, re, sys, time
+GRN = "\033[32m"; CYA = "\033[36m"; DIM = "\033[2m"; RST = "\033[0m"
 pixel_pat = re.compile(r"(^|[\s/;&|\"])pixel\s+(search|resolve|targets|reconcile|excavate|rescue|impact|uses|changes|context|symbol|inspect|history|publish|push|ship|branch|update|sync|diff|review|ask|recall|find-code|search-content|scope-task)")
 calls = 0
 tools = []
@@ -171,20 +174,22 @@ for line in sys.stdin:
     try:
         evt = json.loads(line)
     except json.JSONDecodeError:
-        print(line[:200]); continue
+        print(DIM + line[:200] + RST); continue
     t = evt.get("type")
     if t == "assistant":
         msg = evt.get("message") or {}
         for block in (msg.get("content") or []):
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 inp = json.dumps(block.get("input", {}))
-                if pixel_pat.search(inp):
+                is_pixel = bool(pixel_pat.search(inp))
+                if is_pixel:
                     calls += 1
                 tools.append(block.get("name", "?"))
-                print("  \u25b8 %s %s" % (block.get("name", "?"), inp[:120].replace("\n", " ")))
+                col = GRN if is_pixel else CYA
+                print("%s  \u25b8 %s %s%s" % (col, block.get("name", "?"), inp[:120].replace("\n", " "), RST))
     elif t == "result":
         dur = evt.get("duration_ms"); txt = str(evt.get("result", ""))[:160].replace("\n", " ")
-        print("  \u2713 result (%sms): %s" % (dur, txt))
+        print("%s  \u2713 result (%sms): %s%s" % (GRN, dur, txt, RST))
         seen = {}
         for name in tools:
             seen[name] = seen.get(name, 0) + 1
