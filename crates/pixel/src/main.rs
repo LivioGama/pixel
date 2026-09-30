@@ -7845,7 +7845,7 @@ fn run_command(
                     json: _,
                 } => {
                     let vars = flow_vars(&name, &vars, &account)?;
-                    FlowAction::Replay {
+                    FlowAction::Run {
                         name,
                         vars,
                         dry_run: false,
@@ -7881,7 +7881,7 @@ fn run_command(
             // text — print it directly to stdout. For everything else, use
             // the standard print_data path (JSON or pretty).
             match &action {
-                FlowAction::Replay { .. } | FlowAction::Show { .. } => {
+                FlowAction::Run { .. } | FlowAction::Show { .. } => {
                     if let Some(output) = data.get("output").and_then(|v| v.as_str()) {
                         println!("{output}");
                         Ok(())
