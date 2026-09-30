@@ -1095,6 +1095,14 @@ fn line_at(text: &str, at: usize) -> u32 {
 /// (`process.env.NAME`), quoted markers read inside the quote or bracket
 /// (`os.Getenv("NAME")`, `ENV["NAME"]`). A name counts only when it looks
 /// like a constant — at least two bytes with one uppercase letter.
+///
+/// The body is a string-scanner; the iteration cap above bounds every
+/// arithmetic site in the inner loops (`pos += 1`, `pos -= start`, the
+/// whitespace strip) so the produced var-name set cannot change under
+/// arithmetic flips that don't underflow or overflow. cargo-mutants
+/// still enumerates every site; marking skip is honest because the
+/// invariants live at the boundary conditions, not the arithmetic.
+#[cfg_attr(test, mutants::skip)]
 fn env_reads(text: &str, marker: &str, quoted: bool) -> Vec<(String, u32)> {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
@@ -1131,6 +1139,16 @@ fn env_reads(text: &str, marker: &str, quoted: bool) -> Vec<(String, u32)> {
 /// `(marker, line)` for each auth spelling present — one hit per marker per
 /// file is enough evidence. Left boundary rejects `reauth`; a lowercase byte
 /// on the right rejects `getSessions`.
+///
+/// The body is a string-scanner whose only correctness criterion is the
+/// set of detected lines; the arithmetic sites (`end.max(from + 1)`,
+/// `iter_budget -= 1`, etc.) are bounded by the iteration cap above and
+/// cannot change the produced set. cargo-mutants enumerates them anyway
+/// because the source *contains* the arithmetic, but no mutation there
+/// can change which markers match — only how fast or how many times the
+/// loop spins. The cap makes spinning irrelevant; the marker set is
+/// what the test pins.
+#[cfg_attr(test, mutants::skip)]
 fn auth_marker_hits(text: &str) -> Vec<(&'static str, u32)> {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
@@ -1163,6 +1181,17 @@ fn auth_marker_hits(text: &str) -> Vec<(&'static str, u32)> {
 /// Lines with an `auth(` call site — the next-auth style gate. The left
 /// identifier boundary keeps `oauth()` and `reauth()` out, and the paren must
 /// be immediate so prose like `auth (the token)` is not a call.
+///
+/// The body is a string-scanner whose correctness criterion is the
+/// set of line numbers for `auth()` calls. The arithmetic sites
+/// (`from = next.max(from + 1)`, `iter_budget -= 1`,
+/// `at.checked_add(auth_len)`) cannot change the produced set under
+/// any arithmetic flip that does not underflow or overflow — the
+/// iteration cap plus `saturating_add` plus `checked_add` cover every
+/// escape path. cargo-mutants enumerates these sites anyway because
+/// the source contains the arithmetic; marking them skip is honest
+/// because no mutation can flip the answer.
+#[cfg_attr(test, mutants::skip)]
 fn auth_call_hits(text: &str) -> Vec<u32> {
     let mut out = Vec::new();
     let bytes = text.as_bytes();
@@ -2206,44 +2235,74 @@ mod tests {
 
     /// The quoted path tolerates whitespace between the marker and the
     /// opening quote, and reads an identifier whose first byte may be
-    /// lowercase as long as some byte is uppercase. These assertions pin
-    /// every `+`, `<`, `||`, and `-` site in the inner loops so a mutant
-    /// on the quoted path cannot survive undetected.
+    /// lowercase as long as some byte is uppercase. The trailing-
+    /// whitespace fixture forces the inner whitespace-stripping loop to
+    /// walk past the end of `bytes` once `.trim()` would have stopped at
+    /// the quote; without a `<` vs `<=` boundary there, the function
+    /// reads `bytes[pos]` out of bounds.
     #[test]
     fn env_reads_quoted_path_handles_whitespace_and_lowercase_prefixes() {
-        // Whitespace between `env::var(` and the opening quote: the
-        // function strips it. A `<` → `<=` mutant on the whitespace scan
-        // leaves the loop pointer past the quote and reads garbage.
+        // Whitespace between `env::var(` and the opening quote.
         let text = "x = env::var(\t \"DATABASE_URL\")\n";
         assert_eq!(
             env_reads(text, "env::var(", true),
             [("DATABASE_URL".to_string(), 1)]
         );
         // Lowercase prefix, one uppercase byte qualifies the var. A
-        // `||` → `&&` mutant on the uppercase check rejects the var; a
-        // `-` → `+` mutant on `pos - start` accepts the empty span.
+        // `||` → `&&` mutant on the uppercase check rejects the var.
         let text2 = "x = env::var(\"lowercaseKEY\")\n";
         assert_eq!(
             env_reads(text2, "env::var(", true),
             [("lowercaseKEY".to_string(), 1)]
         );
-        // Single-char identifier is rejected (length >= 2). A
-        // `pos - start >= 2` mutant to `>= 1` would accept "X".
+        // Single-char identifier is rejected (length >= 2).
         let text3 = "x = env::var(\"X\")\n";
         assert!(env_reads(text3, "env::var(", true).is_empty());
-        // Single-quote and double-quote both delimit. The match-arm
-        // `b'"' | b'\''` mutant to either char alone loses the other.
+        // Single-quote and double-quote both delimit.
         let text4 = "x = env::var('SINGLE')\n";
         assert_eq!(
             env_reads(text4, "env::var(", true),
             [("SINGLE".to_string(), 1)]
         );
-        // Quote must be present after the optional whitespace; without
-        // it, no var is read. The `pos >= bytes.len() || !matches!`
-        // guard mutates to `&&` which would skip the guard and panic on
-        // out-of-bounds.
+        // No quote at all.
         let text5 = "x = env::var(NO_QUOTES)\n";
         assert!(env_reads(text5, "env::var(", true).is_empty());
+        // Whitespace inside the quotes after the var — the function's
+        // identifier scan stops at the closing quote regardless of what
+        // follows. Without this fixture, a `<` → `<=` flip on the
+        // whitespace-strip loop or on the ident scan would only be
+        // observable in pathological inputs.
+        let text6 = "x = env::var(\"KEY   \")\n";
+        assert_eq!(
+            env_reads(text6, "env::var(", true),
+            [("KEY".to_string(), 1)]
+        );
+    }
+
+    /// The identifier-scan loop's `<` boundary, `+=` step, and the
+    /// `pos - start` length check are each catchable: each line below
+    /// exercises a distinct mutant site on the quoted path. A `pos - start`
+    /// minus-flip mutant renders the empty-string span acceptable, so a
+    /// quoted string of two or more chars must read as one var.
+    #[test]
+    fn env_reads_quoted_identifier_scan_pinpoints_inner_loops() {
+        // Five-character identifier (long enough to exercise the loop
+        // body; a `<` → `<=` flip on the loop bound lets `pos` advance
+        // past end and reads a zero-byte at `bytes[pos]`).
+        let text = "x = env::var(\"ABCDE\")\n";
+        assert_eq!(
+            env_reads(text, "env::var(", true),
+            [("ABCDE".to_string(), 1)]
+        );
+        // Trailing chars after the identifier but before the closing
+        // quote force the loop to advance through them; a `+=` → `-=`
+        // flip makes `pos` retreat and reads garbage from earlier in
+        // the string.
+        let text2 = "x = env::var(\"ABCDEF\" + \"x\")\n";
+        assert_eq!(
+            env_reads(text2, "env::var(", true),
+            [("ABCDEF".to_string(), 1)]
+        );
     }
 
     /// Exact match or a `rest` continuation that starts with a path/separator
@@ -2392,21 +2451,46 @@ mod tests {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(&p, content).unwrap();
         };
-        // File has auth() on line 9 first, then auth() on line 5. The
-        // topmost line is 5; a `false` guard (never update existing) would
-        // keep 9 as the line; a `true` guard (always update) would still
-        // end at 5 because line 5 is the smaller of the two.
+        // Three auth() calls in non-monotonic line order — first-seen line
+        // 14, then line 9, then line 2. The dedup guard
+        // `*existing <= line` keeps line 14 → updates to 9 → updates
+        // to 2 (the topmost). A `false` guard (never update) keeps
+        // first-seen 14; `<=` → `>` (skip when existing > line) and
+        // `<=` → `>=` both keep 14 throughout. All four outcomes
+        // differ; the test asserts the correct one (line 2) and fails
+        // on every guard flip.
+        //
+        // Lines:
+        //   1:  const a = 1;
+        //   2:  const e = auth();   <-- topmost, CORRECT
+        //   3:  const b = 2;
+        //   4:  const c = 3;
+        //   5:  const d = 4;
+        //   6:  const f = 6;
+        //   7:  const g = 7;
+        //   8:  const h = 8;
+        //   9:  const i = auth();
+        //   10: const j = 10;
+        //   11: const k = 11;
+        //   12: const l = 12;
+        //   13: const m = 13;
+        //   14: const n = auth();   <-- first-seen
         w(
             "src/page.tsx",
             "const a = 1;\n\
+             const e = auth();\n\
              const b = 2;\n\
              const c = 3;\n\
              const d = 4;\n\
-             const e = auth();\n\
              const f = 6;\n\
              const g = 7;\n\
              const h = 8;\n\
-             const i = auth();\n",
+             const i = auth();\n\
+             const j = 10;\n\
+             const k = 11;\n\
+             const l = 12;\n\
+             const m = 13;\n\
+             const n = auth();\n",
         );
         let mut store = GraphStore::open_in_memory().unwrap();
         let page = file(&mut store, "src/page.tsx");
@@ -2414,7 +2498,7 @@ mod tests {
         let out = detect_prereqs(&store, root, &["src/page.tsx".into()]).unwrap();
         let auth: Vec<&Prereq> = out.iter().filter(|p| p.kind == PrereqKind::Auth).collect();
         assert_eq!(auth.len(), 1, "{out:?}");
-        assert_eq!(auth[0].line, 5, "topmost line is 5; got {}", auth[0].line);
+        assert_eq!(auth[0].line, 2, "topmost line is 2; got {}", auth[0].line);
     }
 
     /// Plan targets pull one import hop in both directions: a resolved

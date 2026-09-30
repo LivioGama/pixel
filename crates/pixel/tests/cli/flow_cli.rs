@@ -180,3 +180,41 @@ fn flow_execute_prints_a_summary_line_and_the_log_on_stderr() {
         "{stderr}"
     );
 }
+
+/// `pixel flow run <name>` (without `--execute`) and `pixel flow show <name>`
+/// print the rendered output / flow document to stdout (not a JSON document).
+/// A mutant that deletes the `Run | Show` arm in `run_command` routes both
+/// through the JSON path; this test pins the stdout shape.
+#[test]
+fn flow_run_and_show_print_to_stdout_not_json() {
+    let fixture = Fixture::new("print");
+
+    let run = fixture.run(&["flow", "run", "audit", "--dry-run"], false);
+    assert!(run.status.success(), "{run:?}");
+    let run_stdout = String::from_utf8_lossy(&run.stdout);
+    assert!(
+        run_stdout.contains("agent-browser") && run_stdout.contains("https://example.test"),
+        "run --dry-run should print rendered flow to stdout: {run_stdout:?}"
+    );
+    let run_json: Result<serde_json::Value, _> = serde_json::from_slice(&run.stdout);
+    assert!(
+        run_json.is_err(),
+        "run stdout must NOT be a JSON document when --json is absent: {run_stdout:?}"
+    );
+
+    let show = fixture.run(&["flow", "show", "audit"], false);
+    assert!(show.status.success(), "{show:?}");
+    let show_stdout = String::from_utf8_lossy(&show.stdout);
+    // `show` prints the flow document as JSON by default. The match-arm
+    // deletion mutant in run_command (`delete match arm
+    // FlowAction::Run{..} | FlowAction::Show{..}`) routes `show`
+    // through a different path that does not print `output`; pin both
+    // the JSON shape (the document is parseable) and the title field.
+    let show_json: serde_json::Value =
+        serde_json::from_slice(&show.stdout).expect("show must emit valid JSON");
+    assert_eq!(show_json["title"], "Audit", "{show_stdout:?}");
+    assert_eq!(
+        show_json["name"], "audit",
+        "show must round-trip the flow name: {show_stdout:?}"
+    );
+}
