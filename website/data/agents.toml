@@ -67,7 +67,7 @@ wires = "the `developer_instructions` key of `~/.codex/config.toml`, which every
 repo = [".codex/config.toml", ".codex/hooks.json", ".codex/pixel-composed-guard-backup.json"]
 repo_note = "Codex has no personal project file, so the guard is left out when Git tracks `.codex/hooks.json`: it would carry this machine's path into every clone."
 plugin = "`codex plugin marketplace add LivioGama/pixel`, then `codex plugin add pixel@pixel`"
-checks = ["install.codex-config", "install.codex-metrics-hook", "repo.codex-config", "repo.codex-hooks"]
+checks = ["install.codex-config", "install.codex-metrics-hook", "install.codex-hook-review", "repo.codex-config", "repo.codex-hooks", "repo.codex-hook-review"]
 
 [[agent]]
 slug = "pi"

@@ -503,6 +503,162 @@ pub(crate) fn project_trust(
     })
 }
 
+/// The table under `[hooks]` where Codex records each hook's review.
+const HOOK_STATE_TABLE: &str = "state";
+
+/// The key a reviewed hook's entry carries.
+const TRUSTED_HASH_KEY: &str = "trusted_hash";
+
+/// The label Codex spells an event with in a `hooks.state` key
+/// (`hook_event_key_label` in codex-rs `hooks/src/lib.rs`).
+fn hook_event_label(event: &str) -> Option<&'static str> {
+    Some(match event {
+        "PreToolUse" => "pre_tool_use",
+        "PermissionRequest" => "permission_request",
+        "PostToolUse" => "post_tool_use",
+        "PreCompact" => "pre_compact",
+        "PostCompact" => "post_compact",
+        "SessionStart" => "session_start",
+        "SessionEnd" => "session_end",
+        "UserPromptSubmit" => "user_prompt_submit",
+        "SubagentStart" => "subagent_start",
+        "SubagentStop" => "subagent_stop",
+        "Stop" => "stop",
+        _ => return None,
+    })
+}
+
+/// Pixel's hooks in one Codex `hooks.json`, and those Codex has not reviewed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HookReview {
+    /// Pixel hook handlers in the file, as `Event #group.handler`.
+    pub pixel: Vec<String>,
+    /// The subset without a `trusted_hash` in Codex's config.
+    pub unreviewed: Vec<String>,
+}
+
+/// Which of Pixel's hooks in `hooks_path` Codex will skip.
+///
+/// Codex 0.159 runs a user or project hook only after the user reviewed it
+/// (`/hooks` in the TUI), which records `[hooks.state."<file>:<event>:<group>:
+/// <handler>"] trusted_hash = "sha256:…"` in `<codex_home>/config.toml`; an
+/// unreviewed hook is skipped without a message, even in `codex exec`. The
+/// hash is not recomputed here: a present `trusted_hash` counts as reviewed,
+/// so a hook Pixel rewrote after the review (Codex's `Modified` state) is not
+/// reported. The file part of the key is compared by canonical path.
+///
+/// # Errors
+///
+/// Either file cannot be read or parsed.
+pub(crate) fn pixel_hook_review(
+    codex_home: &Path,
+    hooks_path: &Path,
+    exe: &Path,
+) -> std::result::Result<HookReview, String> {
+    let hooks = read_hooks(hooks_path)?;
+    let doc = read_document(&codex_home.join(CODEX_CONFIG_FILE))?;
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let file = canonical(hooks_path);
+    let reviewed: Vec<String> = doc
+        .get("hooks")
+        .and_then(Item::as_table_like)
+        .and_then(|hooks| hooks.get(HOOK_STATE_TABLE))
+        .and_then(Item::as_table_like)
+        .map(|state| {
+            state
+                .iter()
+                .filter(|(_, entry)| {
+                    entry
+                        .as_table_like()
+                        .and_then(|entry| entry.get(TRUSTED_HASH_KEY))
+                        .and_then(Item::as_str)
+                        .is_some()
+                })
+                .map(|(key, _)| key.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    let is_reviewed = |suffix: &str| {
+        reviewed.iter().any(|key| {
+            key.strip_suffix(suffix)
+                .is_some_and(|source| canonical(Path::new(source)) == file)
+        })
+    };
+    let mut review = HookReview {
+        pixel: Vec::new(),
+        unreviewed: Vec::new(),
+    };
+    let events = hooks.get("hooks").and_then(serde_json::Value::as_object);
+    for (event, groups) in events.into_iter().flatten() {
+        let Some(label) = hook_event_label(event) else {
+            continue;
+        };
+        let groups = groups.as_array().map_or(&[][..], Vec::as_slice);
+        for (group_index, group) in groups.iter().enumerate() {
+            let handlers = group
+                .get("hooks")
+                .and_then(serde_json::Value::as_array)
+                .map_or(&[][..], Vec::as_slice);
+            for (handler_index, handler) in handlers.iter().enumerate() {
+                // The metrics relay is recognised by its marker, as
+                // `check_metrics_hook` and uninstall do; the other entries
+                // by the verbs `routing::is_pixel_hook` owns.
+                let is_pixel = handler
+                    .get("command")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|command| {
+                        command.contains(METRICS_HOOK_MARKER)
+                            || crate::routing::is_pixel_hook(command, exe)
+                    });
+                if !is_pixel {
+                    continue;
+                }
+                let name = format!("{event} #{group_index}.{handler_index}");
+                if !is_reviewed(&format!(":{label}:{group_index}:{handler_index}")) {
+                    review.unreviewed.push(name.clone());
+                }
+                review.pixel.push(name);
+            }
+        }
+    }
+    Ok(review)
+}
+
+/// A `pixel doctor` outcome for Pixel's hooks in one Codex `hooks.json`:
+/// yellow while Codex has hooks of Pixel's it will skip, with the one step
+/// that clears it, which only the user can take.
+pub(crate) fn hook_review_outcome(
+    review: &HookReview,
+    hooks_path: &Path,
+) -> (crate::doctor::CheckStatus, String) {
+    let file = hooks_path.display();
+    if review.pixel.is_empty() {
+        return (
+            crate::doctor::CheckStatus::Green,
+            format!("no Pixel hook for Codex in {file}"),
+        );
+    }
+    if review.unreviewed.is_empty() {
+        return (
+            crate::doctor::CheckStatus::Green,
+            format!(
+                "Codex has reviewed the {} Pixel hook(s) in {file}",
+                review.pixel.len()
+            ),
+        );
+    }
+    (
+        crate::doctor::CheckStatus::Yellow,
+        format!(
+            "Codex skips {} of the {} Pixel hook(s) in {file} until you review them ({}): \
+             start `codex` in this directory, run `/hooks` and trust them",
+            review.unreviewed.len(),
+            review.pixel.len(),
+            review.unreviewed.join(", ")
+        ),
+    )
+}
+
 pub(crate) fn check_developer_instructions(
     codex_home: &Path,
 ) -> std::result::Result<(String, serde_json::Value), String> {
@@ -547,6 +703,30 @@ pub(crate) fn check_developer_instructions(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `hooks.state` key spells the event the way Codex does
+    /// (`hook_event_key_label`); a wrong or missing label reads every
+    /// review of that event as absent, or hides the event's Pixel hooks.
+    #[test]
+    fn hook_event_label_should_spell_every_event_as_codex_keys_it() {
+        let table = [
+            ("PreToolUse", "pre_tool_use"),
+            ("PermissionRequest", "permission_request"),
+            ("PostToolUse", "post_tool_use"),
+            ("PreCompact", "pre_compact"),
+            ("PostCompact", "post_compact"),
+            ("SessionStart", "session_start"),
+            ("SessionEnd", "session_end"),
+            ("UserPromptSubmit", "user_prompt_submit"),
+            ("SubagentStart", "subagent_start"),
+            ("SubagentStop", "subagent_stop"),
+            ("Stop", "stop"),
+        ];
+        for (event, label) in table {
+            assert_eq!(hook_event_label(event), Some(label), "{event}");
+        }
+        assert_eq!(hook_event_label("NotAnEvent"), None);
+    }
 
     #[test]
     fn the_asset_survives_a_toml_literal_string() {

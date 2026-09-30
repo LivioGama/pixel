@@ -136,8 +136,22 @@ if pixel doctor . --fail-on yellow > /evidence/doctor-before.txt 2>&1; then
     exit 1
 fi
 reds_have_fixes /evidence/doctor-before.txt
-pixel doctor . --fix --fail-on yellow > /evidence/doctor-fix.txt 2>&1
-pixel doctor . --fail-on yellow > /evidence/doctor-after.txt 2>&1
+pixel doctor . --fix --fail-on red > /evidence/doctor-fix.txt 2>&1
+pixel doctor . --fail-on red > /evidence/doctor-after.txt 2>&1
+# After --fix only the Codex hook review may stay yellow: no command can
+# review a hook for the user, so it must say which step does.
+python3 - /evidence/doctor-after.txt <<'PY'
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+yellow = [line.strip() for line in lines if line.lstrip().startswith("[yellow]")]
+allowed = ("[yellow] install.codex-hook-review:", "[yellow] repo.codex-hook-review:")
+for line in yellow:
+    assert line.startswith(allowed), line
+    assert "`/hooks`" in line, line
+PY
+if grep -q 'codex-hook-review' /evidence/doctor-after.txt; then
+    echo 'NOTE doctor reports Pixel hooks Codex has not reviewed, naming /hooks'
+fi
 echo 'PASS doctor names a fix for each red check, and --fix repairs them'
 cd "$HOME/project"
 pixel install --repo . --json > /evidence/repo-install.json

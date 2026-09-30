@@ -6145,3 +6145,181 @@ fn doctor_devin_hooks_judge_only_what_pixel_wrote() {
     let report = doctor(&options(dir.path())).unwrap();
     assert_eq!(check(&report), CheckStatus::Green, "{report:?}");
 }
+
+/// Doctor options that run the one Codex hook-review check under `home`.
+fn hook_review_options(home: &Path, exe: &Path, id: &str, repo: Option<&Path>) -> DoctorOptions {
+    DoctorOptions {
+        home: Some(home.to_path_buf()),
+        executable_path: Some(exe.to_path_buf()),
+        repo_root: repo.map(Path::to_path_buf),
+        only: vec![id.into()],
+        ..Default::default()
+    }
+}
+
+/// Codex 0.159 skips a hook the user has not reviewed (`/hooks`), without a
+/// message: Pixel's metrics hook installed but never reviewed is dormant, so
+/// doctor must say so, with the step only the user can take, and turn green
+/// once Codex's config records the review for that exact hook.
+#[test]
+fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let exe = fake_pixel_exe(home);
+    install(&InstallOptions {
+        repo: None,
+        home: Some(home.to_path_buf()),
+        executable_path: Some(exe.clone()),
+        claude_executable: Some(fake_claude_exe(home, CLAUDE_WITH_SUBAGENT_FLAG)),
+        dry_run: false,
+        shell: Some(TEST_SHELL.into()),
+    })
+    .expect("install");
+    let hooks = home.join(".codex/hooks.json");
+    let options = hook_review_options(home, &exe, "install.codex-hook-review", None);
+
+    let report = doctor(&options).unwrap();
+    let unreviewed = check(&report, "install.codex-hook-review");
+    assert_eq!(unreviewed.status, CheckStatus::Yellow, "{unreviewed:?}");
+    assert_eq!(
+        unreviewed.summary,
+        format!(
+            "Codex skips 1 of the 1 Pixel hook(s) in {} until you review them (PostToolUse #0.0): \
+             start `codex` in this directory, run `/hooks` and trust them",
+            hooks.display()
+        )
+    );
+    assert_eq!(
+        unreviewed.fix, None,
+        "no command can review a hook for the user"
+    );
+
+    // A review recorded for another file, another event, or an entry without
+    // a hash, is not this hook's review.
+    let config = home.join(".codex/config.toml");
+    let base = fs::read_to_string(&config).unwrap();
+    let review = |key: &str, entry: &str| {
+        fs::write(
+            &config,
+            format!("{base}\n[hooks.state.\"{key}\"]\n{entry}\n"),
+        )
+        .unwrap();
+        doctor(&options).unwrap()
+    };
+    for (key, entry) in [
+        (
+            format!(
+                "{}:post_tool_use:0:0",
+                home.join("other/hooks.json").display()
+            ),
+            "trusted_hash = \"sha256:x\"",
+        ),
+        (
+            format!("{}:post_tool_use:0:0", hooks.display()),
+            "enabled = true",
+        ),
+        (
+            format!("{}:pre_tool_use:0:0", hooks.display()),
+            "trusted_hash = \"sha256:x\"",
+        ),
+        (
+            format!("{}:post_tool_use:0:1", hooks.display()),
+            "trusted_hash = \"sha256:x\"",
+        ),
+    ] {
+        let report = review(&key, entry);
+        assert_eq!(
+            check(&report, "install.codex-hook-review").status,
+            CheckStatus::Yellow,
+            "{key} {entry}"
+        );
+    }
+
+    let report = review(
+        &format!("{}:post_tool_use:0:0", hooks.display()),
+        "trusted_hash = \"sha256:x\"",
+    );
+    let reviewed = check(&report, "install.codex-hook-review");
+    assert_eq!(reviewed.status, CheckStatus::Green, "{reviewed:?}");
+    assert_eq!(
+        reviewed.summary,
+        format!(
+            "Codex has reviewed the 1 Pixel hook(s) in {}",
+            hooks.display()
+        )
+    );
+}
+
+/// The project guard `install --repo` writes is a Codex hook like any other:
+/// counted per handler, foreign hooks beside it never counted, and green only
+/// once every Pixel handler is reviewed. No hooks file is not a finding.
+#[test]
+fn doctor_reports_unreviewed_project_codex_hooks_and_ignores_foreign_ones() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path().join("home");
+    let repo = dir.path().join("repo");
+    fs::create_dir_all(repo.join(".codex")).unwrap();
+    fs::create_dir_all(home.join(".codex")).unwrap();
+    let exe = fake_pixel_exe(&home);
+    let options = hook_review_options(&home, &exe, "repo.codex-hook-review", Some(&repo));
+
+    let report = doctor(&options).unwrap();
+    let absent = check(&report, "repo.codex-hook-review");
+    assert_eq!(absent.status, CheckStatus::Green, "{absent:?}");
+    assert_eq!(
+        absent.summary,
+        format!(
+            "no Pixel hook for Codex in {}",
+            repo.join(".codex/hooks.json").display()
+        )
+    );
+
+    let hooks = repo.join(".codex/hooks.json");
+    let pixel = |verb: &str| {
+        serde_json::json!({
+            "type": "command",
+            "command": format!("'{}' run-hook {verb} --provider codex", exe.display()),
+        })
+    };
+    fs::write(
+        &hooks,
+        serde_json::json!({"hooks": {
+            "PreToolUse": [{"matcher": "Bash", "hooks": [
+                {"type": "command", "command": "/usr/local/bin/lint-guard"},
+                pixel("composed-guard"),
+            ]}],
+            "SessionStart": [{"hooks": [pixel("session-start")]}],
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let report = doctor(&options).unwrap();
+    let unreviewed = check(&report, "repo.codex-hook-review");
+    assert_eq!(unreviewed.status, CheckStatus::Yellow, "{unreviewed:?}");
+    assert_eq!(
+        unreviewed.detail.as_ref().unwrap()["unreviewed"],
+        serde_json::json!(["PreToolUse #0.1", "SessionStart #0.0"]),
+        "the foreign lint hook is not Pixel's to report"
+    );
+
+    let key = |event: &str, g: usize, h: usize| format!("{}:{event}:{g}:{h}", hooks.display());
+    fs::write(
+        home.join(".codex/config.toml"),
+        format!(
+            "[hooks.state.\"{}\"]\ntrusted_hash = \"sha256:a\"\n\n[hooks.state.\"{}\"]\ntrusted_hash = \"sha256:b\"\n",
+            key("pre_tool_use", 0, 1),
+            key("session_start", 0, 0)
+        ),
+    )
+    .unwrap();
+    let report = doctor(&options).unwrap();
+    let reviewed = check(&report, "repo.codex-hook-review");
+    assert_eq!(reviewed.status, CheckStatus::Green, "{reviewed:?}");
+    assert_eq!(
+        reviewed.summary,
+        format!(
+            "Codex has reviewed the 2 Pixel hook(s) in {}",
+            hooks.display()
+        )
+    );
+}
