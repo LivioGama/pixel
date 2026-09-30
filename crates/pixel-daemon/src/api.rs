@@ -1606,21 +1606,28 @@ impl Service {
         let built = self.ensure_graph()?;
         let store = self.graph.as_ref().unwrap();
         let files = file_map(store)?;
+        let budget = budget_tokens.unwrap_or(2000);
+        let value_tokens =
+            |value: &Value| estimate_tokens(&serde_json::to_string(value).unwrap_or_default());
         // Same `uid_or_name` protocol as `impact`: an agent that passes the
         // name it just read (`pack-context renderStories`) gets the symbol,
         // not an error teaching the uid format.
         let sym = match resolve_symbol(store, uid)? {
             Resolved::One(s) => s,
-            Resolved::Many(v) => return candidates_value(store, &v),
+            // The whole-response budget covers the ambiguous answer too: the
+            // candidate list would otherwise return up to 50 full signatures
+            // even under a budget too small to hold them.
+            Resolved::Many(v) => {
+                let response = candidates_value(store, &v)?;
+                budget_fit_error(value_tokens(&response), budget, v.len())?;
+                return Ok(response);
+            }
         };
         let envelope = store
             .envelope_for_name(&sym.name)
             .map_err(|e| e.to_string())?;
         let sym_json = symbol_json(&sym, &files);
 
-        let budget = budget_tokens.unwrap_or(2000);
-        let value_tokens =
-            |value: &Value| estimate_tokens(&serde_json::to_string(value).unwrap_or_default());
         // `budget_basis` declares the approximation behind the token cap:
         // `estimate_tokens` is a bytes/4 heuristic, not a real tokenizer, so
         // the fit is approximate and the response says so instead of
@@ -3667,6 +3674,20 @@ fn candidates_value(store: &GraphStore, syms: &[SymbolRow]) -> Result<Value, Str
     }))
 }
 
+/// The whole-response budget applies to the ambiguous-name answer too: the
+/// candidate list would otherwise return up to 50 full signatures even under
+/// a budget too small to hold them. `used` and `budget` are token counts;
+/// `symbols` is only the count named in the recovery message. A response
+/// exactly at the budget fits; one token over does not.
+fn budget_fit_error(used: usize, budget: usize, symbols: usize) -> Result<(), String> {
+    if used > budget {
+        return Err(format!(
+            "ambiguous name matches {symbols} symbols; the candidate response needs {used} tokens, above budget {budget}: re-call with a uid"
+        ));
+    }
+    Ok(())
+}
+
 fn file_map(store: &GraphStore) -> Result<HashMap<i64, String>, String> {
     Ok(store
         .files()
@@ -5586,6 +5607,91 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression: an ambiguous bare name must obey the same whole-response
+    /// budget as a resolved uid. The candidate list (up to 50 full
+    /// signatures) used to return before the budget check, so a tiny budget
+    /// still emitted all of them; now an answer that does not fit is an
+    /// error, never an over-budget response.
+    #[test]
+    fn context_ambiguous_name_obeys_whole_response_budget() {
+        let root = tmpdir("ctx-budget-candidates");
+        // Eight same-named declarations: the candidate response is well
+        // above a 100-token budget yet comfortably inside the 2000-token
+        // default, so the small-budget case exercises the fit check and the
+        // omitted-budget case pins the default.
+        for i in 0..8 {
+            std::fs::write(
+                root.join(format!("f{i:02}.ts")),
+                format!("export function sharedName(x: number): number {{ return x + {i} }}\n"),
+            )
+            .unwrap();
+        }
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        // Zero budget: below even the minimum response, an error, not a
+        // candidate list.
+        let zero = svc.handle(Request::Context {
+            uid: "sharedName".into(),
+            budget_tokens: Some(0),
+        });
+        assert!(!zero.ok, "zero budget must not return candidates: {zero:?}");
+        // A budget above the minimum response but below the candidate
+        // response must error too, not emit the over-budget list.
+        let small = svc.handle(Request::Context {
+            uid: "sharedName".into(),
+            budget_tokens: Some(100),
+        });
+        assert!(
+            !small.ok,
+            "a budget too small for the candidates must error: {small:?}"
+        );
+        assert!(
+            small.error_message().contains("8 symbols"),
+            "the recovery names the match count: {small:?}"
+        );
+        // A generous budget still resolves the ambiguity to the candidates.
+        let ok = svc.handle(Request::Context {
+            uid: "sharedName".into(),
+            budget_tokens: Some(100_000),
+        });
+        assert!(ok.ok, "generous budget: {ok:?}");
+        assert!(
+            ok.data()["candidates"]
+                .as_array()
+                .is_some_and(|c| c.len() >= 2),
+            "a fitting budget still lists the candidates: {ok:?}"
+        );
+        // Omitting the budget falls back to the 2000-token default: a mutant
+        // that shrinks the default would reject this fitting answer.
+        let default = svc.handle(Request::Context {
+            uid: "sharedName".into(),
+            budget_tokens: None,
+        });
+        assert!(
+            default.ok,
+            "the default budget must hold the candidates: {default:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The candidates budget check is the boundary the ambiguous response
+    /// used to skip: exactly at budget is a fit, one token over is not.
+    #[test]
+    fn budget_fit_error_rejects_only_answers_over_budget() {
+        assert!(budget_fit_error(99, 100, 2).is_ok());
+        assert!(
+            budget_fit_error(100, 100, 2).is_ok(),
+            "a response exactly at budget fits"
+        );
+        let over = budget_fit_error(101, 100, 2).expect_err("one token over must error");
+        assert!(over.contains("101"), "{over}");
+        assert!(over.contains("2 symbols"), "{over}");
     }
 
     /// Regression: a `Context` request with a moderate budget must produce a

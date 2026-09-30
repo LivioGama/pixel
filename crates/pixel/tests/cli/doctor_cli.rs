@@ -441,11 +441,25 @@ fn doctor_should_pass_a_repo_whose_history_was_never_built_and_leave_it_unbuilt(
 /// machine carry a system-level PATH (macOS `path_helper`) the test cannot
 /// reset, but `--shell` accepts any executable, and the check runs it with
 /// `-l -c "command -v pixel"`/`which pixel` exactly as it would the real
-/// one.
-fn fake_shell(tag: &str, script: &str) -> Scratch {
+/// one. The fixture rejects any other invocation, so a probe that drops the
+/// login flag or changes the query fails the test instead of returning the
+/// programmed outcome anyway; `name` also picks the dialect (`fish` is the
+/// Fish branch).
+fn fake_shell(tag: &str, name: &str, lookup: &str, script: &str) -> Scratch {
     let dir = Scratch::for_test("doctor-cli-shell", tag);
-    let shell = dir.join("fake-zsh");
-    std::fs::write(&shell, format!("#!/bin/sh\n{script}\n")).unwrap();
+    let shell = dir.join(name);
+    std::fs::write(
+        &shell,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$#\" -ne 3 ] || [ \"$1\" != \"-l\" ] || [ \"$2\" != \"-c\" ] || [ \"$3\" != \"{lookup}\" ]; then\n\
+             \techo \"unexpected lookup args: $*\" >&2\n\
+             \texit 2\n\
+             fi\n\
+             {script}\n"
+        ),
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -472,12 +486,39 @@ fn shell_path_doctor(shell: &Path, repo: &Path) -> Output {
 #[test]
 fn shell_path_should_be_green_when_the_shell_resolves_pixel() {
     let (_, repo) = fixture("shell-path-green");
-    let shell = fake_shell("shell-path-green", "echo /fake/bin/pixel\nexit 0");
+    let shell = fake_shell(
+        "shell-path-green",
+        "fake-zsh",
+        "command -v pixel",
+        "echo /fake/bin/pixel\nexit 0",
+    );
     let out = shell_path_doctor(shell.join("fake-zsh").as_path(), &repo);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(report["checks"][0]["status"], "green", "{report}");
     assert_eq!(report["summary"]["green"], 1, "{report}");
+    assert_eq!(
+        report["checks"][0]["detail"]["resolved"], "/fake/bin/pixel",
+        "{report}"
+    );
+}
+
+/// The Fish branch asks `which pixel`, not the POSIX `command -v`; a fixture
+/// named `fish` exercises it, and its argument guard fails the probe if the
+/// POSIX query is sent instead.
+#[test]
+fn shell_path_should_use_the_fish_lookup_for_a_fish_shell() {
+    let (_, repo) = fixture("shell-path-fish");
+    let shell = fake_shell(
+        "shell-path-fish",
+        "fish",
+        "which pixel",
+        "echo /fake/bin/pixel\nexit 0",
+    );
+    let out = shell_path_doctor(shell.join("fish").as_path(), &repo);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(report["checks"][0]["status"], "green", "{report}");
     assert_eq!(
         report["checks"][0]["detail"]["resolved"], "/fake/bin/pixel",
         "{report}"
@@ -492,7 +533,7 @@ fn shell_path_should_be_green_when_the_shell_resolves_pixel() {
 #[test]
 fn shell_path_should_flag_a_shell_that_cannot_resolve_pixel() {
     let (_, repo) = fixture("shell-path-yellow");
-    let shell = fake_shell("shell-path-yellow", "exit 1");
+    let shell = fake_shell("shell-path-yellow", "fake-zsh", "command -v pixel", "exit 1");
     let out = shell_path_doctor(shell.join("fake-zsh").as_path(), &repo);
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
