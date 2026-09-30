@@ -77,3 +77,8 @@ Short answers to questions developers ask about coding agents, each only where P
 - [Changelog](https://raw.githubusercontent.com/LivioGama/pixel/main/CHANGELOG.md): what changed in each release
 - [Contributing](https://raw.githubusercontent.com/LivioGama/pixel/main/CONTRIBUTING.md): build from source, gates, pull requests
 - [Decision benchmarks](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/bench/decide-bakeoff.md): the models behind `pixel classify`, scored on coding decisions
+
+## Further guides
+
+- [Evaluating Pixel with your team](https://pixel-cli.dev/teams/): checks for developers, leads, harness engineers and CTOs.
+- [Optional classification](https://pixel-cli.dev/classify/): model-backed decisions, separate from the local index, with source and measurement limits.

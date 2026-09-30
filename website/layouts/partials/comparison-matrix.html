@@ -1,0 +1,76 @@
+{{ $bench := "benchmarks/" | relURL }}
+      {{ $alts := partial "alternatives.html" (dict "abs" false) }}
+      {{ $cols := where $alts "matrix" true }}
+      {{ $pixel := hugo.Data.alternatives.pixel }}
+      {{/* A figure row: the first matrix tool's row carrying that `matrix` key gives Pixel's cell; a tool without the row was not measured on it. */}}
+      {{ $figures := slice "callers" "context" }}
+      {{ $traits := slice (dict "key" "how" "label" "How it answers") (dict "key" "needs" "label" "What it needs") (dict "key" "reach" "label" "How the agent reaches it") (dict "key" "history" "label" "Git history") (dict "key" "licence" "label" "Licence") }}
+      <div class="mx">
+        <div class="mx__scroll" tabindex="0" role="region" aria-labelledby="alternatives">
+          <table class="mx__table">
+            <colgroup><col class="mx__col-label"><col class="mx__col-pixel">{{ range $cols }}<col>{{ end }}</colgroup>
+            <thead>
+              <tr>
+                <th scope="col"><span class="sr-only">Criterion</span></th>
+                <th scope="col" class="mx__pixel">Pixel</th>
+                {{ range $cols }}<th scope="col"><a href="{{ .url }}">{{ .column | default .name }}</a>{{ if ne .measure "design" }}<span class="mx__tag mx__tag--measured">{{ (partial "vs-measure.html" .).label }}</span>{{ end }}</th>{{ end }}
+              </tr>
+            </thead>
+            <tbody>
+              {{ range $i, $key := $figures }}
+              {{ $first := dict }}{{ range $cols }}{{ range .rows }}{{ if and (eq .matrix $key) (not $first) }}{{ $first = . }}{{ end }}{{ end }}{{ end }}
+              {{ if not $first }}{{ errorf "data/alternatives.toml: no matrix tool has a row with matrix = %q" $key }}{{ end }}
+              <tr>
+                <th scope="row">{{ $first.label | safeHTML }}</th>
+                <td class="mx__pixel{{ if eq $first.win "pixel" }} is-win{{ end }}">{{ $first.pixel | safeHTML }}</td>
+                {{/* A tool with no figure row at all gets one cell across every figure row, saying how it was compared; a tool with some of them reads "Not measured" on each row it lacks, so every row keeps one cell per column. */}}
+                {{ range $c := $cols }}
+                  {{ $has := where $c.rows "matrix" "in" $figures }}
+                  {{ with index (where $c.rows "matrix" $key) 0 }}<td{{ if eq .win "other" }} class="is-win"{{ end }}>{{ .other | safeHTML }}</td>
+                  {{ else }}{{ if $has }}<td class="mx__none">Not measured</td>{{ else if eq $i 0 }}<td class="mx__none" rowspan="{{ len $figures }}"><span class="mx__tag">{{ (partial "vs-measure.html" $c).label }}</span></td>{{ end }}{{ end }}
+                {{ end }}
+              </tr>
+              {{ end }}
+              {{ range $t := $traits }}
+              <tr>
+                <th scope="row">{{ $t.label }}</th>
+                <td class="mx__pixel">{{ index $pixel.traits $t.key | safeHTML }}</td>
+                {{ range $cols }}<td>{{ index .traits $t.key | safeHTML }}</td>{{ end }}
+              </tr>
+              {{ end }}
+              <tr class="mx__wins">
+                <th scope="row">Where it beats Pixel</th>
+                <td class="mx__pixel">&mdash;</td>
+                {{ range $cols }}<td>{{ .wins | safeHTML }}</td>{{ end }}
+              </tr>
+              <tr class="mx__links">
+                <th scope="row"><span class="sr-only">Full comparison</span></th>
+                <td class="mx__pixel"><a class="link" href="{{ $bench }}#against-gitnexus">How we measured</a></td>
+                {{ range $cols }}<td><a class="link" href="{{ .url }}">Full comparison<span class="sr-only"> with {{ .name }}</span></a></td>{{ end }}
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {{/* Cards for the tools marked `home` that are not code indexes; none is marked today, so the matrix stands alone and the line below links them. */}}
+      {{ with where $alts "home" true }}
+      <h3 class="vs__kicker">Other ways to spend fewer tokens</h3>
+      <div class="vs">
+        {{ range . }}{{ $tool := . }}
+        <article class="vs__card">
+          <header class="vs__head"><h3>vs {{ .name }}</h3><p>{{ .pitch | safeHTML }}</p></header>
+          <table class="vs__table">
+            <thead><tr><th scope="col"><span class="sr-only">Measure</span></th><th scope="col">Pixel</th><th scope="col">{{ .name }}</th></tr></thead>
+            <tbody>
+              {{ range where .rows "page" "!=" true }}<tr><th scope="row">{{ .label | safeHTML }}</th><td{{ if eq .win "pixel" }} class="is-win"{{ end }}>{{ .pixel | safeHTML }}</td><td{{ if eq .win "other" }} class="is-win"{{ end }}>{{ .other | safeHTML }}</td></tr>
+              {{ end }}
+            </tbody>
+          </table>
+          <p class="vs__theirs"><strong>{{ .note_label | default (printf "Where %s wins" .name) }}:</strong> {{ .note | default .wins | safeHTML }}</p>
+          {{ with .more_href }}<a class="link vs__more" href="{{ . }}">{{ $tool.more }}</a>{{ else }}<a class="link vs__more" href="{{ $bench }}#{{ .bench }}">{{ .more }}</a>{{ end }}
+        </article>
+        {{ end }}
+      </div>
+      {{ end }}
+      <p class="ledger__fine">Other ways to spend fewer tokens have a page each: <a class="link" href="{{ "vs/shunt/" | relURL }}">shunt</a>, which hands large reads to a second model, <a class="link" href="{{ "vs/jev/" | relURL }}">Jev</a>, a model for coding judgement calls, and <a class="link" href="{{ "vs/rtk/" | relURL }}">RTK</a>, which compresses command output and runs beside Pixel. Where a specialist beats Pixel at its one job (semble on a plain-English search's top 10, stacklit on a compact repository map), and how Pixel compares with <a class="link" href="{{ "vs/warpgrep/" | relURL }}">WarpGrep</a>, Morph's search subagent, the numbers are on the <a class="link" href="{{ $bench }}#where-a-specialist-wins">benchmarks page</a>, and <a class="link" href="{{ "vs/" | relURL }}">every comparison</a> is listed.</p>

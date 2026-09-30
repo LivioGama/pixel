@@ -1,5 +1,5 @@
 {{- /* Wrap Markdown tables so a wide one scrolls inside the column instead of the page. */ -}}
-<div class="table">
+<div class="table" tabindex="0" role="region" aria-label="Scrollable table">
 <table>
   <thead>
     {{- range .THead }}
