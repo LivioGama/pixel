@@ -879,7 +879,7 @@ mod tests {
         assert!(
             gates[0]
                 .label
-                .contains("run one of: `pixel flow run `alpha-auth`, `mu-auth`, `zeta-login`"),
+                .contains("run one of: `pixel flow run alpha-auth`, `mu-auth`, `zeta-login`"),
             "{}",
             gates[0].label
         );
@@ -930,7 +930,7 @@ mod tests {
         assert!(
             gates[0]
                 .label
-                .contains("run one of: `pixel flow run `alpha-auth`, `mu-auth`, `zeta-auth`"),
+                .contains("run one of: `pixel flow run alpha-auth`, `mu-auth`, `zeta-auth`"),
             "{}",
             gates[0].label
         );
@@ -978,7 +978,7 @@ mod tests {
         assert_eq!(gates.len(), 1);
         assert!(
             gates[0].label.contains(
-                "run one of: `pixel flow run `alpha-auth`, `mu-auth`, `theta-auth` +1 more"
+                "run one of: `pixel flow run alpha-auth`, `mu-auth`, `theta-auth` +1 more"
             ),
             "{}",
             gates[0].label
