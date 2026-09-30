@@ -307,6 +307,10 @@ pub fn setup_local(stdout: &mut dyn std::io::Write) -> Result<(), String> {
 trait LocalSetupRuntime {
     fn local_root(&mut self) -> Result<PathBuf, String>;
     fn exists(&self, path: &std::path::Path) -> bool;
+    /// The unpack support the ollaya installer needs, observed on this
+    /// machine: `zstd (command present?)`, the platform, and the parsed
+    /// `/etc/os-release` when the platform ships one.
+    fn unpack_environment(&self) -> UnpackEnvironment;
     fn run(
         &mut self,
         program: &str,
@@ -315,6 +319,16 @@ trait LocalSetupRuntime {
     ) -> Result<(), String>;
     fn record_launch(&mut self, launch: &Value) -> Result<(), String>;
     fn set_engine(&mut self) -> Result<(), String>;
+}
+
+/// What this machine offers for unpacking a `zstd`-compressed artifact.
+/// The system adapter reads `/etc/os-release` (Linux) and probes the `zstd`
+/// command; the test fake supplies fixed values.
+#[derive(Debug, PartialEq, Eq, Clone)]
+struct UnpackEnvironment {
+    zstd_present: bool,
+    os: &'static str,
+    os_release: Option<String>,
 }
 
 struct SystemLocalSetup;
@@ -328,6 +342,21 @@ impl LocalSetupRuntime for SystemLocalSetup {
     #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
     fn exists(&self, path: &std::path::Path) -> bool {
         path.exists()
+    }
+
+    #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
+    fn unpack_environment(&self) -> UnpackEnvironment {
+        let zstd_present = probe_present("zstd", &["--version"]);
+        let os_release = if std::env::consts::OS == "linux" {
+            std::fs::read_to_string("/etc/os-release").ok()
+        } else {
+            None
+        };
+        UnpackEnvironment {
+            zstd_present,
+            os: std::env::consts::OS,
+            os_release,
+        }
     }
 
     #[cfg_attr(test, mutants::skip)] // System I/O adapter; setup policy is exercised through LocalSetupRuntime.
@@ -360,6 +389,7 @@ fn setup_local_with(
     runtime: &mut impl LocalSetupRuntime,
     stdout: &mut dyn std::io::Write,
 ) -> Result<(), String> {
+    ensure_unpack_support(runtime, stdout)?;
     let root = runtime.local_root()?;
     let root_str = root.to_string_lossy().into_owned();
     let bin = root.join("bin").join("ollaya");
@@ -436,8 +466,126 @@ fn setup_local_with(
     Ok(())
 }
 
-/// Spawn the recorded local daemon if it is not already answering. Returns
-/// whether a spawn happened (the caller polls for reachability itself).
+/// The ollaya installer unpacks its download with `zstd`, which ollaya does
+/// not bundle: whether the command exists depends on the distribution, and
+/// a fresh box without it died inside the remote `install.sh` with a bare
+/// exit status. Install it before the installer runs — without asking for
+/// consent; the operating system may still require its own sudo password. A
+/// distribution the table cannot name ends with the remedy in the error,
+/// never a cryptic status.
+fn ensure_unpack_support(
+    runtime: &mut impl LocalSetupRuntime,
+    stdout: &mut dyn std::io::Write,
+) -> Result<(), String> {
+    let env = runtime.unpack_environment();
+    if env.zstd_present {
+        return Ok(());
+    }
+    let Some(install) = unpack_support_install(&env) else {
+        return Err(format!(
+            "ollaya setup needs `zstd` to unpack its download, and the \
+             preflight has no automatic install for os {os}: install it \
+             with the distribution's package manager (apt: `sudo apt-get \
+             install -y zstd`; dnf: `sudo dnf install -y zstd`; zypper: \
+             `sudo zypper install zstd`; pacman: `sudo pacman -S zstd`; \
+             apk: `sudo apk add zstd`) and re-run pixel config setup",
+            os = env.os
+        ));
+    };
+    writeln!(
+        stdout,
+        "ollaya setup needs zstd to unpack its download (not bundled with \
+         ollaya; installed per distribution) — installing {}",
+        install.join(" ")
+    )
+    .map_err(|e| e.to_string())?;
+    runtime.run(&install[0], &install[1..], &[])?;
+    if !runtime.unpack_environment().zstd_present {
+        return Err(format!(
+            "ollaya setup ran `{}` but zstd is still missing; install it \
+             manually (apt: `sudo apt-get install -y zstd`; dnf: `sudo dnf \
+             install -y zstd`; zypper: `sudo zypper install zstd`; pacman: \
+             `sudo pacman -S zstd`; apk: `sudo apk add zstd`) and re-run \
+             pixel config setup",
+            install.join(" ")
+        ));
+    }
+    Ok(())
+}
+
+fn probe_present(program: &str, args: &[&str]) -> bool {
+    std::process::Command::new(program)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Family per package manager, as `ID` or `ID_LIKE` names them in
+/// `/etc/os-release`; RHEL-era distributions name the CLI `zstd` while the
+/// library (`libzstd`) is usually already present.
+const UNPACK_INSTALLERS: &[(&[&str], &[&str])] = &[
+    (
+        &["ubuntu", "debian", "pop", "linuxmint", "raspbian"],
+        &["sudo", "apt-get", "install", "-y", "zstd"],
+    ),
+    (
+        &["fedora", "rhel", "centos", "amzn", "rocky", "ol"],
+        &["sudo", "dnf", "install", "-y", "zstd"],
+    ),
+    (
+        &[
+            "opensuse",
+            "opensuse-leap",
+            "opensuse-tumbleweed",
+            "suse",
+            "sles",
+        ],
+        &["sudo", "zypper", "install", "--non-interactive", "zstd"],
+    ),
+    (
+        &["arch", "manjaro", "endeavouros", "garuda"],
+        &["sudo", "pacman", "-S", "--noconfirm", "zstd"],
+    ),
+    (&["alpine"], &["sudo", "apk", "add", "zstd"]),
+];
+
+/// The non-interactive install command for this machine's distribution, or
+/// `None` when the preflight cannot name one (`os_release` unparseable, or
+/// an os outside the table).
+fn unpack_support_install(env: &UnpackEnvironment) -> Option<Vec<String>> {
+    match env.os {
+        "macos" => Some(vec!["brew".into(), "install".into(), "zstd".into()]),
+        "linux" => {
+            let release = env.os_release.as_deref()?;
+            let id = os_release_field(release, "ID");
+            let id_like = os_release_field(release, "ID_LIKE");
+            UNPACK_INSTALLERS
+                .iter()
+                .find(|(families, _)| {
+                    families.contains(&id.as_str())
+                        || id_like.split(' ').any(|like| families.contains(&like))
+                })
+                .map(|(_, command)| command.iter().map(ToString::to_string).collect())
+        }
+        _ => None,
+    }
+}
+
+/// The unquoted value of a KEY=VALUE line of `/etc/os-release`, or an empty
+/// string when absent.
+fn os_release_field(release: &str, key: &str) -> String {
+    for line in release.lines() {
+        if let Some(value) = line.strip_prefix(&format!("{key}=")) {
+            return value.trim_matches('"').to_string();
+        }
+    }
+    String::new()
+}
+
+/// Spawn the recorded local daemon if it is not already answering. Returns/// whether a spawn happened (the caller polls for reachability itself).
 #[cfg_attr(test, mutants::skip)] // Runtime adapter; launch parsing and branching are tested by `auto_start_with`.
 pub fn auto_start(base: &str) -> Result<bool, String> {
     auto_start_with(base, server_reachable, ollaya_launch(), |argv, env| {
@@ -559,6 +707,11 @@ mod tests {
         root: PathBuf,
         binary_exists: bool,
         installer_creates_binary: bool,
+        unpack: UnpackEnvironment,
+        /// The unpack environment probed after the fake `run` executed
+        /// once, standing for the machine state after an install command.
+        unpack_after: UnpackEnvironment,
+        install_done: bool,
         runs: Vec<RunInvocation>,
         launch: Option<Value>,
         engine_set: bool,
@@ -573,6 +726,14 @@ mod tests {
             path == self.root.join("bin").join("ollaya") && self.binary_exists
         }
 
+        fn unpack_environment(&self) -> UnpackEnvironment {
+            if self.install_done {
+                self.unpack_after.clone()
+            } else {
+                self.unpack.clone()
+            }
+        }
+
         fn run(
             &mut self,
             program: &str,
@@ -581,6 +742,7 @@ mod tests {
         ) -> Result<(), String> {
             self.runs
                 .push((program.to_string(), args.to_vec(), env.to_vec()));
+            self.install_done = true;
             if program == "sh" && self.installer_creates_binary {
                 self.binary_exists = true;
             }
@@ -605,6 +767,16 @@ mod tests {
         assert_eq!(parse_choice(""), None);
         assert_eq!(parse_choice("yes"), None);
         assert_eq!(parse_choice("0"), None);
+    }
+
+    #[test]
+    fn the_probe_requires_the_process_to_spawn_and_agree() {
+        assert!(probe_present("true", &[]));
+        assert!(!probe_present("false", &[]));
+        assert!(!probe_present(
+            "definitely-not-a-real-command-pixel-test",
+            &[]
+        ));
     }
 
     #[test]
@@ -971,6 +1143,17 @@ mod tests {
             root: root.clone(),
             binary_exists: false,
             installer_creates_binary: true,
+            unpack: UnpackEnvironment {
+                zstd_present: true,
+                os: "linux",
+                os_release: None,
+            },
+            unpack_after: UnpackEnvironment {
+                zstd_present: true,
+                os: "linux",
+                os_release: None,
+            },
+            install_done: false,
             runs: Vec::new(),
             launch: None,
             engine_set: false,
@@ -1020,6 +1203,17 @@ mod tests {
             root: PathBuf::from("/pixel-test/ollaya"),
             binary_exists: false,
             installer_creates_binary: false,
+            unpack: UnpackEnvironment {
+                zstd_present: true,
+                os: "linux",
+                os_release: None,
+            },
+            unpack_after: UnpackEnvironment {
+                zstd_present: true,
+                os: "linux",
+                os_release: None,
+            },
+            install_done: false,
             runs: Vec::new(),
             launch: None,
             engine_set: false,
@@ -1031,5 +1225,170 @@ mod tests {
         assert_eq!(runtime.runs.len(), 2);
         assert!(runtime.launch.is_none());
         assert!(!runtime.engine_set);
+    }
+
+    fn absent(env: Option<String>, os: &'static str) -> UnpackEnvironment {
+        UnpackEnvironment {
+            zstd_present: false,
+            os,
+            os_release: env,
+        }
+    }
+
+    fn present(env: Option<String>, os: &'static str) -> UnpackEnvironment {
+        UnpackEnvironment {
+            zstd_present: true,
+            os,
+            os_release: env,
+        }
+    }
+
+    #[test]
+    fn unpack_support_names_the_distribution_package_manager() {
+        let install = |env: &UnpackEnvironment| unpack_support_install(env).unwrap().join(" ");
+        assert_eq!(
+            install(&absent(Some("ID=ubuntu\n".into()), "linux")),
+            "sudo apt-get install -y zstd"
+        );
+        // Raspberry Pi OS names its family through ID_LIKE, not ID.
+        assert_eq!(
+            install(&absent(
+                Some("ID=raspios\nID_LIKE=\"debian\"\n".into()),
+                "linux"
+            )),
+            "sudo apt-get install -y zstd"
+        );
+        for (release, expected) in [
+            ("ID=fedora\n", "sudo dnf install -y zstd"),
+            ("ID=ol\n", "sudo dnf install -y zstd"),
+            (
+                "ID=opensuse-leap\n",
+                "sudo zypper install --non-interactive zstd",
+            ),
+            ("ID= endeavouros\n", "sudo pacman -S --noconfirm zstd"),
+            ("ID=alpine\n", "sudo apk add zstd"),
+        ] {
+            let content = if release.starts_with("ID= endeavouros") {
+                "ID=endeavouros\nID_LIKE=\"arch\"\n".to_string()
+            } else {
+                release.to_string()
+            };
+            assert_eq!(
+                install(&absent(Some(content), "linux")),
+                expected,
+                "{release}"
+            );
+        }
+        assert_eq!(install(&absent(None, "macos")), "brew install zstd");
+    }
+
+    #[test]
+    fn unpack_support_refuses_what_it_cannot_name() {
+        // No /etc/os-release on this Linux box.
+        assert_eq!(unpack_support_install(&absent(None, "linux")), None);
+        // A distribution outside the table.
+        assert_eq!(
+            unpack_support_install(&absent(Some("ID=plan9\n".into()), "linux")),
+            None
+        );
+        // Only Linux ships an os-release the preflight reads.
+        assert_eq!(unpack_support_install(&absent(None, "windows")), None);
+    }
+
+    #[test]
+    fn os_release_field_reads_quoted_values_and_skips_absent_keys() {
+        let release = "PRETTY_NAME=\"Ubuntu 24.04 LTS\"\nID=ubuntu\n\nID_LIKE=debian\n# COMMENT";
+        assert_eq!(os_release_field(release, "ID"), "ubuntu");
+        assert_eq!(os_release_field(release, "ID_LIKE"), "debian");
+        assert_eq!(os_release_field(release, "PRETTY_NAME"), "Ubuntu 24.04 LTS");
+        assert_eq!(os_release_field(release, "VERSION_ID"), "");
+        assert_eq!(os_release_field(release, "COMMENT"), "");
+    }
+
+    #[test]
+    fn setup_local_installs_zstd_before_the_ollaya_installer() {
+        let mut runtime = FakeLocalSetup {
+            root: PathBuf::from("/pixel-test/ollaya"),
+            binary_exists: false,
+            installer_creates_binary: true,
+            unpack: absent(Some("ID=ubuntu\n".into()), "linux"),
+            unpack_after: present(None, "linux"),
+            install_done: false,
+            runs: Vec::new(),
+            launch: None,
+            engine_set: false,
+        };
+        let mut output = Vec::new();
+
+        setup_local_with(&mut runtime, &mut output).unwrap();
+
+        // install, curl, sh, pull: the preflight comes first and the rest
+        // of the flow still runs through its full sequence.
+        assert_eq!(runtime.runs.len(), 4);
+        assert_eq!(
+            runtime.runs[0],
+            (
+                "sudo".to_string(),
+                vec![
+                    "apt-get".to_string(),
+                    "install".to_string(),
+                    "-y".to_string(),
+                    "zstd".to_string(),
+                ],
+                vec![]
+            )
+        );
+        assert_eq!(runtime.runs[1].0, "curl");
+        let text = String::from_utf8(output).unwrap();
+        assert!(text.contains("sudo apt-get install -y zstd"), "{text}");
+    }
+
+    #[test]
+    fn setup_local_reports_the_manual_remedy_when_the_distribution_is_unknown() {
+        let mut runtime = FakeLocalSetup {
+            root: PathBuf::from("/pixel-test/ollaya"),
+            binary_exists: false,
+            installer_creates_binary: true,
+            unpack: absent(None, "linux"),
+            unpack_after: absent(None, "linux"),
+            install_done: false,
+            runs: Vec::new(),
+            launch: None,
+            engine_set: false,
+        };
+
+        let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();
+
+        assert!(
+            error.contains("no automatic install for os linux"),
+            "{error}"
+        );
+        assert!(error.contains("sudo apt-get install -y zstd"), "{error}");
+        assert!(runtime.runs.is_empty());
+    }
+
+    #[test]
+    fn setup_local_flags_when_the_install_leaves_unpack_support_missing() {
+        let mut runtime = FakeLocalSetup {
+            root: PathBuf::from("/pixel-test/ollaya"),
+            binary_exists: false,
+            installer_creates_binary: true,
+            unpack: absent(Some("ID=fedora\n".into()), "linux"),
+            unpack_after: absent(Some("ID=fedora\n".into()), "linux"),
+            install_done: false,
+            runs: Vec::new(),
+            launch: None,
+            engine_set: false,
+        };
+
+        let error = setup_local_with(&mut runtime, &mut Vec::new()).unwrap_err();
+
+        assert!(error.contains("but zstd is still missing"), "{error}");
+        assert!(error.contains("sudo dnf install -y zstd"), "{error}");
+        // The failing preflight stops the flow: no installer ran, no launch
+        // was recorded.
+        assert_eq!(runtime.runs.len(), 1);
+        assert_eq!(runtime.runs[0].0, "sudo");
+        assert!(runtime.launch.is_none());
     }
 }
