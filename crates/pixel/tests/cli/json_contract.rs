@@ -1021,6 +1021,85 @@ fn search_content_takes_ripgreps_glob_type_files_and_literal_flags() {
     );
 }
 
+/// The row cap is stated once in prose mode: the `⚠ results truncated`
+/// line names it, and the epistemics note that follows must not restate
+/// the same cap — two stderr lines saying "truncated" read as two
+/// problems. `--json` keeps the cap inside `epistemics.basis`: there that
+/// field is the only place a non-reading consumer finds it.
+#[test]
+fn search_names_a_truncation_cap_once_in_prose() {
+    let dir = fixture("search-note-once");
+    let cut = pixel(
+        &dir,
+        &["search-content", "login_user", ".", "-l", "--limit", "1"],
+    );
+    assert!(cut.status.success(), "{cut:?}");
+    let stderr = String::from_utf8_lossy(&cut.stderr);
+    assert!(
+        stderr.contains("results truncated"),
+        "the warning names the cut: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("row limit").count(),
+        1,
+        "the row cap is stated once: {stderr}"
+    );
+    let json = pixel(
+        &dir,
+        &[
+            "search-content",
+            "login_user",
+            ".",
+            "--limit",
+            "1",
+            "--json",
+        ],
+    );
+    assert!(json.status.success(), "{json:?}");
+    let docs = parse_stdout_lines(&json, "json search");
+    let (meta, _) = docs.split_last().unwrap();
+    assert!(
+        meta["epistemics"]["basis"]
+            .as_str()
+            .is_some_and(|b| b.contains("row limit")),
+        "{meta}"
+    );
+    // A clean page names no cap, so the note must not print at all: with
+    // the guard's `&&` chain widened, every search would grow the line.
+    let whole = pixel(&dir, &["search-content", "login_user", ".", "-l"]);
+    assert!(whole.status.success(), "{whole:?}");
+    assert!(
+        !String::from_utf8_lossy(&whole.stderr).contains("bounded result"),
+        "{whole:?}"
+    );
+}
+
+/// When the stdout cap cuts the page, the warning names the stdout cap and
+/// the daemon's own caps stay in the bounded-result note: the two lines
+/// name different bounds, and dropping the daemon's row cap from the note
+/// would lose the only place prose names it.
+#[test]
+fn the_stdout_cap_warning_leaves_the_daemon_caps_in_the_note() {
+    let dir = fixture_with_many_matches("search-note-stdout-cap");
+    let out = pixel_command()
+        .args(["search-content", "the", ".", "--context", "20"])
+        .current_dir(&dir)
+        .env("PIXEL_OUTPUT_CAP_BYTES", "1")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("stdout cap"),
+        "the stdout-cap warning fires: {stderr}"
+    );
+    assert_eq!(
+        stderr.matches("row limit").count(),
+        1,
+        "the daemon's row cap survives in the note: {stderr}"
+    );
+}
+
 /// `--limit` counts the matching lines a `-g`/`-t` search prints, not the
 /// index rows read before the filter: `--limit 1 -g 'tests/*'` used to ask
 /// the index for one row, drop it (it was `NOTES.md`), and print nothing
