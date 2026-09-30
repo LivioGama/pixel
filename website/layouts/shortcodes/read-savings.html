@@ -1,4 +1,4 @@
-{{- /* The well-known files of /benchmarks/, from data/read_savings.toml (the same rows the home's token wall reads), so the page and the wall cannot disagree. {{% read-savings %}} prints the table (Markdown, rendered by render-table.html); {{% read-savings "summary" %}} prints the kept rows' range and median, from partials/kept-rates.html (the rates /savings/ multiplies); {{% read-savings "window" %}} prints the wall row's full read as a share of a context window, from partials/context-share.html (the home's Problem chapter). */ -}}
+{{- /* The well-known files of /benchmarks/, from data/read_savings.toml (the same rows the home's token wall reads), so the page and the wall cannot disagree. {{% read-savings %}} prints the table (Markdown, rendered by render-table.html); {{% read-savings "summary" %}} prints the kept rows' range and median, from partials/kept-rates.html (the rates /savings/ multiplies); {{% read-savings "window" %}} prints the wall row's full read as a share of a context window, from partials/context-share.html. */ -}}
 {{- $rows := hugo.Data.read_savings.row -}}
 {{- if eq (.Get 0) "summary" -}}
 {{- $r := partial "kept-rates.html" . -}}
