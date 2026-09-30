@@ -538,7 +538,8 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
     the checkout's `.pixel/actions.jsonl` alone, the `scripts/test-*.py`
     contract scripts (installer, gate runner, mutation pre-push, release
-    prepare, Homebrew formula and Linux bottles, nightly mutants, mutants
+    prepare, Homebrew formula and Linux bottles, homebrew-core formula,
+    nightly mutants, mutants
     config, action pins, clean), the
     pixel-retro lead-time contract (`.agents/skills/pixel-retro/test_lead_time.py`)
     and the Bun Pi-policy contract (`scripts/test-pi-policy.mjs`);
@@ -551,7 +552,10 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   request touching `crates/`, sharded), `mutants-nightly.yml` (a whole-tree
   rotation), `cross-build.yml` (the three release lanes), `release.yml`
   (which writes the formula and the Linux bottles with
-  `scripts/homebrew-formula.py`),
+  `scripts/homebrew-formula.py`, and the homebrew-core formula with
+  `scripts/homebrew-core-formula.py`), `homebrew-core.yml` (that formula
+  built from source, `brew test`, `brew audit --strict --new`, on macOS and
+  Linux),
   `release-prepare-scope.yml` and `pages.yml` (the website).
 - Local agent validation uses targeted checks during editing and the full
   gates once a reviewable unit is ready (CONTRIBUTING.md, "Agent validation
@@ -591,3 +595,11 @@ follows commits without a `cargo clean`.
 Runtime and cannot build for musl, so Linux release binaries are built with
 `--no-default-features --features model2vec`. `--no-default-features` alone
 gives an offline-only binary with no semantic search.
+
+One build-time switch sits beside the features: `PIXEL_UPDATE_CHECK=off`
+(read with `option_env!` in `update_notice.rs`) builds a binary that never
+checks for a release, prints the notice or offers to upgrade itself. The
+homebrew-core formula (`scripts/homebrew-core-formula.py`) builds with it and
+with `--no-default-features --features model2vec`, since homebrew-core builds
+from source, owns updates, and refuses the prebuilt ONNX Runtime `fastembed`
+downloads; every other build keeps the check.

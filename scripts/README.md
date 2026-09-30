@@ -27,6 +27,8 @@ pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-c
 | `install.sh` | `curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh \| sh` | end-user installer, published as an asset of every release: latest GitHub release, checksum, atomic rename into `$PIXEL_INSTALL_DIR` (default `~/.local/bin`) |
 | `homebrew-formula.py` | `python3 scripts/homebrew-formula.py <tag> <artifacts> <out>` | run by `release.yml`: writes the tap's `pixel.rb` and the two Linux bottles (the musl binary as a keg, reproducible) from the release archives |
 | `test-homebrew-formula.py` | `python3 scripts/test-homebrew-formula.py` | contract of `homebrew-formula.py` (synthetic archives, `fixtures/homebrew/pixel.rb.template`) |
+| `homebrew-core-formula.py` | `python3 scripts/homebrew-core-formula.py <tag> <source-tarball> <out>` | run by `release.yml`: writes `pixel-core.rb`, the homebrew-core formula that builds pixel from the tag's source archive (see `docs/homebrew-core.md`) |
+| `test-homebrew-core-formula.py` | `python3 scripts/test-homebrew-core-formula.py` | contract of `homebrew-core-formula.py` (`fixtures/homebrew/pixel-core.rb.template`); `.github/workflows/homebrew-core.yml` builds and audits the formula |
 | `refresh-guidelines.sh` | `scripts/refresh-guidelines.sh` | re-download the vendored Rust guidelines; exit 1 when rule headings moved |
 
 ## Disk

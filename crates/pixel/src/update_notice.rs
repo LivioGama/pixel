@@ -44,6 +44,16 @@ const INSTALL_SH_COMMAND: &str =
 const STATE_FILE: &str = "release-check.json";
 /// The opt-out variable: any value but empty or `0` turns the check off.
 pub(crate) const OPT_OUT_VAR: &str = "PIXEL_NO_UPDATE_CHECK";
+/// `PIXEL_UPDATE_CHECK` as the build saw it. A package manager that owns
+/// updates builds with `PIXEL_UPDATE_CHECK=off` (the homebrew-core formula
+/// does): that binary never checks, never prints the notice and never offers
+/// to upgrade itself, which such a manager refuses in software it packages.
+const BUILT_UPDATE_CHECK: Option<&str> = option_env!("PIXEL_UPDATE_CHECK");
+
+/// Whether the build turned the check off for good: exactly `off`.
+fn built_without_update_check(value: Option<&str>) -> bool {
+    value == Some("off")
+}
 
 /// What the state file keeps between invocations.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -93,9 +103,10 @@ fn due(last: u64, now: u64) -> bool {
     now < last || now - last >= CHECK_INTERVAL_SECS
 }
 
-/// Whether this invocation may check and print: a person reads its stderr,
-/// it is not a protected stream, and neither `CI` nor the opt-out is set.
-/// `self-update` is left out: it is how a source build gets updated.
+/// Whether this invocation may check and print: the build kept the check, a
+/// person reads its stderr, it is not a protected stream, and neither `CI`
+/// nor the opt-out is set. `self-update` is left out: it is how a source
+/// build gets updated.
 pub(crate) fn enabled(
     protected: bool,
     command_label: &str,
@@ -103,7 +114,8 @@ pub(crate) fn enabled(
     env: impl Fn(&str) -> Option<OsString>,
 ) -> bool {
     let set = |name: &str| env(name).is_some_and(|v| !v.is_empty() && v != "0");
-    !protected
+    !built_without_update_check(BUILT_UPDATE_CHECK)
+        && !protected
         && stderr_is_terminal
         && command_label != "self-update"
         && !set("CI")
@@ -459,6 +471,26 @@ mod tests {
         assert!(due(1_000, 1_000 + CHECK_INTERVAL_SECS));
         assert!(due(1_000, 999));
         assert!(due(0, CHECK_INTERVAL_SECS));
+    }
+
+    /// Only `off` removes the check: a packager's typo (`of`, `0`, empty)
+    /// must not silently leave a binary that still offers to update itself,
+    /// nor may an unrelated value take the notice away from everyone else.
+    #[test]
+    fn built_without_update_check_should_take_exactly_off() {
+        assert!(built_without_update_check(Some("off")));
+        for kept in [
+            None,
+            Some(""),
+            Some("on"),
+            Some("0"),
+            Some("OFF"),
+            Some("of"),
+        ] {
+            assert!(!built_without_update_check(kept), "{kept:?}");
+        }
+        // The test build is an ordinary one: the check is kept.
+        assert_eq!(BUILT_UPDATE_CHECK, None);
     }
 
     #[test]
