@@ -66,9 +66,16 @@ Rules are always-on for the files they name; a skill is read when its
 `.agents/skills/<name>/SKILL.md` before its first Rust edit. When a skill and
 a rule disagree, the rule wins (and the `Cargo.toml` lint table wins over both).
 
-## Reinstall and Reconfig After Each Implementation Turn
+## Local Validation Loop
 
-After every implementation turn—including tests, website behavior/assets, install/config, and other non-Rust code—complete this checklist before declaring done. Only the explicit skip cases below apply:
+- During editing, run the tests for the changed contract and its affected consumers, plus crate-scoped compilation or Clippy when needed. Run the full gates in CONTRIBUTING.md once the reviewable unit is ready, and again after a fix that can change their result; a status update or an unchanged tree does not need another run.
+- Long local gates may run as a background task. Keep their checkout unchanged until they finish; to keep editing, validate a committed snapshot in a separate worktree with its own `target/`. Record the SHA, command, log and exit status. A pass covers that snapshot only, not later edits.
+- Keep Cargo builds sequential within one `target/`; parallel workers need separate build directories and a combined CPU/memory budget. Do independent review or another unit while gates run. When no useful independent work remains, wait for completion without repeated polling.
+- The CI lanes remain required before declaring the PR ready. See CONTRIBUTING.md "Agent validation workflow" for the local/CI split and how to verify the final run.
+
+## Reinstall and Reconfig After Each Implementation Unit
+
+Complete this checklist once per finished reviewable implementation unit—including tests, website behavior/assets, install/config, and other non-Rust code—before declaring it done. Intermediate edits and progress replies do not trigger it. Run it earlier when a check needs the installed binary or hooks to exercise the new behavior, and repeat it if subsequent edits change the binary or installed rules. Only the explicit skip cases below apply:
 
 1. **Rebuild and reinstall the pixel binary** so the installed CLI matches the working tree:
    ```bash
@@ -80,7 +87,7 @@ After every implementation turn—including tests, website behavior/assets, inst
    - **Track B:** `pixel install` — reinstall hooks and managed blocks. Where `build-agent-config` is installed (it regenerates per-tool rule directories from `~/.agent-config`), run it first: `build-agent-config && pixel install`.
 3. **Run `pixel doctor . --fix --fail-on yellow`** and confirm it exits 0: `--fix` runs each repair command once and re-runs the checks (explicitly report each repair that did not end `fixed`, and each check left with a `fix:` line it cannot run by itself).
 
-Do not report the turn complete without evidence that self-update succeeded, both parallel tracks completed, and doctor exited 0. If a step cannot run, report the turn as incomplete and name the blocker rather than silently skipping it.
+Do not report the unit complete without evidence that self-update succeeded, both parallel tracks completed, and doctor exited 0. If a step cannot run, report the unit as incomplete and name the blocker rather than silently skipping it.
 
 Both commands target the account's login shell (from the user database, not `$SHELL`, which an agent's command tool overrides: Claude Code's runs under `/bin/zsh` on a fish machine): `install` removes the retired `claude()` wrapper from that shell's profile and `doctor` reports one that remains. If `doctor` still reports `install.legacy-wrappers` for the wrong profile, pass the shell a human launches `claude` from to both commands: `--shell fish`.
 

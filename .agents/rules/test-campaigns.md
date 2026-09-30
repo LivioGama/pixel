@@ -2,6 +2,14 @@
 
 Always loaded: how to run the long gates without losing an afternoon.
 
+- **Validate one finished unit, not every reply.** Use contract and
+  consumer tests while editing; full local gates are due before the PR and
+  after changes that can invalidate their result. Follow CONTRIBUTING.md
+  "Agent validation workflow" for background execution: an unchanged
+  checkout or a committed worktree snapshot, its own `target/`, and a SHA,
+  command, complete log and exit status. A previous pass never covers a
+  subsequent behavior change. Keep Cargo builds sequential per build
+  directory and do not clean output used by a running gate.
 - **Mutants run in CI, not on the laptop.** The `Mutants` workflow is the
   gate; the local machine is for writing code. A 231-mutant campaign held a
   laptop's tree for two hours (`--in-place` forbids edits meanwhile) for
