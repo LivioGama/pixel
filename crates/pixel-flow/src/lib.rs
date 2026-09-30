@@ -110,7 +110,7 @@ fn save_flow(
 ) -> Result<Value, String> {
     if exists(name) {
         return Err(format!(
-            "flow '{}' already exists — use `pixel replay-flow revise {}` to update it",
+            "flow '{}' already exists — use `pixel flow revise {}` to update it",
             slugify(name),
             slugify(name)
         ));
@@ -419,7 +419,7 @@ mod tests {
         let again = save_flow("Login Flow", "Other", "", &[], &None, &from_file).unwrap_err();
         assert_eq!(
             again,
-            "flow 'login-flow' already exists — use `pixel replay-flow revise login-flow` to update it"
+            "flow 'login-flow' already exists — use `pixel flow revise login-flow` to update it"
         );
         assert_eq!(
             load("Login Flow").unwrap().title,

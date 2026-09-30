@@ -624,7 +624,7 @@ mod tests {
     }
 
     /// A plain step runs through the shared executor: the same browser
-    /// calls `pixel replay-flow --execute` would make.
+    /// calls `pixel flow run` would make.
     #[test]
     fn a_plain_step_runs_as_the_plain_executor_would() {
         let flow = flow(vec![FlowStep {

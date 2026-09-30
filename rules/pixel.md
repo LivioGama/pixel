@@ -86,7 +86,7 @@ pixel commit --files <f1> --files <f2> -m "msg" --request-id "id"   # only when 
 | `pixel web-search "<term>"` | a term the index cannot know |
 | `pixel review-changes` | structured staged/unstaged diff |
 | `pixel recall …` | past agent sessions — see below |
-| `pixel replay-flow replay\|get "<name>"` / `pixel list-errors last` | saved UI flows / captured errors |
+| `pixel flow run|get "<name>"` / `pixel list-errors last` | run a saved UI flow / captured errors |
 | `pixel ultraflow discover\|replay …` | drive a page with `pixel classify`, and save what worked as a flow — see below |
 | `pixel classify "<text>" --label a --label b` | a bounded decision: probability per label + `predicted:` — see below |
 
@@ -142,7 +142,7 @@ currently offers, so one answer is one executable action. A typed field is
 filled from a `--var key=value` you declared, or from a string the goal
 itself contains — never from an invented value; when neither exists the run
 stops and names the field. `--save` composes what worked into the flow store,
-where `pixel replay-flow list` and `pixel ultraflow replay` find it.
+where `pixel flow list` and `pixel ultraflow replay` find it.
 
 ```bash
 pixel ultraflow discover --url https://example.com --goal "Search for flights to Zurich" --var query=Zurich --save travel-search

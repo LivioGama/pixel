@@ -1295,11 +1295,12 @@ enum Command {
     /// `replay` follows the composed document, and re-decides a step whose
     /// page moved on, recording the new branch with `--update`.
     Ultraflow(ultraflow_cmd::UltraflowOptions),
-    /// Save, retrieve, list, revise, and replay proven agent-browser paths
-    /// (auth flows, config flows) so the agent follows a deterministic
+    /// Save, retrieve, list, revise, run, and replay proven agent-browser
+    /// paths (auth flows, config flows) so the agent follows a deterministic
     /// shortcut instead of re-discovering the UI from scratch every time.
-    #[command(alias = "flow")]
-    ReplayFlow {
+    /// For a classify-decided replay with repair, use `pixel ultraflow replay`.
+    #[command(alias = "replay-flow")]
+    Flow {
         #[command(subcommand)]
         cmd: FlowCmd,
     },
@@ -1451,11 +1452,27 @@ enum FlowCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Run a flow by driving agent-browser (the plain, deterministic
+    /// executor: refs resolved from fresh snapshots, conditions matched as
+    /// text). For a classify-decided replay with repair, use
+    /// `pixel ultraflow replay`.
+    Run {
+        name: String,
+        /// Variable substitution: `--var key=value`. Repeat per var.
+        #[arg(long = "var")]
+        vars: Vec<String>,
+        /// Shortcut for `--var google_account=<value>` (or `openai_account`
+        /// depending on the flow). Picks which account to use.
+        /// Accepts a full email address (e.g. user@example.com).
+        #[arg(long)]
+        account: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Emit ready-to-run agent-browser commands with variable substitution.
     /// Pixel does NOT run agent-browser — it outputs the deterministic
-    /// command sequence for the agent to execute.
-    ///
-    /// Use `--execute` to actually run the commands via agent-browser.
+    /// command sequence for the agent to execute (or to hand to
+    /// `pixel flow run`).
     Replay {
         name: String,
         /// Variable substitution: `--var key=value`. Repeat per var.
@@ -1466,14 +1483,6 @@ enum FlowCmd {
         /// Accepts a full email address (e.g. user@example.com).
         #[arg(long)]
         account: Option<String>,
-        /// Actually execute the flow by running agent-browser commands.
-        /// Without this flag, replay only prints the command sequence.
-        #[arg(long, conflicts_with = "dry_run")]
-        execute: bool,
-        /// Print commands without marking as executed (default is still
-        /// print-only — pixel never runs agent-browser).
-        #[arg(long)]
-        dry_run: bool,
         #[arg(long)]
         json: bool,
     },
@@ -1489,6 +1498,123 @@ enum FlowCmd {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// The variables a flow verb carries: `--var key=value` pairs, plus the
+/// `--account` shortcut resolved to whichever account variable the flow
+/// declares (`openai_account` for Codex, `google_account` for the rest).
+fn flow_vars(
+    name: &str,
+    vars: &[String],
+    account: &Option<String>,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let mut var_map = std::collections::HashMap::new();
+    for v in vars {
+        let (k, val) = v
+            .split_once('=')
+            .ok_or_else(|| format!("--var expects key=value, got '{v}'"))?;
+        var_map.insert(k.to_string(), val.to_string());
+    }
+    if let Some(acct) = account {
+        // Check which var the flow expects by loading it.
+        let var_name = pixel_flow::load(name)
+            .ok()
+            .and_then(|f| {
+                f.vars.iter().find_map(|v| {
+                    (v.name == "openai_account" || v.name == "google_account")
+                        .then(|| v.name.clone())
+                })
+            })
+            .unwrap_or_else(|| "google_account".to_string());
+        var_map.insert(var_name, acct.clone());
+    }
+    Ok(var_map)
+}
+
+#[cfg(test)]
+mod flow_vars_tests {
+    use super::*;
+
+    /// The `--account` shortcut picks the account variable the flow itself
+    /// declares, and a malformed `--var` is refused before anything opens.
+    #[test]
+    fn flow_vars_parses_the_pairs_and_uses_the_flows_account_var() {
+        let _guard = crate::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("pixel-flow-vars-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: ENV_LOCK serialises every test that touches process-wide
+        // variables, and PIXEL_FLOW_DIR is one of them.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", &dir);
+        }
+        let store = |name: &str, vars: &[(&str, &str)]| {
+            let vars: Vec<String> = vars
+                .iter()
+                .map(|(n, d)| {
+                    format!(r#"{{"name": "{n}", "description": "{d}", "required": false}}"#)
+                })
+                .collect();
+            std::fs::write(
+                dir.join(format!("{name}.json")),
+                format!(
+                    r#"{{"name": "{name}", "title": "t", "description": "",
+                        "vars": [{}], "steps": [{{"action": "snapshot"}}],
+                        "created_unix": 1, "revised_unix": 1, "revision": 1, "proven": false }}"#,
+                    vars.join(", ")
+                ),
+            )
+            .unwrap();
+        };
+        store(
+            "codex",
+            &[
+                ("openai_account", "the Codex account"),
+                ("env_name", "which env"),
+            ],
+        );
+        // A trailing variable after google_account must not win the lookup.
+        store(
+            "claude",
+            &[
+                ("google_account", "which account"),
+                ("env_name", "which env"),
+            ],
+        );
+
+        // `--account` lands on the variable the flow itself declares.
+        let vars = flow_vars(
+            "codex",
+            &["env=prod".to_string()],
+            &Some("bob@example.com".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            vars.get("openai_account").map(String::as_str),
+            Some("bob@example.com")
+        );
+        assert_eq!(vars.get("env").map(String::as_str), Some("prod"));
+        // A flow without an openai_account falls back to google_account.
+        let vars = flow_vars("claude", &[], &Some("carol@example.com".to_string())).unwrap();
+        assert_eq!(
+            vars.get("google_account").map(String::as_str),
+            Some("carol@example.com")
+        );
+
+        // The pairs are read in order and a malformed one is refused.
+        let vars = flow_vars("codex", &["a=1".to_string(), "b=2".to_string()], &None).unwrap();
+        assert_eq!(vars.get("a").map(String::as_str), Some("1"));
+        assert_eq!(vars.get("b").map(String::as_str), Some("2"));
+        assert_eq!(
+            flow_vars("codex", &["broken".to_string()], &None).unwrap_err(),
+            "--var expects key=value, got 'broken'"
+        );
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 /// Parse a 1-based inclusive line range "a,b" for `provenance --lines`.
@@ -7526,7 +7652,7 @@ fn run_command(
             })
         }
         Command::Ultraflow(options) => ultraflow_cmd::run(options),
-        Command::ReplayFlow { cmd } => {
+        Command::Flow { cmd } => {
             use pixel_flow::FlowAction;
             let json = match &cmd {
                 FlowCmd::Save { json, .. }
@@ -7534,6 +7660,7 @@ fn run_command(
                 | FlowCmd::List { json, .. }
                 | FlowCmd::Revise { json, .. }
                 | FlowCmd::Replay { json, .. }
+                | FlowCmd::Run { json, .. }
                 | FlowCmd::Delete { json, .. }
                 | FlowCmd::Show { json, .. } => *json,
             };
@@ -7572,51 +7699,23 @@ fn run_command(
                     name,
                     vars,
                     account,
-                    execute,
-                    dry_run,
                     json: _,
                 } => {
-                    let mut var_map = std::collections::HashMap::new();
-                    for v in &vars {
-                        let (k, val) = v
-                            .split_once('=')
-                            .ok_or_else(|| format!("--var expects key=value, got '{v}'"))?;
-                        var_map.insert(k.to_string(), val.to_string());
+                    let vars = flow_vars(&name, &vars, &account)?;
+                    FlowAction::Replay {
+                        name,
+                        vars,
+                        dry_run: false,
                     }
-                    // --account shortcut: resolve alias to full email and
-                    // inject into the flow's account var. Try openai_account
-                    // first (Codex), then google_account (Claude/others).
-                    if let Some(acct) = account {
-                        let resolved = acct.clone();
-                        // Check which var the flow expects by loading it.
-                        let var_name = pixel_flow::load(&name)
-                            .ok()
-                            .and_then(|f| {
-                                f.vars.iter().find_map(|v| {
-                                    if v.name == "openai_account" {
-                                        Some("openai_account")
-                                    } else if v.name == "google_account" {
-                                        Some("google_account")
-                                    } else {
-                                        None
-                                    }
-                                })
-                            })
-                            .unwrap_or("google_account");
-                        var_map.insert(var_name.to_string(), resolved);
-                    }
-                    if execute {
-                        FlowAction::Execute {
-                            name,
-                            vars: var_map,
-                        }
-                    } else {
-                        FlowAction::Replay {
-                            name,
-                            vars: var_map,
-                            dry_run,
-                        }
-                    }
+                }
+                FlowCmd::Run {
+                    name,
+                    vars,
+                    account,
+                    json: _,
+                } => {
+                    let vars = flow_vars(&name, &vars, &account)?;
+                    FlowAction::Execute { name, vars }
                 }
                 FlowCmd::Delete { name, json: _ } => FlowAction::Delete { name },
                 FlowCmd::Show { name, json: _ } => FlowAction::Show { name },

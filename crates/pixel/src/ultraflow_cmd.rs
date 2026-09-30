@@ -5,7 +5,7 @@
 //! - `discover` drives the page toward a goal with `pixel classify` deciding
 //!   one operation-target pair per cycle, then composes what worked into a
 //!   `pixel flow` document and saves it under the flow store, where
-//!   `pixel replay-flow` can list, show and revise it like any other flow.
+//!   `pixel flow` can list, show and revise it like any other flow.
 //! - `replay` follows a saved flow. Its `conditional` steps are decided by
 //!   `pixel classify` (the text matcher is the disclosed fallback), and a
 //!   step whose page no longer matches is re-decided once — `--update`
@@ -13,7 +13,7 @@
 //!   deterministic where this one had to think.
 //!
 //! Both verbs drive `agent-browser` on PATH (`--session comet`, the session
-//! `pixel replay-flow --execute` uses); a missing or unbound browser is that
+//! `pixel flow run` uses); a missing or unbound browser is that
 //! command's error, reported as-is.
 
 use std::collections::HashMap;
@@ -60,7 +60,7 @@ pub enum UltraflowCmd {
     /// cycle, and compose what worked into a flow document.
     ///
     /// `--save <name>` writes it into the flow store, where
-    /// `pixel replay-flow list|show|replay` finds it. `--repeat 2` runs the
+    /// `pixel flow list|show` finds it. `--repeat 2` runs the
     /// goal twice and composes a `conditional` where the two runs took
     /// different paths, so a replay chooses by condition instead of
     /// following one frozen route.
@@ -104,7 +104,7 @@ pub enum UltraflowCmd {
     },
     /// Follow a saved flow, deciding its `conditional` steps with `pixel classify`.
     Replay {
-        /// Flow name, as `pixel replay-flow list` prints it.
+        /// Flow name, as `pixel flow list` prints it.
         name: String,
         /// A value for the flow's `value_var`: `--var key=value`. Repeatable.
         #[arg(long = "var", value_name = "KEY=VALUE")]
@@ -358,7 +358,7 @@ fn save_flow(
     if pixel_flow::exists(&slug) {
         return Err(format!(
             "flow '{slug}' already exists — pass a different --save name, or revise it with \
-             `pixel replay-flow revise {slug} --from-file <path>`"
+             `pixel flow revise {slug} --from-file <path>`"
         ));
     }
     let meta = FlowMeta {
@@ -909,7 +909,7 @@ mod tests {
         assert_eq!(
             err,
             "flow 'sign-in' already exists — pass a different --save name, or revise it with \
-             `pixel replay-flow revise sign-in --from-file <path>`"
+             `pixel flow revise sign-in --from-file <path>`"
         );
         assert_eq!(
             pixel_flow::load("sign-in").unwrap().revision,

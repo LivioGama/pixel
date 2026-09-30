@@ -15,7 +15,7 @@ use crate::elements::parse_snapshot;
 
 /// The instruction a discovered step carries for a replay that finds the
 /// page no longer matching it. `pixel ultraflow replay` acts on it; a plain
-/// `pixel replay-flow --execute` reads it as documentation.
+/// `pixel flow run` reads it as documentation.
 pub const DECIDE_ON_FAILURE: &str =
     "re-decide one cycle with `pixel classify` on the current page and record what worked";
 

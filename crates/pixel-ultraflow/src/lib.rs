@@ -8,7 +8,7 @@
 //!   operation-target pairs the page offers ([`action::ActionSpace`]), so one
 //!   answer is one executable action. The run records what happened; when it
 //!   completes, [`compose`] turns the traces into a `pixel_flow::Flow`, which
-//!   `pixel replay-flow` can then list, show, revise and run like any other
+//!   `pixel flow` can then list, show, revise and run like any other
 //!   flow.
 //! - **Replay.** The saved flow is followed step by step ([`replay`]).
 //!   Its `conditional` steps are the *different conditions* of how to do the
