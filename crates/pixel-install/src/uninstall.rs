@@ -31,8 +31,15 @@ pub type Result<T> = std::result::Result<T, InstallError>;
 pub struct UninstallOptions {
     /// Home directory. Defaults to `$HOME`.
     pub home: Option<PathBuf>,
-    /// Path to the pixel binary to remove. Defaults to `~/.local/bin/pixel`.
+    /// Path to the pixel binary to remove, as the user named it: removed even
+    /// when a package manager owns it. When `None`, `running_binary` is the
+    /// target, then `~/.local/bin/pixel`.
     pub binary_path: Option<PathBuf>,
+    /// The binary running this uninstall (the CLI passes its current exe).
+    /// It is the removal target when `binary_path` is `None`, so a binary
+    /// `install.sh` put in `PIXEL_INSTALL_DIR` goes, not only one at
+    /// `~/.local/bin`; one that Homebrew or mise installed is left to them.
+    pub running_binary: Option<PathBuf>,
     /// The pixel binary whose hook entries count as pixel's, beside those of
     /// a binary named `pixel` (see [`routing::pixel_hook_verb`]). Defaults to
     /// the current exe, so a build installed as `pixel-dev` removes the
@@ -78,10 +85,8 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
         .clone()
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
         .ok_or(InstallError::NoHome)?;
-    let binary_path = options
-        .binary_path
-        .clone()
-        .unwrap_or_else(|| home.join(".local").join("bin").join("pixel"));
+    let target = removal_target(options, &home);
+    let binary_path = target.path.clone();
     let executable_path = options
         .executable_path
         .clone()
@@ -147,7 +152,7 @@ pub fn uninstall(options: &UninstallOptions) -> Result<InstallReport> {
             dry_run,
         )?,
         // 8. Remove the pixel binary.
-        remove_binary(&binary_path, dry_run)?,
+        remove_binary(&target, dry_run)?,
     ];
 
     let green = steps
@@ -1124,12 +1129,83 @@ fn remove_agent_prompt(home: &Path, dry_run: bool) -> Result<InstallStep> {
 // Step 7: remove the pixel binary
 // -------------------------------------------------------------------------
 
-fn remove_binary(binary_path: &Path, dry_run: bool) -> Result<InstallStep> {
+/// The binary `uninstall` removes, and whether the user named it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemovalTarget {
+    path: PathBuf,
+    explicit: bool,
+}
+
+/// `--binary-path` when given; else the running binary; else the historical
+/// `~/.local/bin/pixel`.
+fn removal_target(options: &UninstallOptions, home: &Path) -> RemovalTarget {
+    if let Some(path) = &options.binary_path {
+        return RemovalTarget {
+            path: path.clone(),
+            explicit: true,
+        };
+    }
+    RemovalTarget {
+        path: options
+            .running_binary
+            .clone()
+            .unwrap_or_else(|| home.join(".local").join("bin").join("pixel")),
+        explicit: false,
+    }
+}
+
+/// The package manager whose install tree holds `path` (after resolving
+/// symlinks, so `/opt/homebrew/bin/pixel` counts as its Cellar file), and the
+/// way to remove it: `(manager, how)`. Homebrew keeps a formula under
+/// `…/Cellar/<formula>/<version>/`, whatever its prefix (macOS or Linuxbrew);
+/// mise keeps a tool under `…/mise/installs/<dir>/<version>/`, where `<dir>`
+/// is the tool name with its backend mangled (`ubi-owner-repo`), so the hint
+/// names the directory rather than guess the `mise uninstall` spelling.
+fn package_manager_owner(path: &Path) -> Option<(&'static str, String)> {
+    let resolved = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let parts: Vec<String> = resolved
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect();
+    let after = |marker: &[&str]| {
+        parts
+            .windows(marker.len() + 1)
+            .find(|w| w[..marker.len()].iter().zip(marker).all(|(a, b)| a == b))
+            .map(|w| w[marker.len()].clone())
+    };
+    if let Some(formula) = after(&["Cellar"]) {
+        return Some(("Homebrew", format!("`brew uninstall {formula}`")));
+    }
+    after(&["mise", "installs"]).map(|dir| {
+        (
+            "mise",
+            format!("`mise uninstall` on the tool installed under `installs/{dir}`"),
+        )
+    })
+}
+
+fn remove_binary(target: &RemovalTarget, dry_run: bool) -> Result<InstallStep> {
+    let binary_path = target.path.as_path();
     if !binary_path.is_file() {
         return Ok(InstallStep {
             id: "binary".into(),
             status: CheckStatus::Green,
             summary: install::dry_run_summary(dry_run, "no binary found — skipping"),
+            detail: Some(format!("path={}", binary_path.display())),
+        });
+    }
+    if !target.explicit
+        && let Some((manager, how)) = package_manager_owner(binary_path)
+    {
+        // Deleting a managed binary would leave the manager listing a
+        // version that is no longer there; its own command removes both.
+        return Ok(InstallStep {
+            id: "binary".into(),
+            status: CheckStatus::Yellow,
+            summary: install::dry_run_summary(
+                dry_run,
+                &format!("left the pixel binary to {manager}: remove it with {how}"),
+            ),
             detail: Some(format!("path={}", binary_path.display())),
         });
     }

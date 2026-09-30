@@ -1,10 +1,13 @@
 //! Integration tests for pixel-install: doctor and install.
 
 use std::fs;
+use std::path::Path;
 
 use pixel_install::config::{MANAGED_BEGIN, MANAGED_END};
 use pixel_install::doctor::{CHECKS, CheckStatus, DoctorOptions, doctor};
-use pixel_install::install::{InstallOptions, InstallReport, install};
+use pixel_install::install::{
+    CheckStatus as StepStatus, InstallOptions, InstallReport, InstallStep, install,
+};
 use pixel_install::uninstall::{UninstallOptions, uninstall};
 use tempfile::TempDir;
 
@@ -1190,6 +1193,155 @@ fn uninstall_removes_binary() {
     assert!(!bin.is_file(), "binary should be deleted after uninstall");
 }
 
+fn binary_step(report: &InstallReport) -> &InstallStep {
+    report
+        .steps
+        .iter()
+        .find(|s| s.id == "binary")
+        .expect("binary step")
+}
+
+fn uninstall_running(home: &Path, running: &Path) -> InstallReport {
+    uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        running_binary: Some(running.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .expect("uninstall")
+}
+
+/// `install.sh` with `PIXEL_INSTALL_DIR` puts the binary outside
+/// `~/.local/bin`; uninstall must remove the one that runs, not report "no
+/// binary found" and leave it — and must not touch another copy.
+#[test]
+fn uninstall_removes_the_running_binary_outside_local_bin() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let running = home.join("opt/pixel/bin/pixel");
+    fs::create_dir_all(running.parent().unwrap()).unwrap();
+    fs::write(&running, "#!/bin/sh\nexit 0\n").unwrap();
+    let other = home.join(".local/bin/pixel");
+    fs::create_dir_all(other.parent().unwrap()).unwrap();
+    fs::write(&other, "#!/bin/sh\nexit 0\n").unwrap();
+
+    let report = uninstall_running(home, &running);
+
+    assert!(!running.exists(), "the running binary must be removed");
+    assert!(
+        other.is_file(),
+        "another copy is not the one being uninstalled"
+    );
+    let step = binary_step(&report);
+    assert_eq!(step.status, StepStatus::Green);
+    assert_eq!(step.summary, "removed pixel binary");
+    assert_eq!(
+        step.detail.as_deref(),
+        Some(format!("path={}", running.display()).as_str())
+    );
+    assert_eq!(report.executable_path, running.display().to_string());
+}
+
+/// A Homebrew binary, reached through the prefix symlink as `brew` links it
+/// (Linuxbrew here): deleting it would leave Homebrew listing a formula whose
+/// file is gone, so uninstall leaves it and names `brew uninstall`.
+#[test]
+fn uninstall_leaves_a_homebrew_binary_to_brew() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let prefix = home.join("linuxbrew/.linuxbrew");
+    let cellar = prefix.join("Cellar/pixel/0.6.1/bin/pixel");
+    fs::create_dir_all(cellar.parent().unwrap()).unwrap();
+    fs::write(&cellar, "#!/bin/sh\nexit 0\n").unwrap();
+    let link = prefix.join("bin/pixel");
+    fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&cellar, &link).unwrap();
+
+    let report = uninstall_running(home, &link);
+
+    assert!(cellar.is_file(), "the Cellar file stays");
+    assert!(link.exists(), "the brew link stays");
+    let step = binary_step(&report);
+    assert_eq!(step.status, StepStatus::Yellow);
+    assert_eq!(
+        step.summary,
+        "left the pixel binary to Homebrew: remove it with `brew uninstall pixel`"
+    );
+    assert!(
+        report.ok,
+        "a binary left to its manager is not a failed uninstall"
+    );
+}
+
+/// A mise install is left to mise the same way, naming the directory mise
+/// installed it under rather than guessing the tool's spelling.
+#[test]
+fn uninstall_leaves_a_mise_binary_to_mise() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let bin = home.join(".local/share/mise/installs/ubi-liviogama-pixel/0.6.1/pixel");
+    fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+
+    let report = uninstall_running(home, &bin);
+
+    assert!(bin.is_file());
+    let step = binary_step(&report);
+    assert_eq!(step.status, StepStatus::Yellow);
+    assert_eq!(
+        step.summary,
+        "left the pixel binary to mise: remove it with `mise uninstall` on the tool installed \
+         under `installs/ubi-liviogama-pixel`"
+    );
+}
+
+/// `--binary-path` is the user's decision: it wins over the running binary
+/// and is honoured even inside a Cellar, as `--install-path` is for upgrades.
+#[test]
+fn uninstall_binary_path_wins_over_the_running_binary_even_when_managed() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let named = home.join("Cellar/pixel/0.6.1/bin/pixel");
+    fs::create_dir_all(named.parent().unwrap()).unwrap();
+    fs::write(&named, "#!/bin/sh\nexit 0\n").unwrap();
+    let running = home.join("runner/pixel");
+    fs::create_dir_all(running.parent().unwrap()).unwrap();
+    fs::write(&running, "#!/bin/sh\nexit 0\n").unwrap();
+
+    let report = uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        binary_path: Some(named.clone()),
+        running_binary: Some(running.clone()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .expect("uninstall");
+
+    assert!(!named.exists(), "the named binary is removed");
+    assert!(running.is_file(), "the running binary was not named");
+    assert_eq!(binary_step(&report).status, StepStatus::Green);
+}
+
+/// Without a running binary (library callers), the historical target stays.
+#[test]
+fn uninstall_without_running_binary_targets_local_bin() {
+    let dir = TempDir::new().expect("tempdir");
+    let home = dir.path();
+    let bin = home.join(".local/bin/pixel");
+    fs::create_dir_all(bin.parent().unwrap()).unwrap();
+    fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+
+    let report = uninstall(&UninstallOptions {
+        home: Some(home.to_path_buf()),
+        shell: Some(TEST_SHELL.into()),
+        ..Default::default()
+    })
+    .expect("uninstall");
+
+    assert!(!bin.exists());
+    assert_eq!(binary_step(&report).summary, "removed pixel binary");
+}
+
 /// Uninstall is idempotent: running twice does not error.
 #[test]
 fn uninstall_is_idempotent() {
@@ -2269,6 +2421,7 @@ fn install_writes_the_agent_prompt_into_opencode_agents_md_when_opencode_is_pres
         repo: None,
         home: Some(home.to_path_buf()),
         binary_path: Some(home.join(".local/bin/pixel")),
+        running_binary: None,
         executable_path: None,
         shell: Some(TEST_SHELL.into()),
         dry_run: false,
