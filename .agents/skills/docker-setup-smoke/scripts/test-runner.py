@@ -80,8 +80,27 @@ if sys.argv[1] == 'run':
         self.assertIn('image: pixel-setup-smoke:release sha256:' + 'b' * 64,
                       (evidence / 'identity.txt').read_text())
 
+    def test_distribution_modes_install_through_the_channel_a_new_user_would_use(self):
+        cases = [('--installer', 'installer.sh', 'tester', 'BASE=debian:bookworm-slim@sha256:',
+                  'APT_SOURCE_PARTS=/etc/apt/sources.list.d/'),
+                 ('--brew', 'brew.sh', 'linuxbrew', 'BASE=homebrew/brew@sha256:',
+                  'APT_SOURCE_PARTS=/nonexistent')]
+        for flag, bootstrap, user, base, apt in cases:
+            with self.subTest(flag=flag):
+                result, calls = self.run_case(flag)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                run = [call for call in calls if call[0] == 'run'][-1]
+                self.assertIn(f'PIXEL_BOOTSTRAP={bootstrap}', run)
+                self.assertIn(f'PIXEL_TEST_USER={user}', run)
+                self.assertIn('PIXEL_RELEASE=latest', run)
+                self.assertIn(f'pixel-setup-smoke:{flag[2:]}', run)
+                build = [call for call in calls if call[0] == 'build'][-1]
+                self.assertTrue(any(arg.startswith(base) for arg in build))
+                self.assertIn(apt, build)
+
     def test_ambiguous_or_invalid_selectors_never_provision_a_container(self):
-        for args in [('v0.6.1', '--source', 'main'), ('--pr', '0'), ('--source', 'bad'), ('--pr', '427;echo')]:
+        for args in [('v0.6.1', '--source', 'main'), ('--pr', '0'), ('--source', 'bad'), ('--pr', '427;echo'),
+                     ('--brew', 'v0.6.1'), ('--installer', '--brew')]:
             with self.subTest(args=args):
                 result, calls = self.run_case(*args)
                 self.assertEqual(result.returncode, 2)

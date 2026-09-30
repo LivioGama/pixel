@@ -17,3 +17,4 @@ install -o tester -g tester -m 755 target/debug/pixel /home/tester/.local/bin/pi
 /home/tester/.local/bin/pixel --version > /evidence/binary-version.txt
 cat /evidence/binary-version.txt
 grep -qx "commit: $sha" /evidence/binary-version.txt
+printf 'PIXEL_BIN_DIR=/home/tester/.local/bin\nPIXEL_OWNS_BINARY=1\n' > /etc/pixel-smoke.env

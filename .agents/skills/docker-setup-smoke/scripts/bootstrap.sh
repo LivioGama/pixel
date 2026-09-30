@@ -14,5 +14,7 @@ sha256sum --check "$archive.sha256"
 mkdir unpack
 tar -xzf "$archive" -C unpack
 install -o tester -g tester -m 755 "unpack/pixel-${PIXEL_RELEASE}-${target}/bin/pixel" /home/tester/.local/bin/pixel
-/home/tester/.local/bin/pixel --version
-test "$(/home/tester/.local/bin/pixel -V)" = "pixel ${PIXEL_RELEASE#v}"
+/home/tester/.local/bin/pixel --version > /evidence/binary-version.txt
+cat /evidence/binary-version.txt
+grep -qx "pixel ${PIXEL_RELEASE#v}" /evidence/binary-version.txt
+printf 'PIXEL_BIN_DIR=/home/tester/.local/bin\nPIXEL_OWNS_BINARY=1\n' > /etc/pixel-smoke.env
