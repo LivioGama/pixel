@@ -123,11 +123,14 @@ checks = ["install.opencode-agents-md"]
 slug = "devin"
 name = "Devin"
 logo = "devin"
-wiring = "plugin"
-lede = "`pixel install` writes nothing global for Devin: the protocol comes from Pixel's Devin plugin, and `pixel install --repo` adds a guard to one repository."
+wiring = "install"
+lede = "`pixel install` adds Devin's own lifecycle hooks when Devin has been used on the machine (Devin imports Claude's hooks by default, so without them its sessions get the imported Claude text), and `pixel install --repo` adds a guard to one repository."
+global = ["~/.config/devin/config.json"]
+when = "only when `~/.config/devin` exists"
+wires = "`SessionStart` and `UserPromptSubmit` hooks with `--provider devin`, plus a `PostCompaction` hook, in `~/.config/devin/config.json`"
 repo = [".devin/config.local.json"]
 plugin = "add `github.com/LivioGama/pixel` as a Devin plugin"
-checks = ["repo.devin-hooks"]
+checks = ["install.devin-hooks", "repo.devin-hooks"]
 
 [[agent]]
 slug = "windsurf"

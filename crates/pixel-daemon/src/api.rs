@@ -136,7 +136,8 @@ pub type Response = Envelope<Value>;
 ///   writes that name no code (`REFUSED:`, `STALE_REMOTE:`,
 ///   `FILE_NOT_TRACKED:`, `PROVENANCE_BAD_ARGS:`, …) stay unclassified.
 /// - the repository lock reports `repository is busy…`, and the lookups in
-///   this file report `no symbol named …` / `no symbol with uid …`.
+///   this file report `no symbol named …` / `no symbol with uid …` (each
+///   followed by a `pixel find-symbol` recovery hint the classifier ignores).
 ///
 /// Everything else — a malformed regex, a bad parameter, an opaque message
 /// forwarded from another crate — stays `InvalidInput`, the correct default
@@ -1605,18 +1606,28 @@ impl Service {
         let built = self.ensure_graph()?;
         let store = self.graph.as_ref().unwrap();
         let files = file_map(store)?;
-        let sym = store
-            .symbol_by_uid(uid)
-            .map_err(|e| e.to_string())?
-            .ok_or_else(|| format!("no symbol with uid {uid:?}"))?;
+        let budget = budget_tokens.unwrap_or(2000);
+        let value_tokens =
+            |value: &Value| estimate_tokens(&serde_json::to_string(value).unwrap_or_default());
+        // Same `uid_or_name` protocol as `impact`: an agent that passes the
+        // name it just read (`pack-context renderStories`) gets the symbol,
+        // not an error teaching the uid format.
+        let sym = match resolve_symbol(store, uid)? {
+            Resolved::One(s) => s,
+            // The whole-response budget covers the ambiguous answer too: the
+            // candidate list would otherwise return up to 50 full signatures
+            // even under a budget too small to hold them.
+            Resolved::Many(v) => {
+                let response = candidates_value(store, &v)?;
+                budget_fit_error(value_tokens(&response), budget, v.len())?;
+                return Ok(response);
+            }
+        };
         let envelope = store
             .envelope_for_name(&sym.name)
             .map_err(|e| e.to_string())?;
         let sym_json = symbol_json(&sym, &files);
 
-        let budget = budget_tokens.unwrap_or(2000);
-        let value_tokens =
-            |value: &Value| estimate_tokens(&serde_json::to_string(value).unwrap_or_default());
         // `budget_basis` declares the approximation behind the token cap:
         // `estimate_tokens` is a bytes/4 heuristic, not a real tokenizer, so
         // the fit is approximate and the response says so instead of
@@ -3627,19 +3638,29 @@ enum Resolved {
 
 /// `uid_or_name` protocol: '#' means uid; otherwise a name, with the
 /// disambiguation protocol (`{candidates: [...], hint}`) on ambiguity.
+///
+/// When nothing matches, the error names the recovery
+/// (`pixel find-symbol`) instead of only restating the input, so an agent
+/// that guessed the identifier wrong learns the lookup that answers.
 fn resolve_symbol(store: &GraphStore, uid_or_name: &str) -> Result<Resolved, String> {
     if uid_or_name.contains('#') {
         return store
             .symbol_by_uid(uid_or_name)
             .map_err(|e| e.to_string())?
             .map(Resolved::One)
-            .ok_or_else(|| format!("no symbol with uid {uid_or_name:?}"));
+            .ok_or_else(|| {
+                format!(
+                    "no symbol with uid {uid_or_name:?}; run `pixel find-symbol <name>` to list uids"
+                )
+            });
     }
     let syms = store
         .symbols_by_name(uid_or_name, None, 50)
         .map_err(|e| e.to_string())?;
     match syms.len() {
-        0 => Err(format!("no symbol named {uid_or_name:?}")),
+        0 => Err(format!(
+            "no symbol named {uid_or_name:?}; run `pixel find-symbol {uid_or_name}` to list matching symbols"
+        )),
         1 => Ok(Resolved::One(syms.into_iter().next().unwrap())),
         _ => Ok(Resolved::Many(syms)),
     }
@@ -3651,6 +3672,20 @@ fn candidates_value(store: &GraphStore, syms: &[SymbolRow]) -> Result<Value, Str
         "candidates": syms.iter().map(|s| symbol_json(s, &files)).collect::<Vec<_>>(),
         "hint": "ambiguous name; re-call with uid",
     }))
+}
+
+/// The whole-response budget applies to the ambiguous-name answer too: the
+/// candidate list would otherwise return up to 50 full signatures even under
+/// a budget too small to hold them. `used` and `budget` are token counts;
+/// `symbols` is only the count named in the recovery message. A response
+/// exactly at the budget fits; one token over does not.
+fn budget_fit_error(used: usize, budget: usize, symbols: usize) -> Result<(), String> {
+    if used > budget {
+        return Err(format!(
+            "ambiguous name matches {symbols} symbols; the candidate response needs {used} tokens, above budget {budget}: re-call with a uid"
+        ));
+    }
+    Ok(())
 }
 
 fn file_map(store: &GraphStore) -> Result<HashMap<i64, String>, String> {
@@ -4988,7 +5023,16 @@ mod tests {
             ),
             ("repository is busy", ErrorCode::BusyRepository),
             ("no symbol named \"nope\"", ErrorCode::NotFound),
-            ("no symbol with uid \"#42\"", ErrorCode::NotFound),
+            // The recovery hint appended to a lookup miss must not move the
+            // code off `NotFound`: it is what an agent branches on.
+            (
+                "no symbol named \"nope\"; run `pixel find-symbol nope` to list matching symbols",
+                ErrorCode::NotFound,
+            ),
+            (
+                "no symbol with uid \"#42\"; run `pixel find-symbol <name>` to list uids",
+                ErrorCode::NotFound,
+            ),
             // Markers that name no code, and messages that carry no code at all.
             (
                 "REFUSED: main is the repository default branch; rewriting it is forbidden",
@@ -5342,6 +5386,65 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// The `uid_or_name` protocol is the contract `impact`, `uses` and
+    /// `context` share: a bare name resolves, and a miss is an Err naming
+    /// the recovery — not an Ok with empty fields, which a caller would
+    /// read as a valid answer about a symbol that does not exist.
+    #[test]
+    fn resolve_symbol_misses_are_errors_and_hits_resolve() {
+        let root = tmpdir("resolve-protocol");
+        std::fs::write(
+            root.join("a.ts"),
+            "export function alpha(x: number): number { return x + 1 }\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "resolve fixture"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        // Miss by name: an error, with the recovery the next call needs.
+        let miss = svc.handle(Request::Uses {
+            uid_or_name: "no_such_symbol_anywhere".into(),
+            role: "callers".into(),
+            offset: None,
+        });
+        assert!(!miss.ok, "{miss:?}");
+        let error = miss.error.as_ref().expect("a miss is an error");
+        assert_eq!(error.code, ErrorCode::NotFound, "{error:?}");
+        assert!(
+            error
+                .message
+                .contains("run `pixel find-symbol no_such_symbol_anywhere`"),
+            "{error:?}"
+        );
+
+        // Miss by uid: the same recovery protocol.
+        let miss = svc.handle(Request::Impact {
+            uid_or_name: "a.ts#ghost#function".into(),
+            direction: "upstream".into(),
+            depth: Some(2),
+        });
+        assert!(!miss.ok, "{miss:?}");
+        let error = miss.error.as_ref().unwrap();
+        assert_eq!(error.code, ErrorCode::NotFound, "{error:?}");
+        assert!(
+            error.message.contains("run `pixel find-symbol <name>`"),
+            "{error:?}"
+        );
+
+        // Unique bare name resolves to the one symbol.
+        let hit = svc.handle(Request::Impact {
+            uid_or_name: "alpha".into(),
+            direction: "upstream".into(),
+            depth: Some(2),
+        });
+        assert!(hit.ok, "{hit:?}");
+        assert_eq!(hit.data()["target"], "a.ts#alpha#function", "{hit:?}");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn uses_pages_cover_all_edges_without_overlap() {
         let root = tmpdir("uses-pages");
@@ -5504,6 +5607,91 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Regression: an ambiguous bare name must obey the same whole-response
+    /// budget as a resolved uid. The candidate list (up to 50 full
+    /// signatures) used to return before the budget check, so a tiny budget
+    /// still emitted all of them; now an answer that does not fit is an
+    /// error, never an over-budget response.
+    #[test]
+    fn context_ambiguous_name_obeys_whole_response_budget() {
+        let root = tmpdir("ctx-budget-candidates");
+        // Eight same-named declarations: the candidate response is well
+        // above a 100-token budget yet comfortably inside the 2000-token
+        // default, so the small-budget case exercises the fit check and the
+        // omitted-budget case pins the default.
+        for i in 0..8 {
+            std::fs::write(
+                root.join(format!("f{i:02}.ts")),
+                format!("export function sharedName(x: number): number {{ return x + {i} }}\n"),
+            )
+            .unwrap();
+        }
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        // Zero budget: below even the minimum response, an error, not a
+        // candidate list.
+        let zero = svc.handle(Request::Context {
+            uid: "sharedName".into(),
+            budget_tokens: Some(0),
+        });
+        assert!(!zero.ok, "zero budget must not return candidates: {zero:?}");
+        // A budget above the minimum response but below the candidate
+        // response must error too, not emit the over-budget list.
+        let small = svc.handle(Request::Context {
+            uid: "sharedName".into(),
+            budget_tokens: Some(100),
+        });
+        assert!(
+            !small.ok,
+            "a budget too small for the candidates must error: {small:?}"
+        );
+        assert!(
+            small.error_message().contains("8 symbols"),
+            "the recovery names the match count: {small:?}"
+        );
+        // A generous budget still resolves the ambiguity to the candidates.
+        let ok = svc.handle(Request::Context {
+            uid: "sharedName".into(),
+            budget_tokens: Some(100_000),
+        });
+        assert!(ok.ok, "generous budget: {ok:?}");
+        assert!(
+            ok.data()["candidates"]
+                .as_array()
+                .is_some_and(|c| c.len() >= 2),
+            "a fitting budget still lists the candidates: {ok:?}"
+        );
+        // Omitting the budget falls back to the 2000-token default: a mutant
+        // that shrinks the default would reject this fitting answer.
+        let default = svc.handle(Request::Context {
+            uid: "sharedName".into(),
+            budget_tokens: None,
+        });
+        assert!(
+            default.ok,
+            "the default budget must hold the candidates: {default:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The candidates budget check is the boundary the ambiguous response
+    /// used to skip: exactly at budget is a fit, one token over is not.
+    #[test]
+    fn budget_fit_error_rejects_only_answers_over_budget() {
+        assert!(budget_fit_error(99, 100, 2).is_ok());
+        assert!(
+            budget_fit_error(100, 100, 2).is_ok(),
+            "a response exactly at budget fits"
+        );
+        let over = budget_fit_error(101, 100, 2).expect_err("one token over must error");
+        assert!(over.contains("101"), "{over}");
+        assert!(over.contains("2 symbols"), "{over}");
     }
 
     /// Regression: a `Context` request with a moderate budget must produce a

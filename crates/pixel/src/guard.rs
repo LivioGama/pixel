@@ -91,6 +91,25 @@ fn deployed_agent_prompt() -> Option<String> {
 /// used a command only it named, so the prompt gets one line of index
 /// freshness instead.
 pub fn session_start_output(pixel_block: &Value, provider: Option<Provider>) -> Value {
+    // An importing host re-runs the Claude entry (Devin loads
+    // `~/.claude/settings.json` by default and executes its hook commands
+    // with `--provider claude` intact). The full Claude agent prompt there
+    // measured ~11 KB of Claude-specific doctrine inside Devin sessions;
+    // that host gets the short Pixel-first guidance instead — the same text
+    // its own `prompt-submit` hook delivers — and the capability block.
+    if crate::prompt_submit::imported_claude_entry(provider) {
+        let context = format!(
+            "{}\n\n{}",
+            crate::prompt_submit::DEVIN_PIXEL_GUIDANCE,
+            serde_json::to_string_pretty(pixel_block).unwrap_or_default()
+        );
+        return serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "SessionStart",
+                "additionalContext": context,
+            }
+        });
+    }
     session_start_envelope(pixel_block, deployed_agent_prompt().as_deref(), provider)
 }
 
@@ -2829,6 +2848,12 @@ const METRICS_SHELL_TOOLS: &[&str] = &[
 /// into a failure.
 #[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; every decision lives in `metrics_hook_line`
 pub fn run_metrics_hook(provider: Option<Provider>) -> ! {
+    // An imported Claude entry running beside Devin's own relay would emit
+    // the Claude contract (`systemMessage`) into a host that never asked for
+    // it and double the native `--provider devin` relay's output.
+    if crate::prompt_submit::imported_claude_entry(provider) {
+        std::process::exit(0);
+    }
     let mut input = String::new();
     if std::io::stdin().read_to_string(&mut input).is_err() || input.trim().is_empty() {
         std::process::exit(0);
@@ -6854,6 +6879,54 @@ mod tests {
             .unwrap();
         // Without a deployed prompt the block is the only guidance left.
         assert_eq!(context, serde_json::to_string_pretty(&block).unwrap());
+    }
+
+    /// An importing host re-runs the Claude session-start entry: its
+    /// sessions get the short Pixel-first guidance and the capability
+    /// block, not the ~11 KB Claude agent prompt. Under the env lock, since
+    /// the branch reads `DEVIN_PROJECT_DIR`.
+    #[test]
+    fn session_start_output_for_an_importing_host_is_the_devin_dialect() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("DEVIN_PROJECT_DIR");
+        // SAFETY: under crate::ENV_LOCK in tests only; restored below.
+        unsafe { std::env::set_var("DEVIN_PROJECT_DIR", "/tmp/devin-repo") };
+        let block = serde_json::json!({"pixel": {"capabilities": ["search-content"]}});
+        let out = session_start_output(&block, Some(Provider::Claude));
+        let context = out["hookSpecificOutput"]["additionalContext"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            context.starts_with("Pixel-first retrieval (non-blocking)"),
+            "{context}"
+        );
+        assert!(
+            !context.contains("Claude Code"),
+            "no Claude-specific doctrine: {context}"
+        );
+        // The capability block travels inside the context, so the host sees
+        // the commands without the Claude prompt.
+        assert!(context.contains("search-content"), "{context}");
+        assert!(
+            out.get("pixel").is_none(),
+            "the top-level block is not a Devin contract field: {out}"
+        );
+
+        // A real Claude session, same env: the full branch keeps the
+        // deployed prompt envelope (the env var alone never decides).
+        let out = session_start_output(&block, Some(Provider::Devin));
+        assert!(
+            out.get("pixel").is_some(),
+            "Devin's own hook keeps the block top-level: {out}"
+        );
+        if let Some(restored) = saved {
+            // SAFETY: under crate::ENV_LOCK in tests only.
+            unsafe { std::env::set_var("DEVIN_PROJECT_DIR", restored) };
+        } else {
+            // SAFETY: under crate::ENV_LOCK in tests only.
+            unsafe { std::env::remove_var("DEVIN_PROJECT_DIR") };
+        }
     }
 
     #[test]

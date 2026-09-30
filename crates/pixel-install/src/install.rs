@@ -177,6 +177,26 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
             dry_run,
         )?);
     }
+    // Devin imports Claude's hooks (`read_config_from.claude`, on by
+    // default), so without its own lifecycle entries a Devin session's only
+    // Pixel guidance is the imported Claude text — measured at ~11 KB of
+    // Claude-specific doctrine per session. Its own protocol is the three
+    // lifecycle hooks with `--provider devin`; the guard and the metrics
+    // relay stay repo-scoped (`pixel install --repo`), like Claude's
+    // enforcement. Skipped when Devin has never run: creating a config for
+    // a tool that is not installed would be intrusive, and `doctor` judges
+    // what Pixel wrote.
+    if home.join(crate::config::DEVIN_CONFIG_DIR).is_dir() {
+        steps.push(crate::routing::install_at_scoped(
+            &home,
+            &crate::routing::Provider::Devin.path(&home),
+            &exe,
+            crate::routing::Provider::Devin,
+            crate::routing::HookScope::LifecycleOnly,
+            &[],
+            dry_run,
+        )?);
+    }
     if crate::antigravity::antigravity_config_dir(&home).is_dir() {
         steps.push(crate::antigravity::deploy_plugin_assets(
             &home, &exe, dry_run,
