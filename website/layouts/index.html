@@ -10,13 +10,14 @@
   {{ $s := hugo.Data.scope }}
   {{/* The token wall's file and the spread its caption quotes: data/read_savings.toml, the well-known files scripts/bench-read-savings.sh measures. */}}
   {{ $big := partial "wall-row.html" . }}
+  {{/* The kept files' count, range and median: partials/kept-rates.html, which /benchmarks/, /vs/ (partials/alternatives.html) and /savings/ read too. */}}
   {{ $r := partial "kept-rates.html" . }}
   {{ $bench := "benchmarks/" | relURL }}
   {{/* The supported agents, shown by the hero's line and the Compatibility grid, from data/agents.toml (which also feeds /for/ and the /docs/ wiring table). Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
   {{ $agents := hugo.Data.agents.agent }}
   {{/* The prompt a visitor pastes into their agent instead of a shell: the repository README's "Let your agent install it" block, used by the Install terminal. */}}
   {{ $agentPrompt := "Install Pixel (https://github.com/LivioGama/pixel) for me: follow the \"For AI agents\" section of its README, then tell me what changed and whether `pixel doctor .` is green." }}
-  {{/* The Install terminal’s shared commands. The one-liner runs the install.sh asset of the latest release (release.yml uploads scripts/install.sh with every tag); $scriptSrc is that file at the tag of the version this site describes (crates/pixel/Cargo.toml, mounted as data/cli.toml, which the release bumps), so "read the script" opens the bytes the one-liner runs. $inspect is the same install for a visitor who reads before running: download, page through, then run. */}}
+  {{/* The shared Install terminal commands. The one-liner runs the install.sh asset of the latest release (release.yml uploads scripts/install.sh with every tag); $scriptSrc is that file at the tag of the version this site describes (crates/pixel/Cargo.toml, mounted as data/cli.toml, which the release bumps), so "read the script" opens the bytes the one-liner runs. $inspect is the same install for a visitor who reads before running: download, page through, then run. */}}
   {{ $scriptURL := printf "%s/releases/latest/download/install.sh" site.Params.github_url }}
   {{ $curl := printf "curl -fsSL %s | sh" $scriptURL }}
   {{ $inspect := printf "curl -fsSL -o install.sh %s && less install.sh && sh install.sh" $scriptURL }}
@@ -37,11 +38,14 @@
         {{ $rest := sub (len $agents) (len $named) }}
         <span>For {{ range $i, $a := $named }}{{ if $i }}, {{ end }}{{ $a.name }}{{ end }} and <a class="link" href="#agents" aria-label="{{ $rest }} more coding agents">{{ $rest }} more</a></span>
       </p>
+      {{/* The title names the pain and the mechanism, and the lede carries one figure only: the kept files' median saving (partials/kept-rates.html), the number the wall beside it illustrates and the Tokens meter rounds. Agent timings are discussed separately in Proof; the headline is a file/outline volume comparison. */}}
       <h1 class="hero__title hero__title--long"><span>Your agent reads whole files.</span> <span class="glow">Pixel hands it the map.</span></h1>
-      <p class="hero__lede"><strong>To find one function, your coding agent may open a whole file.</strong> Pixel is a local code index it asks for signatures, callers and starting files instead. It gets a map of your repo, then reads the relevant code.</p>
+      <p class="hero__lede"><strong>Your coding agent opens file after file to find its way.</strong> Pixel is a local code index it asks for signatures, callers and starting files instead: a map of your repo before it reads the relevant code. The index stays on your machine.</p>
       <div class="hero__cta"><a class="button" href="#your-number">Try Pixel on your repo</a></div>
-      <p class="hero__script">Before you install: <a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">read the script</a>. No <code>sudo</code>; it checks the archive’s checksum and writes the binary to <code>~/.local/bin/pixel</code>. <a class="link" href="#install">Homebrew and agent-assisted setup</a> are available too.</p>
-      <p class="hero__trust">Free and MIT · macOS on Apple Silicon and Linux · no account, no binary telemetry · <code>pixel uninstall</code> undoes the agent setup</p>
+      {{/* Piping a script into a shell asks for trust, so the script is one click away before the paste, described in the terms a reader checks it against. Keep this line true to scripts/install.sh. */}}
+      <p class="hero__script">Read it before you run it: <a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">the script</a> is one short POSIX <code>sh</code> file, with no <code>sudo</code>. It checks the archive's SHA&#8209;256, then writes one file, <code>~/.local/bin/pixel</code>. Prefer Homebrew, or reading it in your terminal first? <a class="link" href="#install">Other ways in</a>.</p>
+      {{/* Beside the one call to action, what a visitor checks before pasting it: the platforms the release builds (release.yml), the licence and the telemetry. No star button here: the nav links GitHub. */}}
+      <p class="hero__trust">Free and MIT &middot; macOS on Apple Silicon and Linux &middot; no account, no telemetry &middot; <code>pixel uninstall</code> removes the agent wiring</p>
       </div>
 
       <figure class="wall" data-wall data-full="{{ $big.full }}" data-pixel="{{ $big.pixel }}" data-per="25">
@@ -55,32 +59,52 @@
         <figcaption class="wall__caption">
           <span class="key key--waste">{{ lang.FormatNumberCustom 0 $big.full }} estimated tokens, whole file</span>
           <span class="key key--kept">{{ lang.FormatNumberCustom 0 $big.pixel }} estimated tokens, signatures</span>
-          {{/* One pinned file is an example; link the measurement and parsing limits. */}}
-          <span class="wall__unit">One square is 25 estimated tokens (UTF-8 bytes ÷ 4), not billed tokens. <a class="link" href="{{ $bench }}#well-known-files">Source and pinned file</a>: Pixel 0.5.0, whole file versus signatures. An outline locates code; edits still need the bodies.</span>
+          {{/* One file is an example, so the caption gives the spread over every kept file, with the link to the table and the excluded one. */}}
+          <span class="wall__unit">One square is 25 estimated tokens (UTF-8 bytes ÷ 4), not billed tokens. Across <a class="link" href="{{ $bench }}#well-known-files">{{ $r.count }} well-known files</a>, the outline is {{ lang.FormatNumber 1 ($r.min) }} to {{ lang.FormatNumber 1 ($r.max) }}% less (median {{ lang.FormatNumber 1 $r.median }}%).</span>
           <button class="wall__replay" type="button" data-wall-replay hidden>Replay</button>
         </figcaption>
       </figure>
-      <a class="hero__down" href="#scope" aria-label="See a concrete example">
+      <a class="hero__down" href="#problem" aria-label="Scroll to the problem">
         <svg viewBox="0 0 14 8" width="28" height="16" aria-hidden="true" fill="currentColor"><path d="M0 0h2v2H0zM2 2h2v2H2zM4 4h2v2H4zM6 6h2v2H6zM8 4h2v2H8zM10 2h2v2h-2zM12 0h2v2h-2z"/></svg>
       </a>
     </section>
 
-    {{/* ---------- scope ---------- */}}
-    <section class="section wrap" id="scope" aria-labelledby="scope-title">
-      <span id="problem"></span><span id="savings"></span>
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Why Pixel</span></p>
+    {{/* ---------- problem: the cost in the reader's words, before the category is named ---------- */}}
+    {{/* Three costs a visitor already pays, in coral (tokens wasted). The one figure is the wall's full read as a share of a context window (partials/context-share.html, which /benchmarks/ quotes under "Well-known files"); the other two cards carry no number on purpose. */}}
+    {{ $ctx := partial "context-share.html" . }}
+    <section class="section wrap" id="problem" aria-labelledby="problem-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Problem</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="scope-title">Finding its way <span class="glow">takes context.</span></h2>
-        <p class="scope__lede">A search finds a match. Your agent still has to understand the file around it, find the callers and decide where to start.</p>
+        <h2 id="problem-title">First, it has to <span class="glow">find its way.</span></h2>
+        <p>A new task needs a map of your repository. Your agent searches, opens a match and reads the file around it before it knows where to start.</p>
       </header>
       <ul class="pains" data-reveal="stagger">
-        <li class="pains__card"><p class="pains__tag">Context</p><h3>The question was one function.</h3><p>A whole-file read brings unrelated lines into the agent’s context. An outline shows what the file holds first.</p></li>
-        <li class="pains__card"><p class="pains__tag">Time</p><h3>You watch it search.</h3><p>Search, open, read, then open the next file. Pixel gives the agent starting points it can check against the code.</p></li>
-        <li class="pains__card"><p class="pains__tag">Impact</p><h3>A match is only the beginning.</h3><p>Signatures, callers and related files help the agent understand a change before it edits.</p></li>
+        <li class="pains__card">
+          <p class="pains__tag">Context</p>
+          <h3>The window fills before the first edit.</h3>
+          <p>Read whole, {{ $big.owner }} <code>{{ path.Base $big.path }}</code> is <strong>{{ $ctx.share }}%</strong> of a {{ lang.FormatNumberCustom 0 $ctx.window }}-token context window, estimated as UTF-8 bytes ÷ 4. <a class="link" href="{{ $bench }}#well-known-files">Source</a>. That leaves less room for the task itself.</p>
+        </li>
+        <li class="pains__card">
+          <p class="pains__tag">Bill</p>
+          <h3>It reads lines it never needed.</h3>
+          <p>The question was one function. An outline lets the agent locate it before reading the body. The difference in volume is measurable; a lower session bill is not guaranteed.</p>
+        </li>
+        <li class="pains__card">
+          <p class="pains__tag">Time</p>
+          <h3>You watch it search.</h3>
+          <p><code>grep</code>, open, scroll, open the next one. The agent spends its first turns finding its way, and you wait for it.</p>
+        </li>
       </ul>
-      <h3 class="vs__kicker">Here’s what the map looks like.</h3>
-      <p class="ledger__fine">You describe a task. The agent asks Pixel which files to start with, then checks the relevant bodies. These are suggestions, not a complete list of everything the change might touch.</p>
-      {{/* Recorded scoping example; installation teaches supported agents when to ask Pixel. */}}
+    </section>
+
+    {{/* ---------- scope ---------- */}}
+    <section class="section wrap" id="scope" aria-labelledby="scope-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Scoping</span></p>
+      <header class="section__head" data-reveal>
+        <h2 id="scope-title">A map of <span class="glow">where to look.</span></h2>
+        <p class="scope__lede"><span>You describe the task. Your agent asks Pixel where to&nbsp;start.</span> <span>In this recorded run: {{ len $s.p0 }}&nbsp;starting files out of&nbsp;{{ $s.files }} indexed files, to check before&nbsp;editing.</span></p>
+      </header>
+      {{/* The agent runs scope-task because pixel install put the protocol in its session: the visitor never types it. */}}
       <figure class="board" data-board data-p1="{{ delimit $s.p1 "," }}" data-files="{{ $s.files }}">
         <div class="board__chat">
           <p class="board__turn"><span class="board__who">You</span><span class="board__say">{{ $s.task | strings.FirstUpper }}.</span></p>
@@ -100,45 +124,102 @@
           <span class="key key--pad">{{ $s.files }} files in the index</span>
         </figcaption>
       </figure>
-      <p class="board__note" data-reveal>A recorded <code>pixel scope-task</code> run on Pixel’s repository, commit <a class="link" href="{{ site.Params.github_url }}/tree/7e8dda5">7e8dda5</a>, 23 September 2026: {{ len $s.p0 }} starting files out of {{ $s.files }} indexed files. This illustrates scoping, not task time or cost.</p>
-      <h3 class="vs__kicker" id="tasks">Less to read. Task outcomes vary.</h3>
-      <p class="ledger__fine" id="results">On {{ $r.count }} pinned large files, signatures reduced read volume by {{ lang.FormatNumber 1 $r.min }} to {{ lang.FormatNumber 1 $r.max }}% (median {{ lang.FormatNumber 1 $r.median }}%). This compares whole files with outlines, estimating tokens as UTF-8 bytes ÷ 4. <a class="link" href="{{ $bench }}#well-known-files">The files, method and parsing limits</a>.</p>
-      <p class="ledger__fine">Less output does not guarantee a faster agent: an Opus trial with install hooks found no speed gain on its scoping task. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">Evidence and limits</a></p>
+      <p class="board__note" data-reveal>A recorded <code>pixel scope-task</code> run on Pixel’s repository, commit <a class="link" href="{{ site.Params.github_url }}/tree/7e8dda5">7e8dda5</a>, 23 September 2026. These are suggested starting points, not an exhaustive change map. <code>pixel install</code> teaches supported agents when to ask for them.</p>
+    </section>
+
+    {{/* ---------- numbers ---------- */}}
+    <span id="savings"></span>
+    <section class="numbers wrap" id="results" aria-label="Measured results">
+      {{/* File/outline volume only; rates come from the archived kept rows. */}}
+      {{ $stats := slice
+        (dict "tag" "Read volume" "value" (printf "&minus;%.1f%%" $r.median) "text" "median reduction: whole file versus signatures, eight pinned files" "base" "full read" "before" 20 "after" 1)
+      }}
+      <ul class="numbers__list" data-reveal="stagger" data-count-up>
+        {{ range $stats }}
+        <li>
+          <span class="numbers__tag">{{ .tag }}</span>
+          <strong>{{ .value | safeHTML }}</strong>
+          {{ $before := .before }}{{ $after := .after }}
+          <span class="numbers__meter" aria-hidden="true">
+            <em>{{ .base }}</em><i>{{ range seq 20 }}<b{{ if le . $before }} class="on"{{ end }}></b>{{ end }}</i>
+            <em>Pixel</em><i class="is-pixel">{{ range seq 20 }}<b{{ if le . $after }} class="on"{{ end }}></b>{{ end }}</i>
+          </span>
+          <span class="numbers__text">{{ .text }}</span>
+        </li>
+        {{ end }}
+      </ul>
+      {{/* A saving per task is cents; the estimate multiplies the per-read rate by the team's own numbers, so it sits beside the figures it scales. */}}
+      <p class="numbers__more" data-reveal><a class="link" href="{{ $bench }}">How we measured, and where Pixel loses</a> &middot; <a class="link" href="{{ "savings/" | relURL }}">Estimate it for your team</a></p>
+    </section>
+
+    {{/* ---------- a real agent task ---------- */}}
+    <section class="section wrap" id="tasks" aria-labelledby="tasks-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Proof</span></p>
+      <header class="section__head" data-reveal>
+        <h2 id="tasks-title">Less to read. <span class="glow">Task outcomes vary.</span></h2>
+        <p>Our main evidence compares a whole file with its signatures on eight pinned large files. The volume is measured in bytes; token counts are estimates from bytes divided by four. An outline helps locate code; edits still need the relevant bodies.</p>
+      </header>
+      <p class="ledger__fine" data-reveal>On one scoping task, an Opus medium trial with install hooks reported median times of 42.9&nbsp;s without Pixel and 47.6&nbsp;s with it: no speed gain on that task. <a class="link" href="{{ $bench }}#on-whole-agent-tasks">Method and limits</a></p>
+      {{/* Real users' words, from data/voices.toml: nothing renders until it holds an entry, and the file says what an entry needs. */}}
+      {{ with hugo.Data.voices.voice }}
+      <ul class="voices" data-reveal="stagger" aria-label="What people who run Pixel say">
+        {{ range . }}
+        <li class="voices__card">
+          <blockquote class="voices__quote"><p>{{ .quote }}</p></blockquote>
+          <p class="voices__who">{{ with .url }}<a class="link" href="{{ . }}" target="_blank" rel="noopener">{{ end }}{{ .name }}{{ with .url }}</a>{{ end }}<span>{{ .role }}</span></p>
+          {{ with .measured }}<p class="voices__measured">Measured on {{ . }}</p>{{ end }}
+        </li>
+        {{ end }}
+      </ul>
+      {{ end }}
     </section>
 
     {{/* ---------- your number: the proof on the visitor's own code ---------- */}}
-    {{/* First-run path on the visitor’s repository; figures and further checks live on /benchmarks/. */}}
+    {{/* The first two figures restate "Measure it on your own code" in content/benchmarks.md (a fresh clone of psf/requests at 611c616): change them there first, then here. The third is the maintainer's own pixel token-savings report, moved here from the card that used to close the objections. */}}
     <section class="section wrap" id="your-number" aria-labelledby="yours-title">
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Try</span></p>
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Verify</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="yours-title">Don’t trust our numbers. <span class="glow">Get yours.</span></h2>
-        <p>Try Pixel on your own repo. Start with a local file/outline comparison: no account and no agent session needed.</p>
+        <h2 id="yours-title">Don't trust our numbers. <span class="glow">Get yours.</span></h2>
+        <p>Try it on your own repo: install the binary below, then run these checks inside a Git repository of yours. The first command builds the local index in <code>.pixel/</code> and adds it to <code>.gitignore</code>. No agent session or account needed.</p>
       </header>
       <ol class="yours" data-reveal="stagger">
         <li class="yours__step">
-          <span class="yours__n" aria-hidden="true">1</span><h3>Install the binary</h3>
-          <p><a class="link" href="#install">Choose an installation method</a>: the script, read it first, Homebrew or your agent. Then open a terminal in a Git repository of yours.</p>
+          <span class="yours__n" aria-hidden="true">1</span>
+          <h3>Your twenty largest files</h3>
+          <div class="cmd">
+            <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel audit</code>
+            <button class="cmd__copy" type="button" data-copy="pixel audit">Copy</button>
+          </div>
+          <p>On Requests at <code>611c616</code>, with Pixel 0.5.1, estimated as bytes ÷ 4: <strong class="yours__waste">95,693 tokens</strong> for the twenty files whole against <strong class="yours__kept">11,447</strong> for their outlines: &minus;88%.</p>
         </li>
         <li class="yours__step">
-          <span class="yours__n" aria-hidden="true">2</span><h3>Compare your largest files</h3>
-          <div class="cmd"><code><span class="cmd__prompt" aria-hidden="true">$</span> pixel audit</code><button class="cmd__copy" type="button" data-copy="pixel audit">Copy</button></div>
-          <p>First use builds the local index in <code>.pixel/</code> and adds it to <code>.gitignore</code>. The report compares whole files with signatures, estimating tokens as UTF-8 bytes ÷ 4. It does not measure your invoice.</p>
+          <span class="yours__n" aria-hidden="true">2</span>
+          <h3>The one file your agent keeps opening</h3>
+          <div class="cmd">
+            <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel list-signatures &lt;file&gt;</code>
+            <button class="cmd__copy" type="button" data-copy="pixel list-signatures ">Copy</button>
+          </div>
+          <p>On the same Requests clone, <code>models.py</code> (1,184 lines): <code>full read 10365 tok, pixel answer 641 tok (-94%)</code>, in well under a second.</p>
         </li>
         <li class="yours__step">
-          <span class="yours__n" aria-hidden="true">3</span><h3>Give your agent the map</h3>
-          <div class="cmd"><code><span class="cmd__prompt" aria-hidden="true">$</span> pixel install</code><button class="cmd__copy" type="button" data-copy="pixel install">Copy</button></div>
-          <p>For agents wired by this command, restart the agent and give it a task. <a class="link" href="{{ "for/" | relURL }}">Check your agent’s setup</a>; <code>pixel action-log</code> shows whether it called Pixel.</p>
+          <span class="yours__n" aria-hidden="true">3</span>
+          <h3>Your local volumes and estimates</h3>
+          <div class="cmd">
+            <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel token-savings</code>
+            <button class="cmd__copy" type="button" data-copy="pixel token-savings">Copy</button>
+          </div>
+          <p>After a few sessions, inspect measured Pixel output volumes and versioned workflow estimates. These do not measure all agent reads or billed cost.</p>
         </li>
       </ol>
-      <p class="numbers__more">For one file, run <code>pixel list-signatures &lt;file&gt;</code>. After a few sessions, <code>pixel token-savings</code> shows local volumes and estimates. <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">What each report measures</a>.</p>
+      <p class="numbers__more" data-reveal>Not installed yet? <a class="link" href="#install">Choose your installation method</a>. After installing, run <code>pixel install</code>, restart your agent, and <a class="link" href="{{ "for/" | relURL }}">check its setup</a>. The method behind the count: <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">measure it on your own code</a>.</p>
     </section>
 
     {{/* ---------- how it works ---------- */}}
     <section class="section wrap" id="how" aria-labelledby="how-title">
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Local</span></p>
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Architecture</span></p>
       <header class="section__head" data-reveal>
         <h2 id="how-title">How it <span class="glow">works.</span></h2>
-        <p>One binary and a folder in your repository. Retrieval runs locally, without a hosted service.</p>
+        <p>One binary and one folder in your repository, without a hosted service.</p>
       </header>
       <ol class="how" data-reveal="stagger">
         <li>
@@ -149,7 +230,7 @@
         <li>
           <span class="how__icon">{{ partial "icon.html" (dict "name" "bolt" "size" 28) }}</span>
           <h3>Stay warm</h3>
-          <p>A local daemon keeps both open and follows your edits. No daemon? The command runs in-process.</p>
+          <p>A local daemon keeps both open and watches the tree, so answers take milliseconds and follow your edits. No daemon? The command runs in-process.</p>
         </li>
         <li>
           <span class="how__icon">{{ partial "icon.html" (dict "name" "gauge" "size" 28) }}</span>
@@ -162,8 +243,34 @@
           <p>A CLI plus hooks, not an MCP server. <code>pixel install</code> puts the protocol where each agent reads its instructions, and the agent calls Pixel from the shell it already has.</p>
         </li>
       </ol>
-      <p class="ledger__fine">The index stays on your machine. First use may download an embedding model; Git remotes, classification and web search use the network when requested. Interactive terminals also check for releases. <a class="link" href="{{ "docs/" | relURL }}#install">Network details and opt-out</a></p>
-      <p class="numbers__more"><a class="link" href="{{ $bench }}#cold-start-on-a-large-repository">First-index measurement</a> · <a class="link" href="{{ "docs/" | relURL }}#the-workflow">Commands and workflow examples</a></p>
+      {{/* Cold start: the first command on a large repository, from nothing. The figures are the "Cold start on a large repository" table of content/benchmarks.md (median of three runs, docs/bench/cold-index.md): change them there first. The track draws that median run at one cell per 0.2 s, 60 cells for 12 s: the text index's 2 s in bright green, the code graph and the rest in the dim green. */}}
+      {{ $coldCells := 60 }}{{ $indexCells := 10 }}
+      <figure class="coldstart" data-reveal data-coldstart>
+        <div class="coldstart__lead">
+          <span class="numbers__tag">Cold start</span>
+          <strong class="coldstart__value">12 s</strong>
+          <figcaption>from nothing to a full index of <b>18,782 files</b>: text and code graph, no cache.</figcaption>
+        </div>
+        <div class="coldstart__run">
+          <span class="coldstart__track" aria-hidden="true">{{ range seq $coldCells }}<b class="{{ if le . $indexCells }}is-text{{ else }}is-graph{{ end }}"></b>{{ end }}</span>
+          <span class="coldstart__scale" aria-hidden="true"><em>0 s</em><em>2 s</em><em>12 s</em></span>
+          <dl class="coldstart__legend">
+            <div class="is-text"><dt>Text index</dt><dd>2.0&nbsp;s</dd></div>
+            <div class="is-graph"><dt>Code graph</dt><dd>about 10&nbsp;s, 59,609 symbols</dd></div>
+          </dl>
+          <p class="coldstart__note">A private Rails application, fresh clone, Apple M2, median of three runs. Later commands reuse the index and read only what changed. <a class="link" href="{{ $bench }}#cold-start-on-a-large-repository">Method</a></p>
+        </div>
+      </figure>
+      {{/* What a visitor checks before installing, at a glance. Each value restates a fact stated elsewhere: the platforms release.yml builds, the licence, the telemetry line of the hero. */}}
+      <dl class="specs" data-reveal>
+        <div><dt>Language</dt><dd>Rust</dd></div>
+        <div><dt>Licence</dt><dd>MIT</dd></div>
+        <div><dt>Architecture</dt><dd>CLI, hooks and a local daemon</dd></div>
+        <div><dt>Platforms</dt><dd>macOS on Apple Silicon, Linux</dd></div>
+        <div><dt>Account</dt><dd>None</dd></div>
+        <div><dt>Telemetry</dt><dd>None</dd></div>
+      </dl>
+      <p class="numbers__more"><a class="link" href="{{ "docs/" | relURL }}#jobs">See the workflow and Git examples</a> · <a class="link" href="{{ "classify/" | relURL }}">Optional classification</a></p>
     </section>
 
 
@@ -184,21 +291,19 @@
 
     {{/* ---------- questions ---------- */}}
     <section class="section wrap section--center" id="faq" aria-labelledby="faq-title">
-      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Limits &amp; FAQ</span></p>
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Objections</span></p>
       <header class="section__head" data-reveal>
         <h2 id="faq-title"><span class="glow">Fair</span> questions.</h2>
       </header>
-      <p class="ledger__fine">Outlines help you navigate, and static graphs miss some dynamic calls. Lower read volume is not a promise of lower task time or billed cost.</p>
       <div class="faq" data-reveal="stagger">
         {{/* data/objections.toml, through partials/objections.html: the home's FAQPage (partials/head.html) reads the same list. */}}
-        {{ range partial "objections.html" (dict "abs" false "home" true) }}
+        {{ range partial "objections.html" (dict "abs" false) }}
         <details>
           <summary>{{ .question }}</summary>
           {{ .answer | safeHTML }}
         </details>
         {{ end }}
-      </div>
-      <p class="numbers__more"><a class="link" id="alternatives" href="{{ "vs/" | relURL }}#alternatives">Compare alternatives</a> · <a class="link" id="teams" href="{{ "teams/" | relURL }}">Evaluate with your team</a> · <a class="link" id="decisions" href="{{ "classify/" | relURL }}">Optional classification</a> · <a class="link" id="jobs" href="{{ "docs/" | relURL }}#jobs">Workflow and Git examples</a></p>
+      </div>      <p class="numbers__more"><a class="link" id="alternatives" href="{{ "vs/" | relURL }}#alternatives">Full comparisons</a> · <a class="link" id="teams" href="{{ "teams/" | relURL }}">For your team</a> · <a class="link" id="decisions" href="{{ "classify/" | relURL }}">Optional classification</a> · <a class="link" id="jobs" href="{{ "docs/" | relURL }}#jobs">Workflow and Git examples</a></p>
 
     </section>
 
@@ -206,7 +311,7 @@
     <section class="section wrap section--center" id="install" aria-labelledby="install-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Install</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="install-title">Install. <span class="glow">Then try your repo.</span></h2>
+        <h2 id="install-title"><span class="glow">Two commands.</span> That's the whole setup.</h2>
       </header>
       <div class="setup">
         <div class="setup__main" data-reveal>
@@ -222,20 +327,43 @@
               </div>
               <button class="cmd__copy term__copy" type="button" data-copy="{{ $curl }} && pixel install && pixel doctor .">Copy all</button>
             </div>
-            <pre class="term__body"><code><span data-line="curl"><span class="term__p">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</span><span data-line="inspect" hidden><span class="term__p">$</span> curl -fsSL -o install.sh {{ replace $scriptURL "/" "/<wbr>" | safeHTML }}</span><span data-line="inspect" hidden><span class="term__p">$</span> less install.sh    <span class="term__c"># read every line it will run</span></span><span data-line="inspect" hidden><span class="term__p">$</span> sh install.sh</span><span data-line="brew" hidden><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span></span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel list-signatures path/to/a/large/file.py  <span class="term__c"># inspect one file, in your repo</span></span><span data-line="agent" hidden><span class="term__c"># paste into Claude Code, Codex, Pi or any agent with a shell</span></span><span data-line="agent" hidden><span class="term__p">&gt;</span> {{ $agentPrompt }}</span></code></pre>
+            <pre class="term__body"><code><span data-line="curl"><span class="term__p">$</span> {{ replace $curl "/" "/<wbr>" | safeHTML }}</span><span data-line="inspect" hidden><span class="term__p">$</span> curl -fsSL -o install.sh {{ replace $scriptURL "/" "/<wbr>" | safeHTML }}</span><span data-line="inspect" hidden><span class="term__p">$</span> less install.sh    <span class="term__c"># read every line it will run</span></span><span data-line="inspect" hidden><span class="term__p">$</span> sh install.sh</span><span data-line="brew" hidden><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel install      <span class="term__c"># wires Claude Code, Codex, Pi and more</span></span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel doctor .     <span class="term__c"># optional: everything green?</span></span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel list-signatures path/to/a/large/file.py  <span class="term__c"># first result, in your repo</span></span><span data-line="agent" hidden><span class="term__c"># paste into Claude Code, Codex, Pi or any agent with a shell</span></span><span data-line="agent" hidden><span class="term__p">&gt;</span> {{ $agentPrompt }}</span></code></pre>
           </div>
           <noscript><p class="install__more">For Homebrew or the download-and-read variant, see <a class="link" href="{{ "docs/" | relURL }}#install">all installation methods</a>.</p></noscript>
           {{/* Measured on a fresh clone of psf/requests with the pixel of this commit; re-run it when the report line changes (crates/pixel-actionlog/src/metrics.rs, measured_read_section). */}}
-          <p class="install__more">After installing, run <code>pixel audit</code> in your repo or inspect one file with the last line. Pixel compares the outline with reading the whole file. Both counts are estimated as UTF-8 bytes ÷ 4. <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">Example and method</a>.</p>
+          <p class="install__more">The last line needs no session: under the file's outline, Pixel's report compares it with reading the whole file. On Requests at <code>611c616</code>, with Pixel 0.5.1, <code>models.py</code>: <code>full read 10365 tok, pixel answer 641 tok (-94%)</code>, estimated as UTF-8 bytes ÷ 4. <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">Method</a>.</p>
           {{/* The prebuilt targets are release.yml's matrix (aarch64-apple-darwin, x86_64 and aarch64 musl Linux), and scripts/install.sh refuses an archive whose .sha256 it cannot fetch or match: change this line when either changes. */}}
           <p class="install__more">Prebuilt for Apple Silicon Macs and Linux (x86_64, arm64); <a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">the script</a> checks the archive's SHA&#8209;256 before it installs anything, and writes only <code>~/.local/bin/pixel</code> (<code>PIXEL_INSTALL_DIR</code> moves it). No Windows build yet. Another agent? <a class="link" href="{{ "docs/#plugins" | relURL }}">Plugins and rules files</a>.</p>
           <p class="install__more"><code>pixel install</code> edits your agents' settings, so every file it writes is listed per agent, with the check and the removal: <a class="link" href="{{ "for/" | relURL }}">what Pixel writes for each agent</a>.</p>
           <p class="install__more install__ask">Questions, or stuck on setup? <a class="link" href="{{ site.Params.github_url }}/discussions" target="_blank" rel="noopener">Ask in GitHub Discussions</a>.</p>
         </div>
       </div>
-
+      {{/* The call for more voices, under the install it follows (the report needs a few sessions), not in the Proof chapter, where it drew attention to an empty list of quotes: a Show and tell discussion prefilled with what a quote needs (the numbers, the repository, the agent). A quote only moves to data/voices.toml with its author's written consent. */}}
+      {{ $title := "My pixel token-savings numbers" }}
+      {{ $body := "Repository (language, rough size):\nAgent:\nHow long I have run Pixel:\n\n```\n<paste the output of pixel token-savings>\n```\n\nOK to quote this on pixel-cli.dev under my name and role? (yes / no)" }}
+      {{ $share := printf "%s/discussions/new?category=show-and-tell&title=%s&body=%s" site.Params.github_url (replace (urlquery $title) "+" "%20") (replace (urlquery $body) "+" "%20") }}
+      <aside class="invite" data-reveal>
+        <div class="invite__text">
+          <h3>Running Pixel on your own code?</h3>
+          <p>Post what <code>pixel token-savings</code> reports, with your repository's language and size and the agent you run. With your permission, it can be quoted here under your name.</p>
+        </div>
+        <a class="button button--ghost invite__cta" href="{{ $share }}" target="_blank" rel="noopener">Share your numbers</a>
+      </aside>
+      <ul class="badges" data-reveal="stagger">
+        <li>{{ partial "icon.html" (dict "name" "laptop" "size" 18) }}Your index stays on your machine</li>
+        <li>{{ partial "icon.html" (dict "name" "shield" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Zero telemetry</a></li>
+        <li>{{ partial "icon.html" (dict "name" "user" "size" 18) }}No account, no server</li>
+        <li>{{ partial "icon.html" (dict "name" "doc" "size" 18) }}MIT licensed</li>
+        <li>{{ partial "icon.html" (dict "name" "trash" "size" 18) }}Hooks gone in one <code>pixel uninstall</code></li>
+      </ul>
     </section>
 
+    {{/* ---------- closing ---------- */}}
+    <section class="closing wrap" aria-labelledby="closing-title">
+      <h2 id="closing-title" class="closing__title" data-reveal>Give your agent <span class="glow">a map.</span></h2>
+      <p class="closing__lede" data-reveal>Start with a file/outline comparison on your own code. Then give the next agent session the map, and check what it actually runs.</p>
+      <div class="closing__cta" data-reveal><a class="button" href="#your-number">Try Pixel on your repo</a></div>
+    </section>
   </main>
 
   {{ partial "footer.html" . }}
@@ -254,7 +382,7 @@
       addEventListener('hashchange', follow);
     })();
     /* At rest until the visitor moves. The scroll-driven effects below
-       (reveals and assembling titles) prime what is
+       (reveals, assembling titles, the counting numbers) prime what is
        still below the fold only on the first scroll, so a full-page
        capture, a link preview or a crawler that never scrolls sees every
        block in its final state. afterFirstScroll runs its callback then (or
@@ -518,6 +646,115 @@
         clearTimeout(t);
         t = setTimeout(route, 120);
       });
+    })();
+
+    /* Results: once the panel is on screen (and the splash is gone), each
+       number counts up from zero to the value the HTML already holds, and
+       each meter lights its squares one by one, baseline row then Pixel's.
+       Without JavaScript or with reduced motion the final state is what
+       renders, and so it is below the fold until the first scroll. */
+    (function () {
+      var list = document.querySelector('[data-count-up]');
+      if (!list) return;
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches || !('IntersectionObserver' in window)) { list.classList.add('is-counted'); return; }
+      var items = [].slice.call(list.children).map(function (li) {
+        var el = li.querySelector('strong');
+        var m = el.textContent.trim().match(/^(\D*)([\d.]+)(\D*)$/);
+        if (!m) return null;
+        var dec = (m[2].split('.')[1] || '').length;
+        return { li: li, el: el, pre: m[1], to: +m[2], dec: dec, suf: m[3] };
+      }).filter(Boolean);
+      // From here the numbers read zero and the meters are unlit, until go().
+      var prime = function () {
+        list.classList.add('is-primed');
+        items.forEach(function (it) { it.el.textContent = it.pre + (0).toFixed(it.dec) + it.suf; });
+      };
+      var go = function () {
+        list.classList.add('is-counted');
+        items.forEach(function (it, i) {
+          var delay = 150 + i * 140, dur = 1300, t0 = null;
+          var rows = it.li.querySelectorAll('.numbers__meter i');
+          [].forEach.call(rows, function (row, r) {
+            [].forEach.call(row.querySelectorAll('b.on'), function (cell, j) {
+              cell.style.transitionDelay = (delay + r * 380 + j * 38) + 'ms';
+            });
+          });
+          var tick = function (now) {
+            if (t0 === null) t0 = now;
+            var p = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - p, 3);
+            it.el.textContent = it.pre + (it.to * e).toFixed(it.dec) + it.suf;
+            if (p < 1) requestAnimationFrame(tick);
+          };
+          setTimeout(function () { requestAnimationFrame(tick); }, delay);
+        });
+      };
+      // On screen once the splash is gone: it counts in front of the reader.
+      // Off screen: it stays final until the first scroll, then primes and
+      // counts when it comes into view. On screen by the first scroll but
+      // not counted yet: it keeps its final state rather than drop to zero.
+      var watch = function () {
+        if (onScreen(list)) { prime(); return go(); }
+        afterFirstScroll(function () {
+          if (list.classList.contains('is-counted') || onScreen(list)) return;
+          prime();
+          var io = new IntersectionObserver(function (e) {
+            if (!e[0].isIntersecting) return;
+            io.disconnect();
+            go();
+          }, { threshold: 0.4 });
+          io.observe(list);
+        });
+      };
+      if (document.documentElement.classList.contains('splash')) addEventListener('pixel:splashdone', watch, { once: true });
+      else watch();
+    })();
+
+    /* Cold start: once the figure is on screen, the value counts up to its
+       12 s while the track lights cell by cell, the text index's cells
+       first. Same rules as the results panel: without JavaScript or with
+       reduced motion the final state renders, and a figure below the fold
+       stays final until the first scroll. */
+    (function () {
+      var fig = document.querySelector('[data-coldstart]');
+      if (!fig) return;
+      if (matchMedia('(prefers-reduced-motion: reduce)').matches || !('IntersectionObserver' in window)) { fig.classList.add('is-lit'); return; }
+      var el = fig.querySelector('.coldstart__value');
+      var m = el.textContent.trim().match(/^(\D*)([\d.]+)(\D*)$/);
+      if (!m) return;
+      var to = +m[2], cells = fig.querySelectorAll('.coldstart__track b');
+      var prime = function () {
+        fig.classList.add('is-waiting');
+        el.textContent = m[1] + '0' + m[3];
+      };
+      var go = function () {
+        var dur = 1800, t0 = null;
+        [].forEach.call(cells, function (cell, j) {
+          cell.style.transitionDelay = Math.round(j * dur / cells.length) + 'ms';
+        });
+        fig.classList.add('is-lit');
+        var tick = function (now) {
+          if (t0 === null) t0 = now;
+          var p = Math.min(1, (now - t0) / dur);
+          el.textContent = m[1] + Math.round(to * p) + m[3];
+          if (p < 1) requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      };
+      var watch = function () {
+        if (onScreen(fig)) { prime(); return go(); }
+        afterFirstScroll(function () {
+          if (fig.classList.contains('is-lit') || onScreen(fig)) return;
+          prime();
+          var io = new IntersectionObserver(function (e) {
+            if (!e[0].isIntersecting) return;
+            io.disconnect();
+            go();
+          }, { threshold: 0.5 });
+          io.observe(fig);
+        });
+      };
+      if (document.documentElement.classList.contains('splash')) addEventListener('pixel:splashdone', watch, { once: true });
+      else watch();
     })();
 
     /* The chapter rail: one link per section opening on a .chapter label, the

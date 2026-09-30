@@ -41,28 +41,31 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 
 ## Where things live
 
-- `layouts/index.html`: the landing page, in this order: promise and token wall,
-  reading problem and concrete scoping example with evidence, try on your repository (`#your-number`), local
-  operation (`#how`), compatibility (`#agents`), limits and FAQ (`#faq`),
-  installation (`#install`). The hero and navigation share one action:
-  try Pixel on your repo. Installation stays in one terminal with Script,
-  Read it first, Homebrew and Your agent variants. Keep `$agentPrompt` in
-  step with the root README. The one-liner and the inspected script remain
-  linked to release assets; never deploy while validating a branch.
-- The wall uses `data/read_savings.toml`, and its caption names the file,
-  version and bytes ÷ 4 estimate with a source link. It compares whole files
+- `layouts/index.html`: the landing page keeps the original explanatory
+  arc: hero promise and token wall, reading problem, scoping example,
+  read-volume evidence and agent-trial limits, own-repo checks
+  (`#your-number`), local mechanics and cold-start measurement (`#how`),
+  compatibility (`#agents`), questions (`#faq`), installation (`#install`)
+  and the closing map message. Hero, nav and closing share one primary
+  action: try Pixel on your repo. Installation stays in one terminal with
+  Script, Read it first, Homebrew and Your agent variants. Keep
+  `$agentPrompt` in step with the root README. The inspected script remains
+  linked to the released tag; never deploy while validating a branch.
+- The wall uses `data/read_savings.toml`; the evidence compares whole files
   with signatures, not billed tokens or task outcomes. The scope board
-  uses `data/scope.toml`; its visible caption names the recorded repo and
-  commit. Agent-trial limits link to `/benchmarks/`.
-- Detailed content lives on secondary pages: the alternatives matrix is
-  `partials/comparison-matrix.html`, rendered by `/vs/`; the optional
+  uses `data/scope.toml`, with its recorded repo and commit visible. The
+  own-repo examples name their Requests commit and Pixel version, and link
+  `/benchmarks/` for methods and limits. The cold-start track restates that
+  page’s private Rails fresh-clone measurement (Apple M2, median of three
+  runs); refresh its figure, legend and cell split together.
+- Detailed specialist content lives on secondary pages: the alternatives
+  matrix is `partials/comparison-matrix.html`, rendered by `/vs/`; the
   classifier example is `shortcodes/classify-example.html` on `/classify/`;
   persona guidance is `/teams/`; workflow and Git recordings are
   `shortcodes/workflow-jobs.html` on `/docs/`. Legacy home fragments
   `#alternatives`, `#decisions`, `#teams`, `#jobs` and `#savings` link to
-  their destinations (and navigate directly when JavaScript is enabled).
-  Keep `#scope`, `#your-number`, `#how`, `#agents`, `#faq` and `#install`;
-  old `#problem`, `#results` and `#tasks` land on the demonstration and its evidence.
+  these destinations and navigate directly with JavaScript. Existing
+  problem, proof, own-repo, local, compatibility and install anchors stay.
 - At rest until the first scroll: the scroll-driven effects (the
   `data-reveal` fades, the assembling titles, the counting numbers) prime
   only what is still below the fold when the visitor first scrolls
@@ -135,16 +138,18 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   `crates/pixel/tests/cli/docs_drift.rs` reads the pages and this file for
   `pixel …` commands, and fails when `static/llms.txt` ("Answers") misses a
   page or states another question than its `title`. Linked from the footer.
-- `data/voices.toml`: reserved for real, named people who agreed in writing
-  to be quoted. It is currently empty and no quote block renders. Keep the
-  consent and measurement rules in its header for any future use.
+- `data/voices.toml`: real, named people who agreed in writing to be
+  quoted. Quotes render under Proof only when entries exist (currently
+  empty). The install block invites reports through a prefilled Show and
+  tell discussion; a reply enters the data only with the author’s written
+  consent. Keep the measurement and consent rules in the file’s header.
 - The nav's GitHub star count shows only from `gh_stars_min` in
   `hugo.toml` up: a small count beside the brand argues against the page.
 - `data/objections.toml`: the "Fair questions" chapter, and the home's
   `FAQPage` JSON-LD, from one list (`layouts/partials/objections.html`
-  renders it for both, with `home = true`, so the markup never says what
-  the page does not). Entries marked `comparison = true` render on `/vs/`
-  instead, through the same partial with `comparisons = true`.
+  renders the complete list for both, so the markup never says what the
+  page does not). Entries marked `comparison = true` also render on `/vs/`
+  with `comparisons = true`, beside the detailed matrix.
   Answers are HTML paragraphs; a figure that lives elsewhere is a
   placeholder (`{big.full}`, `{langs.count}`, `{bench}`…, listed at the top
   of the file) the partial fills in, and an unknown one fails the build.
