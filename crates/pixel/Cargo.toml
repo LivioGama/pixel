@@ -35,6 +35,7 @@ pixel-install = { path = "../pixel-install" }
 pixel-proto = { path = "../pixel-proto" }
 pixel-actionlog = { path = "../pixel-actionlog" }
 pixel-flow = { path = "../pixel-flow" }
+pixel-ultraflow = { path = "../pixel-ultraflow" }
 pixel-release = { path = "../pixel-release" }
 clap = { version = "4.5", features = ["derive"] }
 serde = "1"
@@ -49,8 +50,9 @@ libc = "0.2"
 ureq = { version = "3", default-features = false, features = ["json", "rustls-webpki-roots"] }
 tar = "0.4"
 xxhash-rust = { workspace = true }
-
-[dev-dependencies]
-# Reads website/data/agents.toml in tests/cli/docs_drift.rs; already in the
-# tree through pixel-install.
+# Runtime now, not only a test dependency: the ai-cli-readify rewrite edits
+# `~/.codex/config.toml` in place and has to preserve every key the user
+# already has, so it parses and re-emits rather than replacing the file
+# (src/ai_cli_readify/config.rs, approve.rs). Tests read the same crate to
+# check `website/data/agents.toml` (tests/cli/docs_drift.rs).
 toml_edit = "0.25.15"

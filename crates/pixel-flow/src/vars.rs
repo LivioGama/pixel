@@ -1,5 +1,6 @@
-//! Flow-variable resolution shared by `replay` (text output) and `execute`
-//! (live browser runs), so a declared default resolves the same way in both.
+//! Flow-variable resolution shared by `replay` (text output), `execute`
+//! (live browser runs) and `pixel ultraflow`'s condition evaluator, so a
+//! declared default resolves the same way in all of them.
 
 use std::collections::HashMap;
 
@@ -40,7 +41,10 @@ fn declared_default<'a>(flow_vars: &'a [FlowVar], name: &str) -> Option<&'a str>
 }
 
 /// Substitute `{{var}}` templates in a string.
-pub(crate) fn substitute(s: &str, vars: &HashMap<String, String>) -> String {
+///
+/// Public so every reader of a step's text — the executor, the text emitter
+/// and `pixel ultraflow`'s condition evaluator — substitutes the same way.
+pub fn substitute(s: &str, vars: &HashMap<String, String>) -> String {
     let mut result = s.to_string();
     for (k, v) in vars {
         let placeholder = format!("{{{{{k}}}}}");
