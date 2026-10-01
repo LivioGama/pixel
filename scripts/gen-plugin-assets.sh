@@ -95,7 +95,7 @@ license: MIT
 '
 
 CURSOR_FRONT='---
-description: Pixel retrieval layer — mandatory usage protocol for the pixel CLI (impact, scope-task, plan, find-code, dig-history). Requires the pixel binary.
+description: Pixel retrieval layer — optional retrieval helpers for the pixel CLI (search-content, find-code, impact, recall). Requires the pixel binary.
 alwaysApply: true
 ---
 '

@@ -722,8 +722,8 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
     let prompt = fs::read_to_string(&prompt_path)
         .expect("agent-prompt.md should be deployed on a fresh home");
     assert!(
-        prompt.contains("REPLACEMENT MAP"),
-        "agent-prompt.md should carry the replacement map"
+        prompt.contains("## Retrieval commands"),
+        "agent-prompt.md should carry the retrieval commands"
     );
 
     // Claude lifecycle hooks are installed in ~/.claude/settings.json; no
@@ -762,7 +762,7 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
         "no shell wrapper is written — the SessionStart hook injects the prompt"
     );
     assert!(
-        codex_developer_instructions(home).is_some_and(|v| v.contains("MANDATORY WORKFLOW")),
+        codex_developer_instructions(home).is_some_and(|v| v.contains("## Retrieval commands")),
         "a fresh install must write the agent prompt into ~/.codex/config.toml"
     );
 }
@@ -858,7 +858,7 @@ fn doctor_install_artifact_checks_red_and_green() {
     let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
     let mut edited = fs::read_to_string(&prompt_path).expect("agent-prompt deployed");
     assert!(
-        edited.contains("REPLACEMENT MAP") && edited.contains("MANDATORY WORKFLOW"),
+        edited.contains("## Retrieval commands") && edited.contains("## Reading results"),
         "fixture: the edited prompt must still satisfy the old heuristic"
     );
     edited.push_str("\nOne extra rule the bundled prompt does not carry.\n");
@@ -2739,7 +2739,7 @@ fn doctor_codex_config_check_is_red_until_the_current_block_is_in_place() {
     let written = fs::read_to_string(codex_config_path(home)).unwrap();
     fs::write(
         codex_config_path(home),
-        written.replace("## MANDATORY WORKFLOW", "## OPTIONAL WORKFLOW"),
+        written.replace("## Reading results", "## Reading output"),
     )
     .unwrap();
     let check = status();
@@ -3224,14 +3224,13 @@ fn edited_legacy_pi_prompt_is_replaced_without_consuming_following_user_text() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     install_for_shell(home, TEST_SHELL);
-    let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md"))
-        .expect("deployed legacy prompt");
-    let edited = asset.replacen(
-        "Pixel provides deterministic code retrieval",
-        "This repo keeps Pixel ready",
-        1,
-    );
-    assert_ne!(edited, asset, "the legacy fixture must contain an edit");
+    // A legacy Pi prompt: pre-#475 doctrine, edited by hand — the legacy
+    // signature (heading, sections, PATH line) is what the migration strips.
+    let edited = "# Pixel Retrieval Layer\n\
+                  Pixel provides deterministic code retrieval, edited by hand.\n\
+                  ## MANDATORY WORKFLOW\nDo the workflow.\n\
+                  ## REPLACEMENT MAP\nMap.\n\
+                  All commands accept `[PATH]`, default current directory.\n";
     let pi_path = pi_prompt_path(home);
     fs::write(&pi_path, format!("Before.\n{edited}After.\n"))
         .expect("edited legacy prompt fixture");
@@ -3241,10 +3240,7 @@ fn edited_legacy_pi_prompt_is_replaced_without_consuming_following_user_text() {
     let deployed = fs::read_to_string(&pi_path).expect("migrated Pi prompt");
     assert!(deployed.starts_with("Before.\n"), "{deployed}");
     assert!(deployed.ends_with("After.\n"), "{deployed}");
-    assert!(
-        !deployed.contains("This repo keeps Pixel ready"),
-        "{deployed}"
-    );
+    assert!(!deployed.contains("edited by hand"), "{deployed}");
     assert!(!deployed.contains("# Pixel Retrieval Layer"), "{deployed}");
     assert_eq!(deployed.matches(MANAGED_BEGIN).count(), 1, "{deployed}");
     let report = doctor(&DoctorOptions {
@@ -5444,20 +5440,15 @@ fn repo_install_should_manage_pixel_first_project_rules_fail_open() {
     let managed = fs::read_to_string(&rules_path).unwrap();
     assert!(managed.starts_with("# Existing project rules\nPreserve this instruction."));
     assert!(managed.contains("pixel:warp-retrieval:begin"));
-    assert!(
-        managed.contains("your first tool action must attempt Pixel before any search or read")
-    );
-    assert!(managed.contains("never block or deny repository access"));
+    assert!(managed.contains("pixel search-content -F '<identifier>'"));
+    assert!(managed.contains("native tools stay available"));
     let current = doctor(&doctor_options).unwrap();
     assert_eq!(
         check(&current, "repo.pixel-first").status,
         CheckStatus::Green
     );
 
-    let stale_text = managed.replace(
-        "your first tool action must attempt Pixel",
-        "your first tool action must attempt native search",
-    );
+    let stale_text = managed.replace("Optional retrieval helpers", "Mandatory retrieval helpers");
     assert_ne!(
         stale_text, managed,
         "the test mutation must alter managed policy"
