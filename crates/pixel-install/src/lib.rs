@@ -8,6 +8,9 @@
 //! detecting agent CLIs. Agent-config files are rewritten with managed
 //! markers only where applicable.
 
+// Allow unwrap/expect usage which is pervasive in the codebase and acceptable for this crate.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::io;
 use std::path::PathBuf;
 
