@@ -55,7 +55,7 @@ machine-readable scoreboard consumed by `gate.py`.
 | `on` (14.3 KB doc, full hooks) | packet + relays | 11.5 (n2) | 6.5 (n2) | 11.5 (n2) | 9.8 |
 | `vslim` (1.1 KB doc, full hooks) | packet + relays | 9.5 (n2) | 10.5 (n2) | 11.0 (n2) | 10.3 |
 | `vquiet` (1.1 KB doc, session-start only) | none mid-session | 16.0 (n1) | 10.0 (n1) | 12.0 (n1) | 12.7 |
-| **`vfinal` (shipped 2.9 KB, session-start only)** | none mid-session | **16.0** | **13.0** | **12.0** | **13.7** |
+| **`vfinal` (shipped 2.8 KB, session-start only)** | none mid-session | **16.0** | **13.0** | **12.0** | **13.7** |
 
 Final gate (`vfinal` vs `baseline`, turns slack ×1.5): **PASS** — s1 16.0 vs 15.0,
 s2 13.0 vs 11.5 (2 turns vs 20), s3 12.0 vs 12.0.

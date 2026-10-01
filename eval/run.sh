@@ -8,7 +8,7 @@
 #              + AGENTS.md block body from eval/variants/<name>/rules-body.md
 #
 # Env:
-#   CLIS=claude            (claude|agy|codex|pi — codex/pi are stubs, see README)
+#   CLIS=claude            (claude|agy|codex|pi — codex/pi dispatch to eval/clis/, see README)
 #   ARMS="baseline on"     SCENARIOS="s1-hook-install ..."   MAX_TURNS=12
 #   PIXEL_BIN=~/.local/bin/pixel
 set -euo pipefail
@@ -45,7 +45,29 @@ printf '%s\n' "$RUN_IDENTITY" > "$IDENTITY_FILE"
 
 DEPLOY_BACKUP="$(mktemp -t pixel-eval-prompt.XXXXXX)"
 AGY_BACKUP="$(mktemp -t pixel-eval-agy.XXXXXX)"
+# The deployed-prompt swap is machine-global: serialize the whole campaign
+# (backup → swaps → CLI runs → restore) against other campaigns and installs.
+PROMPT_LOCK="$(dirname "$DEPLOY_PROMPT")/.eval-prompt.lock"
+acquire_prompt_lock() {
+  local waited=0
+  until mkdir "$PROMPT_LOCK" 2>/dev/null; do
+    if [ -f "$PROMPT_LOCK/pid" ] && ! kill -0 "$(cat "$PROMPT_LOCK/pid" 2>/dev/null)" 2>/dev/null; then
+      rm -rf "$PROMPT_LOCK"   # holder died without cleanup
+      continue
+    fi
+    waited=$((waited + 5))
+    if [ "$waited" -ge 600 ]; then
+      echo "prompt lock still held after ${waited}s: $PROMPT_LOCK (remove it if no campaign is running)" >&2
+      exit 3
+    fi
+    sleep 5
+  done
+  echo $$ > "$PROMPT_LOCK/pid"
+}
+release_prompt_lock() { rm -rf "$PROMPT_LOCK" 2>/dev/null || true; }
+acquire_prompt_lock
 restore() {
+  release_prompt_lock
   if [ -s "$DEPLOY_BACKUP" ]; then
     cp "$DEPLOY_BACKUP" "$DEPLOY_PROMPT" 2>/dev/null || true
     rm -f "$DEPLOY_BACKUP"
