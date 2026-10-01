@@ -3224,14 +3224,13 @@ fn edited_legacy_pi_prompt_is_replaced_without_consuming_following_user_text() {
     let dir = TempDir::new().expect("tempdir");
     let home = dir.path();
     install_for_shell(home, TEST_SHELL);
-    let asset = fs::read_to_string(home.join(".local/share/pixel/agent-prompt.md"))
-        .expect("deployed legacy prompt");
-    let edited = asset.replacen(
-        "Pixel indexes this repository for deterministic code retrieval",
-        "This repo keeps Pixel ready",
-        1,
-    );
-    assert_ne!(edited, asset, "the legacy fixture must contain an edit");
+    // A legacy Pi prompt: pre-#475 doctrine, edited by hand — the legacy
+    // signature (heading, sections, PATH line) is what the migration strips.
+    let edited = "# Pixel Retrieval Layer\n\
+                  Pixel provides deterministic code retrieval, edited by hand.\n\
+                  ## MANDATORY WORKFLOW\nDo the workflow.\n\
+                  ## REPLACEMENT MAP\nMap.\n\
+                  All commands accept `[PATH]`, default current directory.\n";
     let pi_path = pi_prompt_path(home);
     fs::write(&pi_path, format!("Before.\n{edited}After.\n"))
         .expect("edited legacy prompt fixture");
@@ -3241,10 +3240,7 @@ fn edited_legacy_pi_prompt_is_replaced_without_consuming_following_user_text() {
     let deployed = fs::read_to_string(&pi_path).expect("migrated Pi prompt");
     assert!(deployed.starts_with("Before.\n"), "{deployed}");
     assert!(deployed.ends_with("After.\n"), "{deployed}");
-    assert!(
-        !deployed.contains("This repo keeps Pixel ready"),
-        "{deployed}"
-    );
+    assert!(!deployed.contains("edited by hand"), "{deployed}");
     assert!(!deployed.contains("# Pixel Retrieval Layer"), "{deployed}");
     assert_eq!(deployed.matches(MANAGED_BEGIN).count(), 1, "{deployed}");
     let report = doctor(&DoctorOptions {
