@@ -112,7 +112,9 @@ fn rules_block() -> String {
     format!("{RULES_BEGIN}\n{RULES_BODY}{RULES_END}")
 }
 
-fn rules_range(content: &str, path: &Path) -> Result<Option<std::ops::Range<usize>>> {
+use std::ops::Range;
+
+fn rules_range(content: &str, path: &Path) -> Result<Option<Range<usize>>> {
     let begin = content.find(RULES_BEGIN);
     let end = content.find(RULES_END);
     if begin.is_none() && end.is_none() {
