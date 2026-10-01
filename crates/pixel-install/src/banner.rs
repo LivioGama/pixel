@@ -456,6 +456,8 @@ mod tests {
         );
         let top = banner.lines().find(|line| line.starts_with('╭')).unwrap();
         assert_eq!(top.chars().count(), width, "{banner}");
+        let bottom = banner.lines().find(|line| line.starts_with('╰')).unwrap();
+        assert_eq!(bottom.chars().count(), width, "{banner}");
         // The breathing-room rows are part of the box: losing them would
         // cramp the summary against its border.
         assert!(
@@ -485,8 +487,17 @@ mod tests {
         );
         assert!(banner.contains("✓ verified agent-prompt.md"), "{banner}");
         // The counts are one joined line, not three loose numbers: the
-        // separators are part of the contract.
-        assert!(banner.contains("1 green · 0 yellow · 0 red"), "{banner}");
+        // separators are part of the contract, and none sits before the
+        // first count.
+        let counts_row = box_rows(&banner)
+            .into_iter()
+            .find(|row| row.contains("green"))
+            .expect("counts row in {banner}");
+        assert!(
+            counts_row.starts_with("│ 1 green · 0 yellow · 0 red"),
+            "{counts_row}"
+        );
+        assert!(counts_row.ends_with(" │"), "{counts_row}");
         assert!(banner.contains("installed."), "{banner}");
         assert!(banner.contains("/usr/local/bin/pixel"), "{banner}");
 

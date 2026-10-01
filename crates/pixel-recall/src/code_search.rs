@@ -881,8 +881,8 @@ fn validate_vector(vector: &[f32], dims: usize) -> Result<(), String> {
 fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
     let is_ident = |character: char| character.is_alphanumeric() || character == '_';
     let chunk = &text[start..end];
-    let chunk = if text[..start].chars().next_back().is_some_and(&is_ident)
-        && chunk.chars().next().is_some_and(&is_ident)
+    let chunk = if text[..start].chars().next_back().is_some_and(is_ident)
+        && chunk.chars().next().is_some_and(is_ident)
     {
         chunk
             .split_once(|character| !is_ident(character))
@@ -890,8 +890,8 @@ fn lexical_chunk(text: &str, start: usize, end: usize) -> &str {
     } else {
         chunk
     };
-    if text[..end].chars().next_back().is_some_and(&is_ident)
-        && text[end..].chars().next().is_some_and(&is_ident)
+    if text[..end].chars().next_back().is_some_and(is_ident)
+        && text[end..].chars().next().is_some_and(is_ident)
     {
         chunk
             .rsplit_once(|character| !is_ident(character))
