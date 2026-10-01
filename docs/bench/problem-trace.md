@@ -22,7 +22,9 @@ shows only one.
 - **Archived:** `problem-trace/runs.json` (every run of both arms: each tool
   call, its label as the agent issued it, the lines and bytes ÷ 4 of its
   result, the run's duration, turns and Claude Code's reported cost),
-  `meta.txt`, `packets.txt`. The raw stream-json files are not archived.
+  `meta.txt`, `packets.txt`, and `packet.txt`, the Pixel arm's task packet
+  reproduced afterwards (see "The Scoping board"). The raw stream-json files
+  are not archived.
 
 ## What the page shows
 
@@ -34,6 +36,29 @@ the median wall time instead, which here is `vanilla-9`, an 8-call run; the
 page does not use that choice. Calls are classified by their first command
 (the script's docstring has the rule). The page shows no duration and no
 cost, and compares nothing: it states what one arm did.
+
+## The Scoping board
+
+The chapter after the Problem draws the task packet the `pixel` arm got
+before its first call. The recording keeps no packet text, only whether each
+run got one (`packets.txt`), and the packet depends only on the binary, the
+indexed tree and the prompt, so `scripts/scope-packet.sh` rebuilds the
+recorded repository the way `record-demo.sh` does and feeds the recorded
+prompt to the prompt-submit hook. It refuses to run with any binary other
+than the recorded one (`meta.txt` `pixel=`). Its output, archived as
+`problem-trace/packet.txt` (reproduced 2026-10-01 with Pixel 0.6.1
+`ca1ce9e`), names five P0 files (`push.rs`, `main.rs`, `decide_remote.rs`,
+`branch.rs`, `journal.rs`) and three P1 files out of 650 indexed.
+
+`scripts/scope-board.py` writes `website/data/scope.toml` from it, and adds
+the board's limit from `runs.json`: the files every `pixel` run named in its
+answer that the packet left out (`api.rs`, `crash_matrix.rs`, `rewrite.rs`,
+`ship.rs`, matched by basename). Two more facts from the same runs, kept here
+rather than on the page: no run opened `decide_remote.rs` or `branch.rs`,
+and 9 of 11 answers still listed both; and the first call of every `pixel`
+run named `crates/pixel-ops/src/push.rs`, where every `vanilla` run started
+with `grep "force-with-lease|lease"` across the repository. Reading
+`push.rs` still came at the second call in median in both arms.
 
 ## Both arms (medians over 11 runs)
 

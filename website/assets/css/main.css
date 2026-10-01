@@ -346,6 +346,11 @@ main h2 { position: relative; }
    numbers): the hero's own bottom padding and scroll cue already open the
    gap, so a full chapter pad would read as an empty screen. */
 .hero + .section { --pad: clamp(64px, 12vh, 150px); }
+/* Scoping answers the Problem's trace with the other arm of its recording:
+   a short pad and a handoff line keep the two read as one story. */
+.section--follows { --pad: clamp(120px, 20vh, 210px); }
+.scope__handoff { position: absolute; left: 50%; top: 0; height: calc(var(--pad) * 0.55 - 26px); transform: translateX(-50%); margin: 0; display: flex; align-items: flex-end; padding-bottom: 10px; white-space: nowrap; font: 500 0.7rem/1 var(--mono); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-soft); }
+.scope__handoff::before { content: ""; position: absolute; left: 50%; top: 8px; bottom: 26px; width: 2px; background: linear-gradient(var(--red), var(--green)); }
 /* Each chapter opens on a label (.chapter in layouts/index.html): its number
    and a category name, deliberately not the headline's words, across a row of
    squares. The numbers match the rail. */
@@ -381,12 +386,12 @@ main { counter-reset: chapter; }
 .board__turn { margin: 0; display: flex; align-items: baseline; gap: 12px; min-width: 0; }
 .board__who { flex: none; width: 4.6em; font: 500 0.7rem/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-soft); }
 .board__say { color: var(--ink); }
-.board__turn--agent code { color: var(--ink); font-size: 1em; overflow-wrap: anywhere; min-width: 0; }
-.board__turn--agent .board__who { color: var(--green-hi); }
-.board__prompt { margin-right: 0.6em; color: var(--green-hi); }
+.board__turn--pixel .board__who, .board__turn--pixel .board__say { color: var(--green-hi); }
+.board__turn--pixel .board__say { font: 400 0.92em/1.5 var(--mono); }
 .board__note { margin: 22px 0 0; font-size: 0.95rem; color: var(--ink-soft); max-width: 44em; }
 .board__note code { background: var(--panel); padding: 1px 6px; border-radius: 3px; }
-.board__pads { --cols: 111; display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); gap: 3px; }
+/* Columns divide `files` in data/scope.toml (650 = 130 × 5 = 50 × 13), so the last row is full. */
+.board__pads { --cols: 130; display: grid; grid-template-columns: repeat(var(--cols), minmax(0, 1fr)); gap: 3px; }
 .board__pads span { aspect-ratio: 1; border-radius: 1px; background: var(--cell); box-shadow: inset 0 0 0 1px var(--cell-edge); }
 .board__pads .is-p1 { background: var(--green-dim); box-shadow: none; }
 .board__pads .is-p0 { background: var(--green); box-shadow: 0 0 8px rgba(34, 197, 94, 0.6); position: relative; z-index: 1; }
@@ -406,7 +411,7 @@ main { counter-reset: chapter; }
 @keyframes land { from { opacity: 0; } to { opacity: 1; } }
 /* Below 760px the pads wrap into a square and the labels become a list. */
 @media (max-width: 760px) {
-  .board__pads { --cols: 37; gap: 2px; }
+  .board__pads { --cols: 50; gap: 2px; }
   .board__traces { display: none; }
   .board__files { margin-top: 20px; grid-template-columns: minmax(0, 1fr); gap: 10px; }
   .board__files li { flex-direction: row; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
