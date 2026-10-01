@@ -43,14 +43,15 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 
 - `layouts/index.html`: the landing page keeps the original explanatory
   arc: hero promise and token wall, reading problem, scoping example,
-  read-volume evidence and agent-trial limits, own-repo checks
-  (`#your-number`), local mechanics and cold-start measurement (`#how`),
-  compatibility (`#agents`), questions (`#faq`), installation (`#install`)
-  and the closing map message. Hero, nav and closing share one primary
-  action: try Pixel on your repo. Installation stays in one terminal with
+  read-volume evidence and agent-trial limits, local mechanics and
+  cold-start measurement (`#how`), compatibility (`#agents`), questions
+  (`#faq`), installation (`#install`) closed by the own-repo checks
+  (`#your-number`, which need the binary, so they come after it), and the
+  closing map message. Hero, nav and closing share one primary action: try
+  Pixel on your repo, which lands on `#install`. Installation stays in one terminal with
   Script, Read it first, Homebrew and Your agent variants, beside a visual
   setup sequence. Shell commands stay on one line and scroll within the
-  terminal on narrow screens. Own-repo checks stack vertically; specs use
+  terminal on narrow screens. The own-repo checks stack vertically under the setup; specs use
   three wider columns, then two, then labelled rows on mobile. Keep
   `$agentPrompt` in step with the root README. The inspected script remains
   linked to the released tag; never deploy while validating a branch.
