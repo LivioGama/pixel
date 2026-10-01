@@ -56,9 +56,13 @@ pub(crate) fn install_rules(repo: &Path, dry_run: bool) -> Result<InstallStep> {
             } else {
                 "Pixel-first project retrieval guidance already current"
             };
-            if dry_run { format!("[dry-run] {}", msg) } else { msg.to_string() }
+            if dry_run {
+                format!("[dry-run] {msg}")
+            } else {
+                msg.to_string()
+            }
         },
-        detail: Some(format!("file={}", path.display()))
+        detail: Some(format!("file={}", path.display())),
     })
 }
 
