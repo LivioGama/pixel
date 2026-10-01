@@ -140,18 +140,19 @@
       <p class="trace__foot"><span>Recorded {{ (time $t.recorded).Format "2 Jan 2006" }} &middot; {{ replace (replace $t.model "claude-opus-" "Opus ") "-" "." }} {{ $t.effort }} &middot; Claude Code {{ $t.claude }} &middot; Pixel <code>{{ $t.ref }}</code> &middot; run {{ strings.TrimPrefix "vanilla-" $t.run }} of {{ len $runs }}</span> <span>Numbers are lines of tool output; reads include <code>sed</code> slices &middot; <a class="link" href="{{ site.Params.github_url }}/blob/main/docs/bench/problem-trace.md">Raw runs</a></span></p>
     </section>
 
-    {{/* ---------- scope ---------- */}}
-    <section class="section wrap" id="scope" aria-labelledby="scope-title">
+    {{/* ---------- scope: the same prompt as the Problem chapter, the other arm of its recording ---------- */}}
+    {{/* data/scope.toml is the task packet the Pixel arm received before its first call (scripts/scope-board.py, from docs/bench/problem-trace/packet.txt): same task, same repository, same day as the trace above. The prompt-submit hook pixel install writes delivers it, so nobody types a command, the agent included. */}}
+    <section class="section section--center section--follows wrap" id="scope" aria-labelledby="scope-title">
+      <p class="scope__handoff" aria-hidden="true">Same prompt, same repo</p>
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Scoping</span></p>
       <header class="section__head" data-reveal>
-        <h2 id="scope-title">A map of <span class="glow">where to look.</span></h2>
-        <p class="scope__lede"><span>You describe the task. Your agent asks Pixel where to&nbsp;start.</span> <span>In this recorded run: {{ len $s.p0 }}&nbsp;starting files out of&nbsp;{{ $s.files }} indexed files, to check before&nbsp;editing.</span></p>
+        <h2 id="scope-title">Same prompt. <span class="glow">A map first.</span></h2>
+        <p class="scope__lede"><span>Pixel reads the task before your agent makes a single&nbsp;call.</span> <span>Out of {{ $s.files }} indexed files, it names {{ len $s.p0 }} to start&nbsp;with.</span></p>
       </header>
-      {{/* The agent runs scope-task because pixel install put the protocol in its session: the visitor never types it. */}}
       <figure class="board" data-board data-p1="{{ delimit $s.p1 "," }}" data-files="{{ $s.files }}">
         <div class="board__chat">
-          <p class="board__turn"><span class="board__who">You</span><span class="board__say">{{ $s.task | strings.FirstUpper }}.</span></p>
-          <p class="board__turn board__turn--agent"><span class="board__who">Agent</span><code><span class="board__prompt" aria-hidden="true">$</span>pixel scope-task "{{ $s.task }}"</code></p>
+          <p class="board__turn"><span class="board__who">You</span><span class="board__say">{{ $s.task | strings.FirstUpper }}. Find the files that would need to change&hellip;</span></p>
+          <p class="board__turn board__turn--pixel"><span class="board__who">Pixel</span><span class="board__say">{{ len $s.p0 }} files to start with, {{ len $s.p1 }} likely needed &middot; before call 01</span></p>
         </div>
         <div class="board__pads" aria-hidden="true"></div>
         <svg class="board__traces" aria-hidden="true"></svg>
@@ -167,7 +168,9 @@
           <span class="key key--pad">{{ $s.files }} files in the index</span>
         </figcaption>
       </figure>
-      <p class="board__note" data-reveal>A recorded <code>pixel scope-task</code> run on Pixel’s repository, commit <a class="link" href="{{ site.Params.github_url }}/tree/7e8dda5">7e8dda5</a>, 23 September 2026. These are suggested starting points, not an exhaustive change map. <code>pixel install</code> teaches supported agents when to ask for them.</p>
+      {{/* `missed` restates what every Pixel run's answer named and the packet did not: the honest limit of a starting list, from the same runs. */}}
+      {{ $missed := slice }}{{ range $s.missed }}{{ $missed = $missed | append (printf "<code>%s</code>" .) }}{{ end }}
+      <p class="board__note" data-reveal>The list Pixel handed over in the recording above, {{ (time $s.recorded).Format "2 Jan 2006" }}, Pixel <code>{{ $s.ref }}</code>. Starting points, not a full change map: all {{ $s.runs }} agents with Pixel also named {{ delimit $missed ", " " and " | safeHTML }}, which it left out. You typed nothing: <code>pixel install</code> wires the hook that asks. <a class="link" href="{{ site.Params.github_url }}/blob/main/docs/bench/problem-trace.md#the-scoping-board">Raw runs</a></p>
     </section>
 
     {{/* ---------- numbers ---------- */}}
