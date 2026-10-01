@@ -26,6 +26,20 @@ SCENARIOS="${SCENARIOS:-s1-hook-install s2-vector-recall s3-rename-impact}"
 MAX_TURNS="${MAX_TURNS:-12}"
 mkdir -p "$RESULTS"
 
+# Reused transcripts are only valid for the inputs that produced them; a
+# mismatched results dir silently scores stale answers as current, which the
+# gate cannot see. Refuse and let the operator archive instead.
+RUN_IDENTITY="head=$EVAL_HEAD arms=$ARMS clis=$CLIS scenarios=$SCENARIOS turns=$MAX_TURNS"
+IDENTITY_FILE="$RESULTS/.identity"
+if [ -e "$IDENTITY_FILE" ] && [ "$(cat "$IDENTITY_FILE")" != "$RUN_IDENTITY" ]; then
+  echo "results dir holds a different run:" >&2
+  echo "  file:    $(cat "$IDENTITY_FILE")" >&2
+  echo "  current: $RUN_IDENTITY" >&2
+  echo "archive or empty $RESULTS, then re-run (or point RESULTS= at a fresh dir)" >&2
+  exit 2
+fi
+printf '%s\n' "$RUN_IDENTITY" > "$IDENTITY_FILE"
+
 DEPLOY_BACKUP="$(mktemp -t pixel-eval-prompt.XXXXXX)"
 AGY_BACKUP="$(mktemp -t pixel-eval-agy.XXXXXX)"
 restore() {
@@ -88,7 +102,7 @@ build_arm() {
   if [ "$arm" != "baseline" ]; then
     merge_single_hook_set_py "$arm" < "$cfg/settings.json" > "$cfg/settings.json.tmp" && mv "$cfg/settings.json.tmp" "$cfg/settings.json"
   fi
-  cp "$HOME/.claude/CLAUDE.md" "$cfg/CLAUDE.md"
+  [ -f "$HOME/.claude/CLAUDE.md" ] && cp "$HOME/.claude/CLAUDE.md" "$cfg/CLAUDE.md" || true
   for name in plugins skills agents commands context-mode advanced-memory; do
     [ -e "$HOME/.claude/$name" ] && [ ! -e "$cfg/$name" ] && ln -s "$HOME/.claude/$name" "$cfg/$name" || true
   done
@@ -130,12 +144,20 @@ swap_payload() {  # arm -> deploy the payload that arm's session-start hook shou
 
 agy_plugin_guard() {  # keep agy's global pixel plugin only for the `on` arm
   if [ "$CLIS" != claude ] && [[ "$CLIS" == *agy* ]]; then
-    [ -f "$AGY_BACKUP" ] || agy plugin list 2>/dev/null | python3 -c '
+    # Capture via tmp+mv: a failed `agy plugin list` must not leave an empty
+    # file shadowing every later capture attempt (restore reads it with -s).
+    if [ ! -s "$AGY_BACKUP" ]; then
+      if agy plugin list 2>/dev/null | python3 -c '
 import json,sys
 try: d=json.load(sys.stdin)
 except Exception: d={}
 for i in d.get("imports",[]):
-    if i.get("name")=="pixel": print("pixel", "enabled")' > "$AGY_BACKUP" || true
+    if i.get("name")=="pixel": print("pixel", "enabled")' > "$AGY_BACKUP.tmp" && [ -s "$AGY_BACKUP.tmp" ]; then
+        mv "$AGY_BACKUP.tmp" "$AGY_BACKUP"
+      else
+        rm -f "$AGY_BACKUP.tmp"
+      fi
+    fi
     if [ "$1" = off ]; then agy plugin disable pixel >/dev/null 2>&1 || true
     else agy plugin enable pixel >/dev/null 2>&1 || true; fi
   fi
