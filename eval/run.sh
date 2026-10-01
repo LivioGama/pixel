@@ -12,14 +12,17 @@
 #   ARMS="baseline on"     SCENARIOS="s1-hook-install ..."   MAX_TURNS=12
 #   PIXEL_BIN=~/.local/bin/pixel
 set -euo pipefail
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE   # caller exports would poison the scratch worktrees
 EVAL_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(git -C "$EVAL_DIR" rev-parse --show-toplevel)"
 PIXEL_BIN="${PIXEL_BIN:-$HOME/.local/bin/pixel}"
 DEPLOY_PROMPT="$HOME/.local/share/pixel/agent-prompt.md"
 RESULTS="$EVAL_DIR/results"
-SCRATCH="${SCRATCH:-/tmp/pixel-eval}"
+# Per-invocation scratch by default: concurrent runs must not share worktrees,
+# configs, or the deployed-prompt swap. Override to reuse a warm scratch.
+SCRATCH="${SCRATCH:-/tmp/pixel-eval-run-$$}"
 EVAL_HEAD="$(git -C "$EVAL_DIR" rev-parse HEAD)"
-MAIN_ROOT="$(cd "$(git -C "$EVAL_DIR" rev-parse --git-common-dir)/.." && pwd)"
+MAIN_ROOT="$(cd "$EVAL_DIR" && cd "$(git -C "$EVAL_DIR" rev-parse --git-common-dir)/.." && pwd)"
 CLIS="${CLIS:-claude}"
 ARMS="${ARMS:-baseline on}"
 SCENARIOS="${SCENARIOS:-s1-hook-install s2-vector-recall s3-rename-impact}"
@@ -126,7 +129,13 @@ run_cli() {  # cli arm scenario outfile
         > "$out" 2> "${out%.jsonl}.err")
       ;;
     codex|pi)
-      echo "run_cli: $cli not implemented — see eval/README.md" >&2; return 9 ;;
+      if [ -x "$EVAL_DIR/clis/$cli.sh" ]; then
+        ( WT="$wt" CFG="$cfg" PROMPT="$prompt" OUT="$out" MAX_TURNS="$MAX_TURNS" \
+          "$EVAL_DIR/clis/$cli.sh" )
+      else
+        echo "run_cli: $cli needs an executable eval/clis/$cli.sh reading \$WT \$CFG \$PROMPT \$OUT (see eval/README.md)" >&2
+        return 9
+      fi ;;
   esac
 }
 
@@ -171,7 +180,18 @@ for arm in $ARMS; do
   for scenario in $SCENARIOS; do
     for cli in $CLIS; do
       out="$RESULTS/$scenario-$arm.$cli.jsonl"
-      if [ -s "$out" ]; then log "skip $scenario/$arm/$cli (exists)"; continue; fi
+      meta="$out.meta"
+      identity="head=$EVAL_HEAD arm=$arm cli=$cli payload=$(sha256sum "$DEPLOY_PROMPT" 2>/dev/null | cut -c1-16)"
+      if [ -s "$out" ]; then
+        if [ -f "$meta" ] && [ "$(cat "$meta")" = "$identity" ]; then
+          log "skip $scenario/$arm/$cli (exists, same identity)"
+          continue
+        fi
+        log "stale $scenario/$arm/$cli (identity changed) — archiving and rerunning"
+        mkdir -p "$RESULTS/stale"
+        mv "$out" "$RESULTS/stale/$scenario-$arm.$cli.$(date +%s).jsonl"
+      fi
+      printf '%s\n' "$identity" > "$meta"
       log "run  scenario=$scenario arm=$arm cli=$cli"
       run_cli "$cli" "$arm" "$scenario" "$out" || echo "run failed rc=$? ($scenario/$arm/$cli)"
     done
@@ -179,4 +199,6 @@ for arm in $ARMS; do
 done
 
 log "scoring"
-python3 "$EVAL_DIR/score.py" --results "$RESULTS" --scenarios-dir "$EVAL_DIR/scenarios" $ARMS
+# No arm filter: scores.json must always carry every arm's rows on disk, so a
+# candidate-only invocation cannot wipe the baseline rows the gate needs.
+python3 "$EVAL_DIR/score.py" --results "$RESULTS" --scenarios-dir "$EVAL_DIR/scenarios"

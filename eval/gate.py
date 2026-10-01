@@ -8,11 +8,15 @@ from pathlib import Path
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--results", required=True, help="dir containing scores.json")
+    ap.add_argument("--scenarios-dir", help="dir of scenario rubrics; every scenario must have rows on both sides")
     ap.add_argument("--candidate", required=True)
     ap.add_argument("--baseline", default="baseline")
     ap.add_argument("--turns-slack", type=float, default=1.5)
     args = ap.parse_args()
     rows = json.loads((Path(args.results) / "scores.json").read_text())
+    expected = None
+    if args.scenarios_dir:
+        expected = sorted(p.stem for p in Path(args.scenarios_dir).glob("*.json"))
     base, cand = {}, {}
     for r in rows:
         if r["cli"] != "claude":
@@ -29,7 +33,7 @@ def main():
     if not cand:
         print(f"GATE FAIL: no {args.candidate} rows in scores.json")
         sys.exit(1)
-    for scenario in sorted(set(base) | set(cand)):
+    for scenario in sorted(expected if expected is not None else set(base) | set(cand)):
         b = base.get(scenario, [])
         c = cand.get(scenario, [])
         if not b or not c:

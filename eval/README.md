@@ -30,16 +30,17 @@ with no pixel guidance at all.
 ```bash
 CLIS=claude ARMS="baseline on" eval/run.sh          # defaults: 3 scenarios, 20-turn budget
 CLIS=claude ARMS="vslim" eval/run.sh                # then:
-python3 eval/gate.py --results eval/results --candidate vslim
+python3 eval/gate.py --results eval/results --scenarios-dir eval/scenarios --candidate vslim
 ```
 
 ## CLIs
 
 `claude` is the scored default (headless `-p`, stream-json). `agy` works via
 `-p --output-format stream-json` (its global pixel plugin is toggled off for
-non-`on` arms and restored). `codex` and `pi` are extension points: drop an
-executable `eval/clis/<name>.sh` that reads `$WT`, `$CFG`, `$PROMPT`, `$OUT`
-and emits a final-answer JSON line; until then run.sh skips them with rc 9.
+non-`on` arms and restored). `codex` and `pi` plug in by dropping an
+executable `eval/clis/<name>.sh` that reads `$WT`, `$CFG`, `$PROMPT`, `$OUT`,
+`$MAX_TURNS` and writes the run's stream transcript to `$OUT`; run.sh picks
+it up automatically and skips the CLI with rc 9 until it exists.
 
 ## Results
 
@@ -48,16 +49,16 @@ machine-readable scoreboard consumed by `gate.py`.
 
 ### Measured on this branch (claude / deepseek-v4-flash, 20-turn budget, Sept 2026)
 
-| arm | hooks | s1 score | s2 score | s3 score | mean |
+| arm | hooks | s1 score | s2 score | s3 score | mean of shown |
 | --- | --- | --- | --- | --- | --- |
-| `baseline` | none | 15.5 (n2) | 10.5–11.0 (n2–3) | 12.0 (n2–3) | 12.0–13.0 |
-| `on` (14.3 KB doc, full hooks) | packet + relays | 11.5 (n2) | 6.5 (n2) | 11.5 (n2) | 11.3 |
-| `vslim` (1.1 KB doc, full hooks) | packet + relays | 9.5 (n2) | 10.5 (n2) | 11.0 (n2) | 12.0 |
-| `vquiet` (1.1 KB doc, session-start only) | none mid-session | 16.0 (n1) | 10.0 (n1) | 12.0 (n1) | 12.8 |
+| `baseline` | none | 15.5 (n2) | 10.5–11.5 (n2–3) | 12.0 (n2–3) | 12.8–13.0 |
+| `on` (14.3 KB doc, full hooks) | packet + relays | 11.5 (n2) | 6.5 (n2) | 11.5 (n2) | 9.8 |
+| `vslim` (1.1 KB doc, full hooks) | packet + relays | 9.5 (n2) | 10.5 (n2) | 11.0 (n2) | 10.3 |
+| `vquiet` (1.1 KB doc, session-start only) | none mid-session | 16.0 (n1) | 10.0 (n1) | 12.0 (n1) | 12.7 |
 | **`vfinal` (shipped 2.9 KB, session-start only)** | none mid-session | **16.0** | **13.0** | **12.0** | **13.7** |
 
 Final gate (`vfinal` vs `baseline`, turns slack ×1.5): **PASS** — s1 16.0 vs 15.0,
-s2 13.0 vs 10.5 (2 turns vs 20), s3 12.0 vs 12.0.
+s2 13.0 vs 11.5 (2 turns vs 20), s3 12.0 vs 12.0.
 
 Two findings survived repetition:
 
