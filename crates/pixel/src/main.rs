@@ -4581,11 +4581,27 @@ fn dev_install_path(home: &Path) -> PathBuf {
         .join(pixel_install::config::PIXEL_DEV_EXECUTABLE)
 }
 
-/// True when `path` has a `target` directory component: a cargo build
-/// output, never an install location.
+/// The opening of the `CACHEDIR.TAG` cargo writes at the root of every
+/// build directory: the standard signature, then cargo's own line, so
+/// another tool's cache directory is not taken for a build.
+const CARGO_CACHEDIR_TAG: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55\n\
+# This file is a cache directory tag created by cargo.";
+
+/// True when `path` is cargo build output, never an install location: it
+/// has a `target` directory component, or a directory above it holds
+/// cargo's `CACHEDIR.TAG`. The tag is what still names a build directory
+/// once `canonicalize` has resolved a `target/` symlink into a cache or a
+/// `CARGO_TARGET_DIR` elsewhere: without it the running test binary was
+/// taken for an install and overwritten (#513).
 fn is_cargo_target_path(path: &Path) -> bool {
     path.components()
         .any(|c| c.as_os_str() == std::ffi::OsStr::new("target"))
+        || path.ancestors().skip(1).any(is_cargo_build_dir)
+}
+
+/// `dir` holds the `CACHEDIR.TAG` cargo writes in a build directory.
+fn is_cargo_build_dir(dir: &Path) -> bool {
+    std::fs::read(dir.join("CACHEDIR.TAG")).is_ok_and(|tag| tag.starts_with(CARGO_CACHEDIR_TAG))
 }
 
 /// Every `pixel` executable on `path_var`, in PATH order, symlinks
@@ -4837,6 +4853,49 @@ mod upgrade_target_tests {
         assert_eq!(t.path, d.join(".local/bin/pixel"));
         assert_eq!(t.source, "default");
         assert!(!t.explicit);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #513: `target/` symlinked into a build cache (or a
+    /// `CARGO_TARGET_DIR` elsewhere) canonicalizes to a path with no
+    /// `target` component. Cargo's `CACHEDIR.TAG` above it still marks it
+    /// as build output, for the running binary and a PATH entry alike; a
+    /// cache tag written by another tool does not.
+    #[test]
+    fn a_build_dir_reached_through_a_symlink_is_still_build_output() {
+        let d = sandbox("symlinked-target");
+        let build = d.join("cache/build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(
+            build.join("CACHEDIR.TAG"),
+            [CARGO_CACHEDIR_TAG, b"\n# For information about cache directory tags see https://bford.info/cachedir/\n"].concat(),
+        )
+        .unwrap();
+        let built = touch(&build.join("debug/pixel"));
+        std::fs::create_dir_all(d.join("repo")).unwrap();
+        std::os::unix::fs::symlink(&build, d.join("repo/target")).unwrap();
+        let via_link = d.join("repo/target/debug/pixel");
+        assert_eq!(via_link.canonicalize().unwrap(), built);
+        assert!(!built.components().any(|c| c.as_os_str() == "target"));
+        assert!(is_cargo_target_path(&built));
+
+        let path_var = std::env::join_paths([built.parent().unwrap()]).unwrap();
+        let t = resolve_upgrade_target(None, Some(via_link), Some(&path_var), &d);
+        assert_eq!(
+            t.path,
+            d.join(".local/bin/pixel"),
+            "neither the exe nor PATH"
+        );
+        assert_eq!(t.source, "default");
+
+        std::fs::write(
+            build.join("CACHEDIR.TAG"),
+            b"Signature: 8a477f597d28d172789f06886806bc55\n# Created by some other tool.\n",
+        )
+        .unwrap();
+        assert!(!is_cargo_target_path(&built));
+        let t = resolve_upgrade_target(None, Some(built.clone()), None, &d);
+        assert_eq!((t.path, t.source), (built, "running binary"));
         let _ = std::fs::remove_dir_all(&d);
     }
 
