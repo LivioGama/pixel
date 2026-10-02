@@ -220,6 +220,37 @@
       {{ end }}
     </section>
 
+    {{/* ---------- toolbox: what the agent can ask beyond outlines ---------- */}}
+    {{/* The six questions and their excerpts are data/toolbox.toml: real output on Requests, with the commands that regenerate it. The command under each question is the one the installed prompt maps it to; the agent picks it, nobody types it. The completeness line restates the prompt's "Reading results" (closed_world is always false). The recall item restates ARCHITECTURE.md (pixel-recall, On-disk state): a local corpus; its one download is the embedding model, which carries no session text. The three refusals beside it restate the How cards and ARCHITECTURE.md (`classify` off by default; `search-meaning` embeds locally, so the claim is about LLMs, not every model), which is why the specs below no longer repeat them. */}}
+    {{ $tb := hugo.Data.toolbox }}
+    <section class="section section--center wrap" id="toolbox" aria-labelledby="toolbox-title">
+      <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Toolbox</span></p>
+      <header class="section__head" data-reveal>
+        <h2 id="toolbox-title">What your agent <span class="glow">gets.</span></h2>
+        <p>Before and after an edit, your agent has questions about your code. Pixel answers them from the index on your machine. The agent picks the command; you keep prompting as usual.</p>
+      </header>
+      <p class="toolbox__context" data-reveal><span>Real answers, shortened, on Requests, the Python HTTP library.</span> <span><code>{{ $tb.repo }}</code> at <code>{{ $tb.commit }}</code> &middot; Pixel {{ $tb.pixel }}</span></p>
+      <ul class="toolbox" data-reveal="stagger">
+        {{ range $tb.card }}
+        <li class="toolbox__card">
+          <h3 class="toolbox__q">{{ .question | markdownify }}</h3>
+          <p class="toolbox__cmd"><code>{{ .command }}</code></p>
+          <pre class="toolbox__out"><code>{{ range .lines }}<span{{ with .tier }} class="toolbox__{{ . }}"{{ end }}>{{ with .tier }}{{ printf "%-9s" . }}{{ end }}{{ .text }}</span>{{ end }}</code></pre>
+        </li>
+        {{ end }}
+      </ul>
+      {{/* The two tiers as pixel-graph defines them (TierSelection in predicate.rs): exact is resolved in the same file or through an import, probable by a name unique among files connected by imports. */}}
+      <p class="toolbox__key" data-reveal><span class="toolbox__k"><span class="toolbox__exact">exact</span> traced through the file or its imports</span> <span class="toolbox__k"><span class="toolbox__probable">probable</span> matched by a name only one connected file defines</span> <span class="toolbox__k"><b>depth&nbsp;1</b> calls it directly, <b>depth&nbsp;2</b> calls a caller</span></p>
+      <p class="toolbox__honest" data-reveal><strong>Every answer says whether it is complete.</strong> Zero callers means none were found, not that none exist: a call made through a callback or a dynamic lookup can escape a static index.</p>
+      <ul class="toolbox__not" data-reveal="stagger">
+        <li><strong>Your past sessions too</strong><code>pixel recall</code> searches the agent sessions already on your disk. Nothing is uploaded.</li>
+        <li><strong>No MCP server</strong>A command-line tool and hooks: the agent calls it from the shell it already has.</li>
+        <li><strong>No hosted index</strong>The index lives in <code>.pixel/</code>, inside your repository.</li>
+        <li><strong>No LLM in the loop</strong>Answers come from the index, not a chat model. The one LLM feature, <code>pixel classify</code>, is off by default.</li>
+      </ul>
+      <p class="toolbox__more" data-reveal><a class="link" href="{{ "docs/" | relURL }}#commands">All commands</a></p>
+    </section>
+
     {{/* ---------- how it works ---------- */}}
     <section class="section wrap" id="how" aria-labelledby="how-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Architecture</span></p>
@@ -271,10 +302,7 @@
       <dl class="specs" data-reveal>
         <div><dt>Language</dt><dd>Rust</dd></div>
         <div><dt>Licence</dt><dd>MIT</dd></div>
-        <div><dt>Architecture</dt><dd>CLI, hooks and a local daemon</dd></div>
         <div><dt>Platforms</dt><dd>macOS on Apple Silicon, Linux</dd></div>
-        <div><dt>Account</dt><dd>None</dd></div>
-        <div><dt>Telemetry</dt><dd>None</dd></div>
       </dl>
       <p class="numbers__more"><a class="link" href="{{ "docs/" | relURL }}#jobs">See the workflow and Git examples</a> · <a class="link" href="{{ "classify/" | relURL }}">Optional classification</a></p>
     </section>
