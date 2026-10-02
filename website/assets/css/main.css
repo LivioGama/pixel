@@ -787,7 +787,12 @@ a.agents__item { text-decoration: none; }
   .agents__item span { font-size: 0.92rem; }
 }
 
-/* ---------- your number ---------- */
+/* ---------- your number: the checks that close the Install chapter ---------- */
+.verify { margin-top: clamp(48px, 7vw, 88px); padding-top: clamp(40px, 6vw, 64px); border-top: 1px solid var(--line); text-align: left; }
+.verify__head { max-width: 46rem; margin: 0 auto clamp(24px, 4vw, 40px); text-align: center; }
+.verify__head h3 { font: 700 clamp(1.9rem, 3.6vw, 3rem)/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; }
+.verify__head p { margin: 16px auto 0; max-width: 34em; color: var(--ink-soft); font-size: 1.1rem; text-wrap: balance; }
+.verify__head code { background: var(--ground-2); padding: 1px 6px; border-radius: 3px; }
 .yours { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; }
 .yours__step { position: relative; display: grid; grid-template-columns: 28px minmax(0, 1fr) minmax(280px, 0.9fr); align-items: center; gap: 16px 24px; padding: clamp(22px, 3vw, 32px); border-radius: 8px; background: color-mix(in srgb, var(--panel) 55%, transparent); box-shadow: inset 0 0 0 1px var(--line); }
 .yours__n { width: 28px; height: 28px; display: grid; place-items: center; font: 600 0.85rem/1 var(--mono); color: var(--on-green); background: var(--green); border-radius: 2px; box-shadow: 0 0 12px rgba(34, 197, 94, 0.45); }
