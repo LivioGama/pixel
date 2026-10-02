@@ -48,23 +48,26 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   the completeness caveat, `recall`, and the no-MCP / no-hosted-index /
   no-LLM row the specs no longer repeat), local mechanics and cold-start
   measurement (`#how`), compatibility (`#agents`), questions
-  (`#faq`), installation (`#install`) closed by the own-repo checks
-  (`#your-number`, which need the binary, so they come after it), and the
-  closing map message. Hero, nav and closing share one primary action: try
-  Pixel on your repo, which lands on `#install`. Installation stays in one terminal with
-  Script, Read it first, Homebrew and Your agent variants, beside a visual
-  setup sequence. Shell commands stay on one line and scroll within the
-  terminal on narrow screens. The own-repo checks stack vertically under the setup; the three specs
-  (language, licence, platforms) sit in one row, then labelled rows on
-  mobile. Keep
+  (`#faq`), installation (`#install`) and the closing map message. Hero,
+  nav and closing share one primary action: try Pixel on your repo, which
+  lands on `#install`. Installation is four steps: step 1 (get the binary)
+  full width, its one terminal switching between Script, Read it first,
+  Homebrew and Your agent (which says the agent runs steps 2 and 3), then
+  `pixel install`, the optional `pixel doctor .` and the optional
+  `pixel audit` (`#your-number`) in one row. Every command has its own
+  Copy, never a chained one. On phones the variant tabs scroll on one line
+  and commands wrap. No version number appears in the chapter; its figure
+  links the benchmarks page that carries it. The three specs (language,
+  licence, platforms) sit in one row, then labelled rows on mobile. Keep
   `$agentPrompt` in step with the root README. The inspected script remains
   linked to the released tag; never deploy while validating a branch.
 - The wall uses `data/read_savings.toml`; the evidence compares whole files
   with signatures, not billed tokens or task outcomes. The scope board
   uses `data/scope.toml`: the task packet of the Problem trace's recording,
   with its version, date and the files it missed visible. The
-  own-repo examples name their Requests commit and Pixel version, and link
-  `/benchmarks/` for methods and limits. The cold-start track restates that
+  Install step 4
+  figure (Requests, −88%) links `/benchmarks/`, which names the commit,
+  the version, the method and its limits. The cold-start track restates that
   page’s private Rails fresh-clone measurement (Apple M2, median of three
   runs); refresh its figure, legend and cell split together.
 - Detailed specialist content lives on secondary pages: the alternatives

@@ -342,97 +342,70 @@
     </section>
 
     {{/* ---------- install ---------- */}}
+    {{/* The two commands of the title are steps 1 and 2; 3 and 4 are marked optional. Step 1 is full width so the one-liner shows whole, with its four ways in as tabs: the script piped to sh, the same script read first, Homebrew, or the prompt for an agent, which then runs steps 2 and 3 itself. Every command has its own Copy, never a chained "copy all", so each action is read before it runs. Platforms: the targets release.yml builds. No version number: the figure in step 4 restates "Measure it on your own code" in content/benchmarks.md (Requests at 611c616), which carries the version; change it there first, then here. */}}
     <section class="section wrap section--center" id="install" aria-labelledby="install-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Install</span></p>
       <header class="section__head" data-reveal>
         <h2 id="install-title"><span class="glow">Two commands.</span> That's the whole setup.</h2>
+        <p>Run them inside your repository.</p>
       </header>
-      <div class="setup">
-        <div class="setup__main" data-reveal>
-          {{/* One terminal, four ways in: the script piped to sh, the same script read before it runs, Homebrew, or the prompt for an agent to do it. The switch shows that variant's lines and sets what Copy all copies. */}}
-          <div class="term" data-term>
-            <div class="term__bar">
-              <span class="term__dots" aria-hidden="true"><span></span><span></span><span></span></span>
-              <div class="term__switch" role="group" aria-label="Install with">
-                <button type="button" aria-pressed="true" data-variant="curl" data-copy-all="{{ $curl }} && pixel install && pixel doctor .">Script</button>
-                <button type="button" aria-pressed="false" data-variant="inspect" data-copy-all="{{ $inspect }} && pixel install && pixel doctor .">Read it first</button>
-                <button type="button" aria-pressed="false" data-variant="brew" data-copy-all="{{ $brew }} && pixel install && pixel doctor .">Homebrew</button>
-                <button type="button" aria-pressed="false" data-variant="agent" data-copy-all="{{ $agentPrompt }}">Your agent</button>
-              </div>
-              <button class="cmd__copy term__copy" type="button" data-copy="{{ $curl }} && pixel install && pixel doctor .">Copy all</button>
-            </div>
-            <pre class="term__body" tabindex="0" role="region" aria-label="Installation commands"><code><span data-line="curl"><span class="term__p">$</span> {{ $curl }}</span><span data-line="inspect" hidden><span class="term__p">$</span> curl -fsSL -o install.sh {{ $scriptURL }}</span><span data-line="inspect" hidden><span class="term__p">$</span> less install.sh</span><span data-line="inspect" hidden><span class="term__p">$</span> sh install.sh</span><span data-line="brew" hidden><span class="term__p">$</span> {{ $brew }}</span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel install</span><span data-line="curl inspect brew"><span class="term__p">$</span> pixel doctor .</span><span data-line="agent" hidden><span class="term__c"># paste into Claude Code, Codex, Pi or any agent with a shell</span></span><span data-line="agent" hidden><span class="term__p">&gt;</span> {{ $agentPrompt }}</span></code></pre>
-          </div>
-          <p class="term__hint">Scroll sideways to read the full commands.</p>
-          <noscript><p class="install__more">For Homebrew or the download-and-read variant, see <a class="link" href="{{ "docs/" | relURL }}#install">all installation methods</a>.</p></noscript>
-          <p class="install__more">Run inside your repo. Restart your agent after <code>pixel install</code>.</p>
-          <p class="install__more"><a class="link" href="{{ "docs/" | relURL }}#install">All installation details</a> · <a class="link" href="{{ site.Params.github_url }}/discussions" target="_blank" rel="noopener">Setup help</a></p>
+      <div class="get" data-term data-reveal>
+        <div class="get__head">
+          <span class="get__n" aria-hidden="true">1</span>
+          <h3>Get the binary</h3>
+          <p class="get__os">Apple Silicon Macs · Linux x86_64 and arm64 · no Windows build yet</p>
         </div>
-        <aside class="setup__guide" aria-labelledby="setup-guide-title" data-reveal>
-          <h3 id="setup-guide-title">From download to a checked setup</h3>
-          <ol class="setup__flow">
-            <li><span class="setup__n" aria-hidden="true">1</span><div><strong>Get the binary</strong><p>Apple Silicon Macs · Linux x86_64 / arm64. No Windows build yet.</p><a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">Read the script</a></div></li>
-            <li><span class="setup__n" aria-hidden="true">2</span><div><strong>Connect your agent</strong><p>Hooks and rules in its settings.</p><a class="link" href="{{ "for/" | relURL }}">Files changed &amp; removal</a></div></li>
-            <li><span class="setup__n" aria-hidden="true">3</span><div><strong>Check the setup</strong><p><code>pixel doctor .</code> checks it. Optional, inspectable.</p><a class="link" href="#your-number">Then measure your own code</a></div></li>
-          </ol>
-          <p class="setup__note">Script download: SHA&#8209;256 checked → <code>~/.local/bin/pixel</code><br><code>PIXEL_INSTALL_DIR</code> changes the destination.</p>
-        </aside>
+        <div class="term">
+          <div class="term__bar">
+            <div class="term__switch" role="group" aria-label="Install with">
+              <button type="button" aria-pressed="true" data-variant="curl" data-copy-variant="{{ $curl }}">Script</button>
+              <button type="button" aria-pressed="false" data-variant="inspect" data-copy-variant="{{ $inspect }}">Read it first</button>
+              <button type="button" aria-pressed="false" data-variant="brew" data-copy-variant="{{ $brew }}">Homebrew</button>
+              <button type="button" aria-pressed="false" data-variant="agent" data-copy-variant="{{ $agentPrompt }}">Your agent</button>
+            </div>
+            <button class="cmd__copy term__copy" type="button" data-copy="{{ $curl }}">Copy</button>
+          </div>
+          <pre class="term__body" tabindex="0" role="region" aria-label="Download command"><code><span data-line="curl"><span class="term__p">$</span> {{ $curl }}</span><span data-line="inspect" hidden><span class="term__p">$</span> curl -fsSL -o install.sh {{ $scriptURL }}</span><span data-line="inspect" hidden><span class="term__p">$</span> less install.sh</span><span data-line="inspect" hidden><span class="term__p">$</span> sh install.sh</span><span data-line="brew" hidden><span class="term__p">$</span> {{ $brew }}</span><span data-line="agent" hidden><span class="term__c"># paste into Claude Code, Codex, Pi or any agent with a shell</span></span><span data-line="agent" hidden><span class="term__p">&gt;</span> {{ $agentPrompt }}</span></code></pre>
+        </div>
+        <p class="get__note" data-line="curl inspect brew">SHA&#8209;256 checked, into <code>~/.local/bin/pixel</code> (<code>PIXEL_INSTALL_DIR</code> changes it). <a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">Read the script</a> · <a class="link" href="{{ "docs/" | relURL }}#install">All installation methods</a></p>
+        <p class="get__note get__note--agent" data-line="agent" hidden><strong>Your agent runs steps 2 and 3 for you</strong>, then tells you what changed. <a class="link" href="{{ "docs/" | relURL }}#install">All installation methods</a></p>
+        <noscript><p class="get__note">For Homebrew, the download-and-read variant or the agent prompt, see <a class="link" href="{{ "docs/" | relURL }}#install">all installation methods</a>.</p></noscript>
       </div>
-      {{/* ---------- your number: the proof on the visitor's own code, right after the install it needs ---------- */}}
-      {{/* The first two figures restate "Measure it on your own code" in content/benchmarks.md (a fresh clone of psf/requests at 611c616): change them there first, then here. The third is the maintainer's own pixel token-savings report, moved here from the card that used to close the objections. `#your-number` is the anchor the old "Try Pixel" buttons used; it still lands here. */}}
-      <section class="verify" id="your-number" aria-labelledby="yours-title">
-        <header class="verify__head" data-reveal>
-          <h3 id="yours-title">Don't trust our numbers. <span class="glow">Get yours.</span></h3>
-          <p>Run these checks inside a Git repository of yours. The first command builds the local index in <code>.pixel/</code> and adds it to <code>.gitignore</code>. No agent session or account needed.</p>
-        </header>
-        <ol class="yours" data-reveal="stagger">
-          <li class="yours__step">
-            <span class="yours__n" aria-hidden="true">1</span>
-            <h3>Your twenty largest files</h3>
-            <div class="cmd">
-              <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel audit</code>
-              <button class="cmd__copy" type="button" data-copy="pixel audit">Copy</button>
-            </div>
-            <p>On Requests at <code>611c616</code>, with Pixel 0.5.1, estimated as bytes ÷ 4: <strong class="yours__waste">95,693 tokens</strong> for the twenty files whole against <strong class="yours__kept">11,447</strong> for their outlines: &minus;88%.</p>
-          </li>
-          <li class="yours__step">
-            <span class="yours__n" aria-hidden="true">2</span>
-            <h3>The one file your agent keeps opening</h3>
-            <div class="cmd">
-              <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel list-signatures &lt;file&gt;</code>
-              <button class="cmd__copy" type="button" data-copy="pixel list-signatures ">Copy</button>
-            </div>
-            <p>On the same Requests clone, <code>models.py</code> (1,184 lines): <code>full read 10365 tok, pixel answer 641 tok (-94%)</code>, in well under a second.</p>
-          </li>
-          <li class="yours__step">
-            <span class="yours__n" aria-hidden="true">3</span>
-            <h3>Your local volumes and estimates</h3>
-            <div class="cmd">
-              <code><span class="cmd__prompt" aria-hidden="true">$</span> pixel token-savings</code>
-              <button class="cmd__copy" type="button" data-copy="pixel token-savings">Copy</button>
-            </div>
-            <p>After a few sessions, inspect measured Pixel output volumes and versioned workflow estimates. These do not measure all agent reads or billed cost.</p>
-          </li>
-        </ol>
-        <p class="numbers__more" data-reveal>The method behind the count: <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">measure it on your own code</a>.</p>
-      </section>
-      {{/* The call for more voices, under the install it follows (the report needs a few sessions), not in the Proof chapter, where it drew attention to an empty list of quotes: a Show and tell discussion prefilled with what a quote needs (the numbers, the repository, the agent). A quote only moves to data/voices.toml with its author's written consent. */}}
+      <ol class="steps" data-reveal="stagger">
+        <li class="steps__item">
+          <span class="get__n" aria-hidden="true">2</span>
+          <h3>Connect your agent</h3>
+          <div class="cmd"><code><span class="cmd__prompt" aria-hidden="true">$</span> pixel install</code><button class="cmd__copy" type="button" data-copy="pixel install">Copy</button></div>
+          <p>Hooks and rules in its settings. Restart your agent after. <a class="link" href="{{ "for/" | relURL }}">Files changed &amp; removal</a></p>
+        </li>
+        <li class="steps__item steps__item--opt">
+          <span class="get__n" aria-hidden="true">3</span>
+          <h3>Check it <em>optional</em></h3>
+          <div class="cmd"><code><span class="cmd__prompt" aria-hidden="true">$</span> pixel doctor .</code><button class="cmd__copy" type="button" data-copy="pixel doctor .">Copy</button></div>
+          <p>A read-only check of the install and the index. <a class="link" href="{{ site.Params.github_url }}/discussions" target="_blank" rel="noopener">Setup help</a></p>
+        </li>
+        {{/* `#your-number` is the anchor older "Try Pixel" links used; it lands on the first figure of the visitor's own. */}}
+        <li class="steps__item steps__item--opt" id="your-number">
+          <span class="get__n" aria-hidden="true">4</span>
+          <h3>See your number <em>optional</em></h3>
+          <div class="cmd"><code><span class="cmd__prompt" aria-hidden="true">$</span> pixel audit</code><button class="cmd__copy" type="button" data-copy="pixel audit">Copy</button></div>
+          <p>Your twenty largest files whole against their outlines. On Requests: <strong>&minus;88%</strong>. <a class="link" href="{{ $bench }}#measure-it-on-your-own-code">How the count works</a></p>
+        </li>
+      </ol>
+      {{/* The call for more voices, after the install it follows (the report needs a few sessions): a Show and tell discussion prefilled with what a quote needs (the numbers, the repository, the agent). A quote only moves to data/voices.toml with its author's written consent. */}}
       {{ $title := "My pixel token-savings numbers" }}
       {{ $body := "Repository (language, rough size):\nAgent:\nHow long I have run Pixel:\n\n```\n<paste the output of pixel token-savings>\n```\n\nOK to quote this on pixel-cli.dev under my name and role? (yes / no)" }}
       {{ $share := printf "%s/discussions/new?category=show-and-tell&title=%s&body=%s" site.Params.github_url (replace (urlquery $title) "+" "%20") (replace (urlquery $body) "+" "%20") }}
       <aside class="invite" data-reveal>
-        <div class="invite__text">
-          <h3>Running Pixel on your own code?</h3>
-          <p>Post what <code>pixel token-savings</code> reports, with your repository's language and size and the agent you run. With your permission, it can be quoted here under your name.</p>
-        </div>
+        <p class="invite__text"><strong>Don't trust our numbers. Get yours.</strong> After a few agent sessions, <code>pixel token-savings</code> reports what Pixel's answers spared on your code. Post it, and with your permission we may quote you here.</p>
         <a class="button button--ghost invite__cta" href="{{ $share }}" target="_blank" rel="noopener">Share your numbers</a>
       </aside>
       <ul class="badges" data-reveal="stagger">
-        <li>{{ partial "icon.html" (dict "name" "laptop" "size" 18) }}Your index stays on your machine</li>
-        <li>{{ partial "icon.html" (dict "name" "shield" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">Zero telemetry</a></li>
-        <li>{{ partial "icon.html" (dict "name" "user" "size" 18) }}No account, no server</li>
-        <li>{{ partial "icon.html" (dict "name" "doc" "size" 18) }}MIT licensed</li>
-        <li>{{ partial "icon.html" (dict "name" "trash" "size" 18) }}Hooks gone in one <code>pixel uninstall</code></li>
+        <li>{{ partial "icon.html" (dict "name" "laptop" "size" 18) }}Index stays local</li>
+        <li>{{ partial "icon.html" (dict "name" "shield" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">No telemetry</a></li>
+        <li>{{ partial "icon.html" (dict "name" "user" "size" 18) }}No account</li>
+        <li>{{ partial "icon.html" (dict "name" "doc" "size" 18) }}MIT</li>
+        <li>{{ partial "icon.html" (dict "name" "trash" "size" 18) }}One <code>pixel uninstall</code></li>
       </ul>
     </section>
 
@@ -1090,8 +1063,8 @@
     })();
 
     /* Install: the Script / Read it first / Homebrew / Your agent switch shows the lines of
-       that variant (a line names every variant it belongs to) and sets what
-       Copy all copies. */
+       that variant (a line names every variant it belongs to), the note under it, and sets
+       what step 1's Copy copies: that variant alone, never the later steps. */
     (function () {
       var term = document.querySelector('[data-term]');
       if (!term) return;
@@ -1101,7 +1074,7 @@
         b.addEventListener('click', function () {
           buttons.forEach(function (o) { o.setAttribute('aria-pressed', o === b); });
           [].forEach.call(term.querySelectorAll('[data-line]'), function (l) { l.hidden = l.dataset.line.split(' ').indexOf(b.dataset.variant) < 0; });
-          copy.setAttribute('data-copy', b.dataset.copyAll);
+          copy.setAttribute('data-copy', b.dataset.copyVariant);
         });
       });
     })();
