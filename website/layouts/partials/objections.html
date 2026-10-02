@@ -1,6 +1,7 @@
 {{/* The objections of data/objections.toml, their placeholders filled in:
-     a slice of (dict "question" "answer"), `answer` being the paragraphs as
-     one HTML string. The "Fair questions" chapter renders it and the home's
+     a slice of (dict "question" "answer" "audience" "check"), `answer` being
+     the paragraphs as one HTML string and `check` the optional "Check it"
+     line the home shows under it. The "Fair questions" chapter renders it and the home's
      FAQPage (partials/head.html) serialises it, so both carry the same text.
      Call with (dict "abs" true) for absolute links (the JSON-LD). */}}
 {{ $big := partial "wall-row.html" . }}
@@ -28,6 +29,9 @@
     {{ with findRE `\{[a-z.]+\}` $p }}{{ errorf "data/objections.toml: unknown placeholder %v" . }}{{ end }}
     {{ $paras = $paras | append (printf "<p>%s</p>" $p) }}
   {{ end }}
-  {{ $out = $out | append (dict "question" .question "answer" (delimit $paras "\n")) }}
+  {{ $check := .check | default "" }}
+  {{ range $k, $v := $vars }}{{ $check = replace $check $k $v }}{{ end }}
+  {{ with findRE `\{[a-z.]+\}` $check }}{{ errorf "data/objections.toml: unknown placeholder %v" . }}{{ end }}
+  {{ $out = $out | append (dict "question" .question "answer" (delimit $paras "\n") "audience" (.audience | default "dev") "check" $check) }}
 {{ end }}
 {{ return $out }}

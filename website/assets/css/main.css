@@ -833,6 +833,15 @@ a.agents__item { text-decoration: none; }
 
 
 /* ---------- questions ---------- */
+/* Two columns by audience, aligned on top; each answer ends on its "Check it" line. */
+.faq-cols { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: clamp(24px, 4vw, 56px); align-items: start; text-align: left; }
+.faq-col { min-width: 0; }
+.faq-col__k { margin: 0 0 12px; font: 600 0.75rem/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase; color: var(--green-hi); }
+.faq-cols .faq { max-width: none; }
+.faq__check { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 10px; color: var(--ink-soft); font-size: 0.92rem; }
+.faq__check span { font: 600 0.7rem/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--green-hi); }
+.faq__check code { color: var(--green-hi); }
+@media (max-width: 820px) { .faq-cols { grid-template-columns: minmax(0, 1fr); gap: 28px; } }
 .faq { max-width: 820px; border-top: 1px solid var(--line); }
 .faq details { border-bottom: 1px solid var(--line); }
 .faq summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 14px; padding: 20px 0; font-weight: 650; font-size: 1.15rem; }
