@@ -49,16 +49,19 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   no-LLM row), local mechanics (`#how`: three steps, the language tiers
   under them, read from `partials/languages.html`, and the cold-start
   measurement), compatibility (`#agents`), questions
-  (`#faq`), installation (`#install`) and the closing map message. Hero,
-  nav and closing share one primary action: try Pixel on your repo, which
-  lands on `#install`. Installation is four steps: step 1 (get the binary)
+  (`#faq`) and installation (`#install`), which ends the page: there is
+  no closing chapter. Hero and nav share one primary action: try Pixel on
+  your repo, which lands on `#install`. Installation is four steps: step 1 (get the binary)
   full width, its one terminal switching between Script, Read it first,
   Homebrew and Your agent (which says the agent runs steps 2 and 3), then
   `pixel install`, the optional `pixel doctor .` and the optional
   `pixel audit` (`#your-number`) in one row. Every command has its own
   Copy, never a chained one. On phones the variant tabs scroll on one line
-  and commands wrap. No version number appears in the chapter; its figure
-  links the benchmarks page that carries it. Keep
+  and commands wrap. The chapter ends on the proofs an evaluator checks
+  before running the script (signed releases, no telemetry, no account, MIT,
+  changelog). No Pixel version appears in the home's copy: the data files
+  and the method pages each figure links carry it; the footer's version is
+  read from `data/cli.toml`. Keep
   `$agentPrompt` in step with the root README. The inspected script remains
   linked to the released tag; never deploy while validating a branch.
 - The wall uses `data/read_savings.toml`; the evidence compares whole files

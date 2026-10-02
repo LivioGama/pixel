@@ -91,7 +91,7 @@
             </div>
           </div>
           {{ end }}
-          <p class="session__foot">One square is 25 estimated tokens (UTF-8 bytes ÷ 4), Pixel 0.5.0 &middot; <button class="session__replay" type="button" data-session-replay>Replay</button> &middot; <a class="link" href="{{ $bench }}#well-known-files">How we measure</a></p>
+          <p class="session__foot">One square is 25 estimated tokens (UTF-8 bytes ÷ 4) &middot; <button class="session__replay" type="button" data-session-replay>Replay</button> &middot; <a class="link" href="{{ $bench }}#well-known-files">How we measure</a></p>
         </div>
       </figure>
       <a class="hero__down" href="#problem" aria-label="Scroll to the problem">
@@ -137,7 +137,7 @@
         <p class="trace__sum">{{ partial "icon.html" (dict "name" "hourglass" "size" 14) }}<span>{{ $n }} calls &middot; {{ $searches }} searches &middot; {{ $reads }} reads</span><strong>{{ lang.FormatNumberCustom 0 $lines }} lines</strong></p>
         <p class="trace__median">Median of {{ len $runs }} runs: {{ $median }} calls.</p>
       </figure>
-      <p class="trace__foot"><span>Recorded {{ (time $t.recorded).Format "2 Jan 2006" }} &middot; {{ replace (replace $t.model "claude-opus-" "Opus ") "-" "." }} {{ $t.effort }} &middot; Claude Code {{ $t.claude }} &middot; Pixel <code>{{ $t.ref }}</code> &middot; run {{ strings.TrimPrefix "vanilla-" $t.run }} of {{ len $runs }}</span> <span>Numbers are lines of tool output; reads include <code>sed</code> slices &middot; <a class="link" href="{{ site.Params.github_url }}/blob/main/docs/bench/problem-trace.md">Raw runs</a></span></p>
+      <p class="trace__foot"><span>Recorded {{ (time $t.recorded).Format "2 Jan 2006" }} &middot; {{ replace (replace $t.model "claude-opus-" "Opus ") "-" "." }} {{ $t.effort }} &middot; run {{ strings.TrimPrefix "vanilla-" $t.run }} of {{ len $runs }}</span> <span>Numbers are lines of tool output; reads include <code>sed</code> slices &middot; <a class="link" href="{{ site.Params.github_url }}/blob/main/docs/bench/problem-trace.md">Raw runs</a></span></p>
     </section>
 
     {{/* ---------- scope: the same prompt as the Problem chapter, the other arm of its recording ---------- */}}
@@ -170,7 +170,7 @@
       </figure>
       {{/* `missed` restates what every Pixel run's answer named and the packet did not: the honest limit of a starting list, from the same runs. */}}
       {{ $missed := slice }}{{ range $s.missed }}{{ $missed = $missed | append (printf "<code>%s</code>" .) }}{{ end }}
-      <p class="board__note" data-reveal>The list Pixel handed over in the recording above, {{ (time $s.recorded).Format "2 Jan 2006" }}, Pixel <code>{{ $s.ref }}</code>. Starting points, not a full change map: all {{ $s.runs }} agents with Pixel also named {{ delimit $missed ", " " and " | safeHTML }}, which it left out. You typed nothing: <code>pixel install</code> wires the hook that asks. <a class="link" href="{{ site.Params.github_url }}/blob/main/docs/bench/problem-trace.md#the-scoping-board">Raw runs</a></p>
+      <p class="board__note" data-reveal>The list Pixel handed over in the recording above, {{ (time $s.recorded).Format "2 Jan 2006" }}. Starting points, not a full change map: all {{ $s.runs }} agents with Pixel also named {{ delimit $missed ", " " and " | safeHTML }}, which it left out. You typed nothing: <code>pixel install</code> wires the hook that asks. <a class="link" href="{{ site.Params.github_url }}/blob/main/docs/bench/problem-trace.md#the-scoping-board">Raw runs</a></p>
     </section>
 
     {{/* ---------- numbers ---------- */}}
@@ -229,7 +229,7 @@
         <h2 id="toolbox-title">What your agent <span class="glow">gets.</span></h2>
         <p>Before and after an edit, your agent has questions about your code. Pixel answers them from the index on your machine. The agent picks the command; you keep prompting as usual.</p>
       </header>
-      <p class="toolbox__context" data-reveal><span>Real answers, shortened, on Requests, the Python HTTP library.</span> <span><code>{{ $tb.repo }}</code> at <code>{{ $tb.commit }}</code> &middot; Pixel {{ $tb.pixel }}</span></p>
+      <p class="toolbox__context" data-reveal><span>Real answers, shortened, on Requests, the Python HTTP library.</span> <span><code>{{ $tb.repo }}</code> at <code>{{ $tb.commit }}</code></span></p>
       <ul class="toolbox" data-reveal="stagger">
         {{ range $tb.card }}
         <li class="toolbox__card">
@@ -347,7 +347,7 @@
           </div>
           <pre class="term__body" tabindex="0" role="region" aria-label="Download command"><code><span data-line="curl"><span class="term__p">$</span> {{ $curl }}</span><span data-line="inspect" hidden><span class="term__p">$</span> curl -fsSL -o install.sh {{ $scriptURL }}</span><span data-line="inspect" hidden><span class="term__p">$</span> less install.sh</span><span data-line="inspect" hidden><span class="term__p">$</span> sh install.sh</span><span data-line="brew" hidden><span class="term__p">$</span> {{ $brew }}</span><span data-line="agent" hidden><span class="term__c"># paste into Claude Code, Codex, Pi or any agent with a shell</span></span><span data-line="agent" hidden><span class="term__p">&gt;</span> {{ $agentPrompt }}</span></code></pre>
         </div>
-        <p class="get__note" data-line="curl inspect brew">SHA&#8209;256 checked, into <code>~/.local/bin/pixel</code> (<code>PIXEL_INSTALL_DIR</code> changes it). <a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">Read the script</a> · <a class="link" href="{{ "docs/" | relURL }}#install">All installation methods</a></p>
+        <p class="get__note" data-line="curl inspect brew">SHA&#8209;256 checked, into <code>~/.local/bin/pixel</code> (<code>PIXEL_INSTALL_DIR</code> changes it). <a class="link" href="{{ $scriptSrc }}" target="_blank" rel="noopener">Read the script</a> · <a class="link" href="{{ site.Params.github_url }}/blob/main/SECURITY.md#verifying-a-release" target="_blank" rel="noopener">Verify the signature</a> · <a class="link" href="{{ "docs/" | relURL }}#install">All installation methods</a></p>
         <p class="get__note get__note--agent" data-line="agent" hidden><strong>Your agent runs steps 2 and 3 for you</strong>, then tells you what changed. <a class="link" href="{{ "docs/" | relURL }}#install">All installation methods</a></p>
         <noscript><p class="get__note">For Homebrew, the download-and-read variant or the agent prompt, see <a class="link" href="{{ "docs/" | relURL }}#install">all installation methods</a>.</p></noscript>
       </div>
@@ -380,21 +380,16 @@
         <p class="invite__text"><strong>Don't trust our numbers. Get yours.</strong> After a few agent sessions, <code>pixel token-savings</code> reports what Pixel's answers spared on your code. Post it, and with your permission we may quote you here.</p>
         <a class="button button--ghost invite__cta" href="{{ $share }}" target="_blank" rel="noopener">Share your numbers</a>
       </aside>
+      {{/* The proofs an evaluator checks before running the script, last on the page now that the closing is gone. Signed releases: release.yml attests every archive and install.sh with SLSA build provenance, verified with gh attestation verify (SECURITY.md, "Verifying a release"). No telemetry: SECURITY.md. The changelog: a changelog.d fragment per user-facing change, cut at each release (CONTRIBUTING.md). */}}
       <ul class="badges" data-reveal="stagger">
-        <li>{{ partial "icon.html" (dict "name" "laptop" "size" 18) }}Index stays local</li>
+        <li>{{ partial "icon.html" (dict "name" "lock" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md#verifying-a-release" target="_blank" rel="noopener">Signed releases</a></li>
         <li>{{ partial "icon.html" (dict "name" "shield" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/SECURITY.md" target="_blank" rel="noopener">No telemetry</a></li>
         <li>{{ partial "icon.html" (dict "name" "user" "size" 18) }}No account</li>
-        <li>{{ partial "icon.html" (dict "name" "doc" "size" 18) }}MIT</li>
-        <li>{{ partial "icon.html" (dict "name" "trash" "size" 18) }}One <code>pixel uninstall</code></li>
+        <li>{{ partial "icon.html" (dict "name" "scale" "size" 18) }}MIT</li>
+        <li>{{ partial "icon.html" (dict "name" "doc" "size" 18) }}<a href="{{ site.Params.github_url }}/blob/main/CHANGELOG.md" target="_blank" rel="noopener">Changelog</a></li>
       </ul>
     </section>
 
-    {{/* ---------- closing ---------- */}}
-    <section class="closing wrap" aria-labelledby="closing-title">
-      <h2 id="closing-title" class="closing__title" data-reveal>Give your agent <span class="glow">a map.</span></h2>
-      <p class="closing__lede" data-reveal>Start with a file/outline comparison on your own code. Then give the next agent session the map, and check what it actually runs.</p>
-      <div class="closing__cta" data-reveal><a class="button" href="#install">Try Pixel on your repo</a></div>
-    </section>
   </main>
 
   {{ partial "footer.html" . }}
