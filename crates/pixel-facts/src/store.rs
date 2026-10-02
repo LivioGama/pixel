@@ -278,6 +278,13 @@ impl FactsStore {
     /// removed and rebuilt from scratch (it is derived data, never
     /// load-bearing for correctness).
     pub fn open(root: &Path) -> Result<Self> {
+        Self::open_with(root, &HistoryLimits::from_env())
+    }
+
+    /// [`FactsStore::open`] with the history limits passed in: a db upgraded
+    /// in place gets them applied before it is returned, so no reader sees
+    /// a repaired date whose diff the window has not yet taken out.
+    pub(crate) fn open_with(root: &Path, limits: &HistoryLimits) -> Result<Self> {
         let root = root.to_path_buf();
         let pixel_dir = root.join(".pixel");
         std::fs::create_dir_all(&pixel_dir)?;
@@ -312,25 +319,29 @@ impl FactsStore {
         // always safe — and this auto-heals every poisoned DB on next open
         // with no manual `rm` required.
         let rebuild = Self::needs_rebuild(&path).unwrap_or(true);
-        let conn = if rebuild {
+        let (conn, upgraded) = if rebuild {
             Self::remove_db(&path);
             Self::open_conn(&path)?
         } else {
             match Self::open_conn(&path) {
-                Ok(c) => c,
+                Ok(opened) => opened,
                 Err(_) => {
                     Self::remove_db(&path);
                     Self::open_conn(&path)?
                 }
             }
         };
-        drop(lock_file);
-        Ok(FactsStore {
+        let mut store = FactsStore {
             conn,
             runner: GitRunner::new(&root),
             path,
             root,
-        })
+        };
+        if upgraded {
+            crate::ingest::apply_window(&mut store, limits, crate::ingest::now_unix())?;
+        }
+        drop(lock_file);
+        Ok(store)
     }
 
     /// Open the history db only when it already exists, for the read-only
@@ -413,7 +424,8 @@ impl FactsStore {
         }
     }
 
-    fn open_conn(path: &Path) -> Result<Connection> {
+    /// The connection, and whether it upgraded a version-2 db in place.
+    fn open_conn(path: &Path) -> Result<(Connection, bool)> {
         let conn = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -429,11 +441,17 @@ impl FactsStore {
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.execute_batch(DDL)?;
         let stored: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if stored == UPGRADES_IN_PLACE_FROM {
-            normalize_stored_dates(&conn)?;
+        let upgraded = stored == UPGRADES_IN_PLACE_FROM;
+        // One transaction: a reader on another connection sees either the
+        // version-2 rows or the repaired version-3 ones, never a mix, and
+        // an interrupted upgrade leaves version 2 to be retried.
+        let tx = conn.unchecked_transaction()?;
+        if upgraded {
+            normalize_stored_dates(&tx)?;
         }
-        conn.pragma_update(None, "user_version", FACTS_SCHEMA_VERSION)?;
-        Ok(conn)
+        tx.pragma_update(None, "user_version", FACTS_SCHEMA_VERSION)?;
+        tx.commit()?;
+        Ok((conn, upgraded))
     }
 
     pub fn conn(&self) -> &Connection {
@@ -930,8 +948,8 @@ mod tests {
     }
 
     /// A version-2 db keeps its rows (re-ingesting a large history costs
-    /// minutes) and only gets its unreadable dates rewritten; any other old
-    /// version is still rebuilt.
+    /// minutes), gets its unreadable dates rewritten and the window applied
+    /// to them before it is returned; any other old version is rebuilt.
     #[test]
     fn a_version_2_db_is_upgraded_in_place_and_older_ones_rebuilt() {
         let (dir, first, second) = two_commit_repo();
@@ -968,8 +986,23 @@ mod tests {
 
         set_date(&store, &first, "2011-09-08T02:38:50+518:00");
         store.conn().pragma_update(None, "user_version", 2).unwrap();
+        let state_of = |store: &FactsStore, oid: &str| -> i64 {
+            store
+                .conn()
+                .query_row(
+                    "SELECT diff_state FROM commits WHERE oid = ?1",
+                    [oid],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(state_of(&store, &first), DIFF_STATE_INDEXED);
         drop(store);
-        let store = FactsStore::open(root).unwrap();
+        let window = HistoryLimits {
+            budget_bytes: u64::MAX,
+            window_days: Some(365),
+        };
+        let store = FactsStore::open_with(root, &window).unwrap();
         let version: i64 = store
             .conn()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
@@ -978,10 +1011,15 @@ mod tests {
         assert_eq!(store.index_state().total_commits, 2, "rows kept");
         assert_eq!(date_of(&store, &first), "2011-08-17T12:38:50+00:00");
         assert_eq!(date_of(&store, &second), "2011-09-29T17:38:50+00:00");
+        // Repaired, the 2011 dates are outside the window: their diffs are
+        // gone before the store is handed out, not at the next ingest tick.
+        assert_eq!(state_of(&store, &first), DIFF_STATE_EVICTED);
+        assert_eq!(state_of(&store, &second), DIFF_STATE_EVICTED);
+        assert_eq!(store.index_state().diff_coverage_since, None);
 
         store.conn().pragma_update(None, "user_version", 1).unwrap();
         drop(store);
-        let store = FactsStore::open(root).unwrap();
+        let store = FactsStore::open_with(root, &window).unwrap();
         assert_eq!(store.index_state().total_commits, 0, "version 1 rebuilt");
     }
 }
