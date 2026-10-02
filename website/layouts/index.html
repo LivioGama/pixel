@@ -252,58 +252,38 @@
     </section>
 
     {{/* ---------- how it works ---------- */}}
-    <section class="section wrap" id="how" aria-labelledby="how-title">
+    <section class="section section--center wrap" id="how" aria-labelledby="how-title">
       <p class="chapter" aria-hidden="true"><span class="chapter__n"></span><span class="chapter__name">Architecture</span></p>
       <header class="section__head" data-reveal>
         <h2 id="how-title">How it <span class="glow">works.</span></h2>
-        <p>One binary and one folder in your repository, without a hosted service.</p>
+        <p>One Rust binary and one folder in your repository. No hosted service.</p>
       </header>
       <ol class="how" data-reveal="stagger">
         <li>
           <span class="how__icon">{{ partial "icon.html" (dict "name" "grid" "size" 28) }}</span>
           <h3>Index</h3>
-          <p><code>.pixel/</code>, at your repository root, holds a text index of eligible files Git does not ignore and a code graph of symbols, imports and calls parsed with tree-sitter, built on first use.</p>
+          <p><code>.pixel/</code> holds a text index of the files Git does not ignore and a graph of their symbols, imports and calls.</p>
         </li>
         <li>
           <span class="how__icon">{{ partial "icon.html" (dict "name" "bolt" "size" 28) }}</span>
           <h3>Stay warm</h3>
-          <p>A local daemon keeps both open and watches the tree, so answers take milliseconds and follow your edits. No daemon? The command runs in-process.</p>
-        </li>
-        <li>
-          <span class="how__icon">{{ partial "icon.html" (dict "name" "gauge" "size" 28) }}</span>
-          <h3>Answer to a budget</h3>
-          <p>The agent gets the symbols, signatures or lines its question needs, fitted to a token budget, with a marker saying whether the answer is complete.</p>
+          <p>A local daemon keeps both open and follows your edits, so answers take milliseconds.</p>
         </li>
         <li>
           <span class="how__icon">{{ partial "icon.html" (dict "name" "robot" "size" 28) }}</span>
           <h3>Reach the agent</h3>
-          <p>A CLI plus hooks, not an MCP server. <code>pixel install</code> puts the protocol where each agent reads its instructions, and the agent calls Pixel from the shell it already has.</p>
+          <p><code>pixel install</code> tells each agent when to ask Pixel; the agent runs it from its shell.</p>
         </li>
       </ol>
-      {{/* Cold start: the first command on a large repository, from nothing. The figures are the "Cold start on a large repository" table of content/benchmarks.md (median of three runs, docs/bench/cold-index.md): change them there first. The track draws that median run at one cell per 0.2 s, 60 cells for 12 s: the text index's 2 s in bright green, the code graph and the rest in the dim green. */}}
+      {{/* The three tiers restate crates/pixel-graph/src/extract.rs: extract_inner gives the first eight languages of partials/languages.html their own walker and sends the last five to walk_generic ("coarse but better than absent"); any other file is in the text index only. */}}
+      <p class="langs" data-reveal><span><strong>Code graph</strong> {{ delimit (first 8 $langs) ", " }}</span> <span><strong>Coarser graph</strong> {{ delimit (after 8 $langs) ", " }}</span> <span><strong>Text search</strong> every other file Git does not ignore</span></p>
+      {{/* Cold start: the first command on a large repository, from nothing. The figures are the "Cold start on a large repository" table of content/benchmarks.md (median of three runs, docs/bench/cold-index.md): change them there first. The track draws that median run at one cell per 0.2 s, 60 cells for 12 s: the text index's 2 s in bright green, the code graph and the rest in the dim green. One row: the value, one caption line with the median and its method link, the track under it. */}}
       {{ $coldCells := 60 }}{{ $indexCells := 10 }}
       <figure class="coldstart" data-reveal data-coldstart>
-        <div class="coldstart__lead">
-          <span class="numbers__tag">Cold start</span>
-          <strong class="coldstart__value">12 s</strong>
-          <figcaption>from nothing to a full index of <b>18,782 files</b>: text and code graph, no cache.</figcaption>
-        </div>
-        <div class="coldstart__run">
-          <span class="coldstart__track" aria-hidden="true">{{ range seq $coldCells }}<b class="{{ if le . $indexCells }}is-text{{ else }}is-graph{{ end }}"></b>{{ end }}</span>
-          <span class="coldstart__scale" aria-hidden="true"><em>0 s</em><em>2 s</em><em>12 s</em></span>
-          <dl class="coldstart__legend">
-            <div class="is-text"><dt>Text index</dt><dd>2.0&nbsp;s</dd></div>
-            <div class="is-graph"><dt>Code graph</dt><dd>about 10&nbsp;s, 59,609 symbols</dd></div>
-          </dl>
-          <p class="coldstart__note">A private Rails application, fresh clone, Apple M2, median of three runs. Later commands reuse the index and read only what changed. <a class="link" href="{{ $bench }}#cold-start-on-a-large-repository">Method</a></p>
-        </div>
+        <strong class="coldstart__value">12 s</strong>
+        <figcaption><span class="numbers__tag">Cold start</span> <b>18,782 files</b> of a private Rails app, from scratch: text index in 2&nbsp;s, code graph in about 10&nbsp;s, median of three runs. <a class="link" href="{{ $bench }}#cold-start-on-a-large-repository">Method</a></figcaption>
+        <span class="coldstart__track" aria-hidden="true">{{ range seq $coldCells }}<b class="{{ if le . $indexCells }}is-text{{ else }}is-graph{{ end }}"></b>{{ end }}</span>
       </figure>
-      {{/* What a visitor checks before installing, at a glance. Each value restates a fact stated elsewhere: the platforms release.yml builds, the licence, the telemetry line of the hero. */}}
-      <dl class="specs" data-reveal>
-        <div><dt>Language</dt><dd>Rust</dd></div>
-        <div><dt>Licence</dt><dd>MIT</dd></div>
-        <div><dt>Platforms</dt><dd>macOS on Apple Silicon, Linux</dd></div>
-      </dl>
       <p class="numbers__more"><a class="link" href="{{ "docs/" | relURL }}#jobs">See the workflow and Git examples</a> · <a class="link" href="{{ "classify/" | relURL }}">Optional classification</a></p>
     </section>
 
