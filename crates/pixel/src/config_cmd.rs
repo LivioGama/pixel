@@ -19,6 +19,7 @@
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
+use crate::prompt_key::{KeyReader, RawGuard};
 use serde_json::{Value, json};
 
 /// The environment overrides and YAML switches exposed in the overview.
@@ -519,9 +520,15 @@ pub fn setup() -> Result<(), String> {
     let path = ensure_template(None)?;
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stderr().lock();
-    let saved = setup_with_install(&path, &mut input, &mut output, color, |input, output| {
-        crate::classify_setup::install_step(true, input, output)
-    })?;
+    let keys = KeyReader::enable();
+    let saved = setup_with_install(
+        &path,
+        &mut input,
+        &mut output,
+        color,
+        &keys,
+        |input, output| crate::classify_setup::install_step(true, input, output),
+    )?;
     let root = std::env::current_dir()
         .ok()
         .and_then(|cwd| crate::discover_root(&cwd).ok());
@@ -535,10 +542,11 @@ fn setup_with_install(
     input: &mut dyn BufRead,
     output: &mut dyn Write,
     color: bool,
+    keys: &KeyReader,
     install: impl FnOnce(&mut dyn BufRead, &mut dyn Write) -> Result<(), String>,
 ) -> Result<bool, String> {
     let was_enabled = classify_enabled_in(&crate::config_file::load(path)?)?;
-    if !setup_with(path, input, output, color)? {
+    if !setup_with_keys(path, input, output, color, keys)? {
         return Ok(false);
     }
     if !classify_enabled_in(&crate::config_file::load(path)?)? {
@@ -601,18 +609,12 @@ fn classify_default_in(doc: &Value) -> Result<bool, String> {
     }
 }
 
-/// The classify explanation the setup question is asked under. Jev is
-/// named on purpose: this is Pixel's local answer to TypeSafe's Jev, and
-/// the reader who knows Jev should not scroll past it.
+/// The short classify explanation shown before the setup question.
 fn classify_blurb(color: bool) -> String {
     format!(
-        "{} is optional AI classification, separate from code search — Pixel's\n\
-         local answer to TypeSafe's Jev. Ask it a bounded question about any\n\
-         text — a prompt, a diff, a method — and it returns one probability\n\
-         per label you name:\n\n{}\n{}\n\n\
-         The local engine runs offline after a one-time model download and\n\
-         costs nothing per call (0.722 typed-decisions accuracy vs Jev's\n\
-         0.738); remote providers receive your input and may charge.",
+        "{} is optional AI classification, separate from code search.\n\
+         Ask a bounded question about text and get probabilities for your labels:\n\n{}\n{}\n\n\
+         Local runs offline after setup. Remote providers receive your text and may charge.",
         paint(color, "1", "Classify"),
         paint(
             color,
@@ -627,11 +629,24 @@ fn classify_blurb(color: bool) -> String {
     )
 }
 
+/// Line-driven setup: the path the tests take, mirroring what a
+/// non-terminal run would render.
+#[cfg(test)]
 fn setup_with(
     path: &Path,
     input: &mut dyn BufRead,
     output: &mut dyn Write,
     color: bool,
+) -> Result<bool, String> {
+    setup_with_keys(path, input, output, color, &KeyReader::inert())
+}
+
+fn setup_with_keys(
+    path: &Path,
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+    color: bool,
+    keys: &KeyReader,
 ) -> Result<bool, String> {
     validate(path)?;
     let mut doc = crate::config_file::load(path)?;
@@ -639,27 +654,26 @@ fn setup_with(
     writeln!(
         output,
         "{}",
-        paint(color, "1;36", "Pixel setup — global settings")
+        paint(color, "1;32", "Pixel setup — global settings")
     )
     .map_err(|e| e.to_string())?;
     writeln!(output, "File: {}", path.display()).map_err(|e| e.to_string())?;
-    writeln!(
-        output,
-        "{}",
-        paint(
-            color,
-            "2",
-            "Enter keeps the shown value · q or Ctrl-D cancels without saving\n\
-             Repository and environment overrides still apply."
-        )
-    )
-    .map_err(|e| e.to_string())?;
+    let hint = if keys.active() {
+        "←/→ pick · Enter confirms · y or n answers outright · q or Ctrl-C cancels without saving\n\
+         Repository and environment overrides still apply."
+    } else {
+        "Enter keeps the shown value · q or Ctrl-D cancels without saving\n\
+         Repository and environment overrides still apply."
+    };
+    writeln!(output, "{}", paint(color, "2", hint)).map_err(|e| e.to_string())?;
     let metrics = doc.get("metrics").and_then(Value::as_str) != Some("off");
     let Some(metrics) = ask_bool(
         input,
         output,
         "Show command timing and estimated savings?",
         metrics,
+        keys,
+        color,
     )?
     else {
         return Ok(false);
@@ -677,7 +691,7 @@ fn setup_with(
         ("task_boundary", "Detect task changes in agent prompts?"),
     ] {
         let current = doc.get(key).and_then(Value::as_bool).unwrap_or(true);
-        let Some(value) = ask_bool(input, output, label, current)? else {
+        let Some(value) = ask_bool(input, output, label, current, keys, color)? else {
             return Ok(false);
         };
         doc[key] = json!(value);
@@ -687,6 +701,8 @@ fn setup_with(
         output,
         "Enforce Pixel retrieval in coding agents (deny native search)?",
         doc.get("policy").and_then(Value::as_str) == Some(PolicyMode::Enforce.as_str()),
+        keys,
+        color,
     )?
     else {
         return Ok(false);
@@ -699,12 +715,58 @@ fn setup_with(
         output,
         "Allow pixel classify?",
         classify_default_in(&doc)?,
+        keys,
+        color,
     )?
     else {
         return Ok(false);
     };
-    writeln!(output, "Review: metrics={}, daemon_auto_start={}, task_context={}, task_boundary={}, policy={}, classify.enabled={}", doc["metrics"], doc["daemon_auto_start"], doc["task_context"], doc["task_boundary"], doc["policy"], enabled).map_err(|e| e.to_string())?;
-    if ask_bool(input, output, "Save these settings?", false)? != Some(true) {
+    let review = [
+        (
+            "metrics",
+            doc["metrics"].as_str().unwrap_or("?").to_string(),
+        ),
+        (
+            "daemon auto-start",
+            yes_no(doc["daemon_auto_start"].as_bool().unwrap_or(true)),
+        ),
+        (
+            "task context",
+            yes_no(doc["task_context"].as_bool().unwrap_or(true)),
+        ),
+        (
+            "task boundary",
+            yes_no(doc["task_boundary"].as_bool().unwrap_or(true)),
+        ),
+        ("policy", doc["policy"].as_str().unwrap_or("?").to_string()),
+        (
+            "classify",
+            if enabled {
+                "enabled".to_string()
+            } else {
+                "disabled".to_string()
+            },
+        ),
+    ];
+    let key_width = review
+        .iter()
+        .map(|(key, _)| key.chars().count())
+        .max()
+        .unwrap_or(0);
+    writeln!(output).map_err(|e| e.to_string())?;
+    for (key, value) in review {
+        writeln!(
+            output,
+            "  {}  {}",
+            paint(color, "2", &format!("{key:<key_width$}")),
+            paint(color, "1", &value)
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    // Enter must save: the header promises "Enter keeps the shown value",
+    // and a save question defaulting to no silently discarded every answer
+    // the user had just given.
+    if ask_bool(input, output, "Save these settings?", true, keys, color)? != Some(true) {
         return Ok(false);
     }
     write_doc(path, |current| {
@@ -740,7 +802,115 @@ fn paint(color: bool, code: &str, text: &str) -> String {
     }
 }
 
+/// `yes`/`no` for the review block, so the booleans read as words.
+fn yes_no(value: bool) -> String {
+    if value {
+        "yes".to_string()
+    } else {
+        "no".to_string()
+    }
+}
+
+#[cfg(test)]
+mod picker_tests {
+    use super::*;
+
+    #[test]
+    fn the_picker_choice_tokens_keep_the_same_display_width() {
+        // The active and inactive tokens must overwrite each other in place
+        // without erasing, so their widths must match exactly.
+        let (yes_active, no_inactive) = choice_tokens(true, false);
+        let (yes_inactive, no_active) = choice_tokens(false, false);
+        for token in [
+            yes_active.clone(),
+            no_inactive.clone(),
+            yes_inactive,
+            no_active.clone(),
+        ] {
+            assert_eq!(token.chars().count(), 3, "{token}");
+        }
+        assert_eq!(yes_active, "(Y)");
+        assert_eq!(no_active, "(n)");
+    }
+
+    #[test]
+    fn color_on_paints_the_active_choice_and_the_inactive_stays_dim() {
+        let (yes_active, _) = choice_tokens(true, true);
+        assert_eq!(yes_active, "\x1b[1;32m(Y)\x1b[0m");
+        let (_, no_active) = choice_tokens(false, true);
+        assert_eq!(no_active, "\x1b[1;33m(n)\x1b[0m");
+    }
+
+    #[test]
+    fn render_choice_writes_the_question_with_the_active_choice_marked() {
+        let mut output = Vec::new();
+        render_choice(&mut output, "Choice?", true, "  hint", false).unwrap();
+        let line = String::from_utf8(output).unwrap();
+        assert!(line.contains("Choice? [ (Y) /  n  ]  hint"), "{line}");
+        assert!(line.starts_with('\r'), "{line}");
+
+        let mut output = Vec::new();
+        render_choice(&mut output, "Choice?", false, "  hint", false).unwrap();
+        let line = String::from_utf8(output).unwrap();
+        assert!(line.contains("Choice? [  Y  / (n) ]  hint"), "{line}");
+    }
+
+    #[test]
+    fn the_review_rows_line_up_on_one_key_column() {
+        let mut output = Vec::new();
+        let review = [
+            ("metrics", "on".to_string()),
+            ("daemon auto-start", "yes".to_string()),
+            ("classify", "enabled".to_string()),
+        ];
+        let key_width = review
+            .iter()
+            .map(|(key, _)| key.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (key, value) in &review {
+            writeln!(
+                output,
+                "  {}  {}",
+                paint(false, "2", &format!("{key:<key_width$}")),
+                value
+            )
+            .unwrap();
+        }
+        let rendered = String::from_utf8(output).unwrap();
+        let value_column = 2 + key_width + 2;
+        for (row, (_, value)) in rendered.lines().zip(review.iter()) {
+            assert_eq!(
+                row.chars().skip(value_column).collect::<String>(),
+                *value,
+                "{row}"
+            );
+        }
+    }
+}
+
+/// One yes/no question: the arrow picker on a live terminal, line input
+/// otherwise. `None` means cancelled.
+#[cfg_attr(test, mutants::skip)] // the raw branch needs a real tty; each branch is tested through its own fn
 fn ask_bool(
+    input: &mut dyn BufRead,
+    output: &mut dyn Write,
+    label: &str,
+    current: bool,
+    keys: &KeyReader,
+    color: bool,
+) -> Result<Option<bool>, String> {
+    if keys.active()
+        && let Some(mut raw) = RawGuard::new()
+    {
+        return ask_bool_keys(output, label, current, &mut raw, color);
+    }
+    ask_bool_lines(input, output, label, current)
+}
+
+/// The line-driven yes/no question: Enter keeps the shown value, y/n
+/// answer, `q` cancels.
+fn ask_bool_lines(
     input: &mut dyn BufRead,
     output: &mut dyn Write,
     label: &str,
@@ -765,6 +935,67 @@ fn ask_bool(
             "q" => return Ok(None),
             _ => writeln!(output, "Type y, n, Enter, or q.").map_err(|e| e.to_string())?,
         }
+    }
+}
+
+/// The arrow-driven picker: the highlight starts on the shown value, ←/→
+/// move it, Enter confirms, y/n answer outright, q/Esc/Ctrl-C/D cancel.
+/// Each keystroke rewrites the question line in place; the active and
+/// inactive choice tokens stay the same width so a rewrite never needs to
+/// erase the line.
+#[cfg_attr(test, mutants::skip)] // raw terminal loop; the key mapping is tested pure in prompt_key
+fn ask_bool_keys(
+    output: &mut dyn Write,
+    label: &str,
+    current: bool,
+    raw: &mut RawGuard,
+    color: bool,
+) -> Result<Option<bool>, String> {
+    let mut picked = current;
+    let hint = paint(color, "2", "  ←/→ pick · Enter confirm · q cancel");
+    render_choice(output, label, picked, &hint, color)?;
+    loop {
+        match crate::prompt_key::step(raw.read_key(), picked) {
+            crate::prompt_key::Step::Highlight(value) => {
+                picked = value;
+                render_choice(output, label, picked, &hint, color)?;
+            }
+            crate::prompt_key::Step::Settle(Some(answer)) => {
+                picked = answer;
+                break;
+            }
+            crate::prompt_key::Step::Settle(None) => {
+                writeln!(output).map_err(|e| e.to_string())?;
+                return Ok(None);
+            }
+        }
+    }
+    render_choice(output, label, picked, &hint, color)?;
+    writeln!(output).map_err(|e| e.to_string())?;
+    Ok(Some(picked))
+}
+
+/// One picker line: `[ (Y) / n ]` with the active choice in parentheses and
+/// bold — green for yes, yellow for no — the inactive one dim.
+fn render_choice(
+    output: &mut dyn Write,
+    label: &str,
+    picked: bool,
+    hint: &str,
+    color: bool,
+) -> Result<(), String> {
+    let (yes, no) = choice_tokens(picked, color);
+    write!(output, "\r{label} [ {yes} / {no} ]{hint} ").map_err(|e| e.to_string())?;
+    output.flush().map_err(|e| e.to_string())
+}
+
+/// The two choice tokens, always the same display width so an in-place
+/// rewrite leaves no residue with color on or off.
+fn choice_tokens(picked: bool, color: bool) -> (String, String) {
+    if picked {
+        (paint(color, "1;32", "(Y)"), paint(color, "2", " n "))
+    } else {
+        (paint(color, "2", " Y "), paint(color, "1;33", "(n)"))
     }
 }
 
@@ -1013,6 +1244,45 @@ pub fn run_policy(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_header_hint_matches_the_input_mode() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        write(&path, "metrics: 'on'\n");
+        let mut keyed = Vec::new();
+        // q cancels at the first question; the header is already rendered.
+        setup_with_keys(
+            &path,
+            &mut std::io::Cursor::new("q\n"),
+            &mut keyed,
+            false,
+            &KeyReader::forced(true),
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(keyed.clone())
+                .unwrap()
+                .contains("←/→ pick · Enter confirms"),
+            "{keyed:?}"
+        );
+        let mut lines = Vec::new();
+        setup_with_keys(
+            &path,
+            &mut std::io::Cursor::new("q\n"),
+            &mut lines,
+            false,
+            &KeyReader::inert(),
+        )
+        .unwrap();
+        assert!(
+            String::from_utf8(lines.clone())
+                .unwrap()
+                .contains("Enter keeps the shown value"),
+            "{lines:?}"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -1036,6 +1306,7 @@ mod tests {
                 &mut std::io::Cursor::new("n\n\n\n\n\ny\ny\n"),
                 &mut Vec::new(),
                 false,
+                &KeyReader::inert(),
                 |_, _| {
                     calls += 1;
                     // A partially completed install can already have written credentials.
@@ -1085,6 +1356,7 @@ mod tests {
                 &mut std::io::Cursor::new(answers),
                 &mut Vec::new(),
                 false,
+                &KeyReader::inert(),
                 |_, _| panic!("cancelled or disabled setup must never invoke an installer"),
             )
             .unwrap();
@@ -1104,6 +1376,7 @@ mod tests {
             &mut std::io::Cursor::new("\n\n\n\n\ny\ny\n"),
             &mut Vec::new(),
             false,
+            &KeyReader::inert(),
             |_, _| {
                 std::fs::remove_file(&path).unwrap();
                 std::fs::create_dir(&path).unwrap();
@@ -1321,7 +1594,19 @@ mod tests {
             })
         );
         let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("classify.enabled=false"));
+        assert!(
+            output
+                .lines()
+                .any(|line| line.starts_with("  classify") && line.ends_with("disabled")),
+            "{output}"
+        );
+        // The booleans read as words in the review rows.
+        assert!(
+            output
+                .lines()
+                .any(|line| line.starts_with("  daemon auto-start") && line.ends_with("no")),
+            "{output}"
+        );
         assert!(output.contains("Saved."));
         assert!(!output.contains("hidden-secret"));
         assert!(
@@ -1361,7 +1646,8 @@ mod tests {
         assert!(
             String::from_utf8(output)
                 .unwrap()
-                .contains("classify.enabled=true")
+                .lines()
+                .any(|line| line.starts_with("  classify") && line.ends_with("enabled"))
         );
         let doc = crate::config_file::load(&path).unwrap();
         assert_eq!(doc["metrics"], "on");
@@ -1370,6 +1656,32 @@ mod tests {
         }
         assert_eq!(doc["policy"], "enforce");
         assert_eq!(doc["classify"]["enabled"], true);
+    }
+
+    #[test]
+    fn pressing_enter_at_the_save_prompt_writes_the_answers() {
+        let _lock = crate::ENV_LOCK.lock().unwrap();
+        let home = HomeGuard::set();
+        let path = home.0.join("config.yaml");
+        write(&path, "# template\n");
+        // The header promises Enter keeps the shown value; the save question
+        // must honour that too, writing the answers instead of discarding a
+        // whole session of y/n responses.
+        assert!(
+            setup_with(
+                &path,
+                &mut std::io::Cursor::new("\n\n\n\n\n\n\n"),
+                &mut Vec::new(),
+                false
+            )
+            .unwrap()
+        );
+        let saved = crate::config_file::load(&path).unwrap();
+        assert_eq!(saved["metrics"], "on");
+        assert_eq!(saved["daemon_auto_start"], true);
+        assert_eq!(saved["task_context"], true);
+        assert_eq!(saved["task_boundary"], true);
+        assert_eq!(saved["policy"], "advisory");
     }
 
     #[test]
@@ -1441,10 +1753,18 @@ mod tests {
         )
         .unwrap();
         let rendered = String::from_utf8(output).unwrap();
-        assert!(rendered.contains("TypeSafe's Jev"), "{rendered}");
-        assert!(rendered.contains("0.738"), "{rendered}");
+        assert!(
+            rendered.contains("optional AI classification, separate from code search."),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Local runs offline after setup."),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("TypeSafe's Jev"), "{rendered}");
+        assert!(!rendered.contains("0.738"), "{rendered}");
         assert!(rendered.contains("pixel classify"), "{rendered}");
-        assert!(rendered.contains("\x1b[1;36mPixel setup"), "{rendered}");
+        assert!(rendered.contains("\x1b[1;32mPixel setup"), "{rendered}");
         assert!(
             rendered.contains("Allow pixel classify? [Y/n] >"),
             "{rendered}"
@@ -1477,7 +1797,9 @@ mod tests {
                     &mut std::io::Cursor::new(answer),
                     &mut output,
                     "Choice",
-                    current
+                    current,
+                    &KeyReader::inert(),
+                    false
                 )
                 .unwrap(),
                 expected

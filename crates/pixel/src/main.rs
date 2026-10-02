@@ -46,6 +46,7 @@ mod plan_cmd;
 mod plan_state;
 mod post_compaction;
 mod prompt_intent;
+mod prompt_key;
 mod prompt_submit;
 mod recall_cmd;
 mod rescue_cmd;
@@ -2400,6 +2401,10 @@ fn banner_color(no_color: Option<&std::ffi::OsStr>) -> bool {
     no_color.is_none_or(std::ffi::OsStr::is_empty)
 }
 
+fn should_render_install_banner(json: bool, stdout_tty: bool) -> bool {
+    !json && stdout_tty
+}
+
 /// Output of [`render_data`]: the bytes for stdout plus whether the cap
 /// fired (so metrics can refuse to count evidence the caller never saw).
 struct Rendered {
@@ -2622,6 +2627,13 @@ mod render_data_tests {
         assert!(banner_color(None));
         assert!(banner_color(Some(std::ffi::OsStr::new(""))));
         assert!(!banner_color(Some(std::ffi::OsStr::new("1"))));
+    }
+
+    #[test]
+    fn the_install_start_banner_stays_on_human_terminal_output() {
+        assert!(should_render_install_banner(false, true));
+        assert!(!should_render_install_banner(true, true));
+        assert!(!should_render_install_banner(false, false));
     }
 
     fn big() -> Value {
@@ -7175,6 +7187,12 @@ fn run_command(
         Command::Install { json, shell, repo } => {
             let is_global_install = repo.is_none();
             let config_root = repo.clone();
+            let stdout_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+            let interactive_banner = should_render_install_banner(json, stdout_tty);
+            let color = banner_color(std::env::var_os("NO_COLOR").as_deref());
+            if interactive_banner {
+                write_stdout(&pixel_install::banner::render_start(color))?;
+            }
             let report = pixel_install::install::install(&pixel_install::install::InstallOptions {
                 shell,
                 repo,
@@ -7191,13 +7209,11 @@ fn run_command(
             let report_value = serde_json::to_value(&report).map_err(|e| e.to_string())?;
             // A person at a terminal reads the banner; `--json` and a piped
             // stdout keep the machine-readable report an agent parses.
-            let stdout_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
             if json || !stdout_tty {
                 print_data(&report_value, json)
             } else {
                 operation_metrics::observe(&report_value);
-                let color = banner_color(std::env::var_os("NO_COLOR").as_deref());
-                write_stdout(&pixel_install::banner::render(&report, color))
+                write_stdout(&pixel_install::banner::render_result(&report, color))
             }
         }
         Command::Uninstall {
