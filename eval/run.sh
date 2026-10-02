@@ -132,8 +132,14 @@ build_arm() {
     [ -e "$HOME/.claude/$name" ] && [ ! -e "$cfg/$name" ] && ln -s "$HOME/.claude/$name" "$cfg/$name" || true
   done
   # codex config: per-arm CODEX_HOME with the payload channel (baseline strips
-  # the pixel-managed block, variants swap its content) plus login state
+  # the pixel-managed block, variants swap its content) plus login state.
+  # Built only when codex is in the run: machines without ~/.codex must be
+  # able to evaluate the other CLIs.
   local codex_home="$cfg/codex-home"
+  if [[ "$CLIS" != *codex* ]]; then
+    echo "built arm=$arm wt=$wt cfg=$cfg (no codex config: CLIS=$CLIS)"
+    return
+  fi
   mkdir -p "$codex_home"
   local variant=""
   case "$arm" in
