@@ -37,10 +37,16 @@ python3 eval/gate.py --results eval/results --scenarios-dir eval/scenarios --can
 
 `claude` is the scored default (headless `-p`, stream-json). `agy` works via
 `-p --output-format stream-json` (its global pixel plugin is toggled off for
-non-`on` arms and restored). `codex` and `pi` plug in by dropping an
-executable `eval/clis/<name>.sh` that reads `$WT`, `$CFG`, `$PROMPT`, `$OUT`,
-`$MAX_TURNS` and writes the run's stream transcript to `$OUT`; run.sh picks
-it up automatically and skips the CLI with rc 9 until it exists.
+non-`on` arms and restored). `codex` runs `exec --json --sandbox read-only`
+with per-arm isolation: build_arm renders a CODEX_HOME whose
+`developer_instructions` pixel block is stripped (baseline) or swapped for the
+arm payload, plus a copy of `auth.json`. `pi` runs `-p` as a **coverage arm**:
+its pixel integration is a global extension with no per-arm config isolation
+yet, so pi rows measure the installed state rather than arm variants —
+per-arm pi isolation is the known follow-up. Any CLI can also plug in by
+dropping an executable `eval/clis/<name>.sh` that reads `$WT`, `$CFG`,
+`$PROMPT`, `$OUT`, `$MAX_TURNS` and writes the run's transcript to `$OUT`;
+run.sh picks it up automatically and skips the CLI with rc 9 until it exists.
 
 ## Results
 
@@ -59,6 +65,21 @@ machine-readable scoreboard consumed by `gate.py`.
 
 Final gate (`vfinal` vs `baseline`, turns slack ×1.5): **PASS** — s1 16.0 vs 15.0,
 s2 13.0 vs 11.5 (2 turns vs 20), s3 12.0 vs 12.0.
+
+### First 4-CLI round (codex + pi, 20-turn budget, n1 per cell, Oct 2026)
+
+| cli | arm | s1 | s2 | s3 | mean |
+| --- | --- | --- | --- | --- | --- |
+| codex | baseline (payload stripped) | 8/16 | 10/13 | 12/12 | 10.0 |
+| codex | vfinal (2.8 KB payload) | 8/16 | 12/13 | 9/12 | 11.0 |
+| pi | coverage (installed state) | 13/16 | 12–13/13 | 12/12 | 12.3–12.7 |
+
+Read: codex answers in a single front-loaded turn (163–341K input tokens — no
+agentic loop), ties its own baseline on mean, and gains on the retrieval-heavy
+scenario while losing line-number precision on the rename scenario at n1. pi
+(the QA fleet's harness) scores strong across the board with zero
+configuration. Codex n≥2 reps and per-arm pi isolation are the open
+follow-ups.
 
 Two findings survived repetition:
 
