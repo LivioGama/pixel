@@ -329,7 +329,17 @@ envelope talks to the daemon socket directly.
   layer was obtained) and `timings.total_ms`.
 - History facts are ingested by a dedicated low-priority thread. Queries
   never wait on ingest; they answer from what is already in `history.db` and
-  say so through epistemics.
+  carry its `index_state` (`diffs_evicted`, `diff_coverage_since`). Diff text
+  is bounded by an age window (`PIXEL_HISTORY_WINDOW_DAYS`, default 365) and
+  a size budget (`PIXEL_HISTORY_BUDGET_MB`); commit metadata is never
+  evicted. So a `file-history --file` answer is complete once phase A is,
+  while a `file-history --token` answer only sees indexed diffs and says
+  what it missed in `coverage` (`pixel_facts::lifecycle::DiffCoverage`):
+  `lower_bound` when any commit's diff is pending or evicted (more touches
+  may exist), `first_seen_exact` when none of them was authored at or
+  before `first_seen`, and a `note` with the `git log --reverse -S` command
+  that checks the full history. A token found nowhere carries the same
+  block.
 
 ## Agent integration
 
