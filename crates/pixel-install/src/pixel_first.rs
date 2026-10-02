@@ -4,7 +4,9 @@
 //! reads `AGENTS.md` (Codex, Claude Code through a `CLAUDE.md` symlink, and
 //! any other) to try Pixel before native retrieval, without ever blocking the
 //! native tools. Text outside the markers belongs to the user and is kept
-//! byte for byte.
+//! byte for byte. Inside them, only the words are Pixel's: a block the user
+//! re-wrapped (a Markdown formatter, an 80-column habit) is current and left
+//! alone, so `install --repo` does not dirty a tree that commits `AGENTS.md`.
 
 use std::fs;
 use std::path::Path;
@@ -28,6 +30,7 @@ pub(crate) fn install_rules(repo: &Path, dry_run: bool) -> Result<InstallStep> {
     let existing = read_rules_file(&path)?;
     let block = rules_block();
     let updated = match rules_range(&existing, &path)? {
+        Some(range) if block_is_current(&existing[range.clone()]) => existing.clone(),
         Some(range) => format!(
             "{}{}{}",
             &existing[..range.start],
@@ -97,7 +100,16 @@ pub(crate) fn check_rules(repo: &Path) -> Result<Option<bool>> {
     let Some(range) = rules_range(&existing, &path)? else {
         return Ok(None);
     };
-    Ok(Some(existing[range] == rules_block()))
+    Ok(Some(block_is_current(&existing[range])))
+}
+
+/// Whether an installed block says what [`rules_block`] says, line breaks and
+/// runs of spaces aside: those are layout, not policy, and rewriting a
+/// re-wrapped block would back up and rewrite the file on every install.
+fn block_is_current(installed: &str) -> bool {
+    installed
+        .split_whitespace()
+        .eq(rules_block().split_whitespace())
 }
 
 fn read_rules_file(path: &Path) -> Result<String> {
@@ -204,6 +216,74 @@ mod tests {
 
         assert_eq!(fs::read_to_string(&path).unwrap(), rules_block());
         assert_eq!(check_rules(repo.path()).unwrap(), Some(true));
+    }
+
+    /// The block re-wrapped by hand: every sentence break becomes a line
+    /// break plus an indent, so both newlines and runs of spaces differ.
+    fn reflowed_block() -> String {
+        let reflowed = rules_block().replace(". ", ".\n  ");
+        assert_ne!(
+            reflowed,
+            rules_block(),
+            "the fixture must change the layout"
+        );
+        reflowed
+    }
+
+    fn backups_in(dir: &Path) -> Vec<String> {
+        fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".pixel-bak."))
+            .collect()
+    }
+
+    #[test]
+    fn install_rules_should_leave_a_reflowed_block_untouched_without_backup() {
+        let repo = tempfile::tempdir().unwrap();
+        let path = repo.path().join("AGENTS.md");
+        let original = format!("# Project\n\n{}\n", reflowed_block());
+        fs::write(&path, &original).unwrap();
+
+        let step = install_rules(repo.path(), false).unwrap();
+
+        assert_eq!(
+            step.summary,
+            "Pixel-first project retrieval guidance already current"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        assert_eq!(backups_in(repo.path()), Vec::<String>::new());
+        assert_eq!(check_rules(repo.path()).unwrap(), Some(true));
+    }
+
+    #[test]
+    fn install_rules_should_replace_a_reflowed_block_whose_words_changed() {
+        // A changed word, and two words glued together: both are policy
+        // edits, whatever the layout around them.
+        for edited in [
+            reflowed_block().replace("Optional", "Mandatory"),
+            reflowed_block().replace("fruitless pixel", "fruitlesspixel"),
+        ] {
+            let repo = tempfile::tempdir().unwrap();
+            let path = repo.path().join("AGENTS.md");
+            assert_ne!(edited, reflowed_block(), "the fixture must edit a word");
+            fs::write(&path, &edited).unwrap();
+            assert_eq!(check_rules(repo.path()).unwrap(), Some(false));
+
+            let step = install_rules(repo.path(), false).unwrap();
+
+            assert_eq!(
+                step.summary,
+                "Pixel-first project retrieval guidance installed"
+            );
+            assert_eq!(fs::read_to_string(&path).unwrap(), rules_block());
+            let backups = backups_in(repo.path());
+            assert_eq!(backups.len(), 1, "{backups:?}");
+            assert_eq!(
+                fs::read_to_string(repo.path().join(&backups[0])).unwrap(),
+                edited
+            );
+        }
     }
 
     #[test]
