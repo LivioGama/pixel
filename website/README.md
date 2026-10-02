@@ -46,8 +46,9 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   read-volume evidence and agent-trial limits, what the agent can ask
   (`#toolbox`: six questions with real output from `data/toolbox.toml`,
   the completeness caveat, `recall`, and the no-MCP / no-hosted-index /
-  no-LLM row the specs no longer repeat), local mechanics and cold-start
-  measurement (`#how`), compatibility (`#agents`), questions
+  no-LLM row), local mechanics (`#how`: three steps, the language tiers
+  under them, read from `partials/languages.html`, and the cold-start
+  measurement), compatibility (`#agents`), questions
   (`#faq`), installation (`#install`) and the closing map message. Hero,
   nav and closing share one primary action: try Pixel on your repo, which
   lands on `#install`. Installation is four steps: step 1 (get the binary)
@@ -57,8 +58,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   `pixel audit` (`#your-number`) in one row. Every command has its own
   Copy, never a chained one. On phones the variant tabs scroll on one line
   and commands wrap. No version number appears in the chapter; its figure
-  links the benchmarks page that carries it. The three specs (language,
-  licence, platforms) sit in one row, then labelled rows on mobile. Keep
+  links the benchmarks page that carries it. Keep
   `$agentPrompt` in step with the root README. The inspected script remains
   linked to the released tag; never deploy while validating a branch.
 - The wall uses `data/read_savings.toml`; the evidence compares whole files
@@ -69,7 +69,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   figure (Requests, −88%) links `/benchmarks/`, which names the commit,
   the version, the method and its limits. The cold-start track restates that
   page’s private Rails fresh-clone measurement (Apple M2, median of three
-  runs); refresh its figure, legend and cell split together.
+  runs); refresh its figure, caption and cell split together.
 - Detailed specialist content lives on secondary pages: the alternatives
   matrix is `partials/comparison-matrix.html`, rendered by `/vs/`; the
   classifier example is `shortcodes/classify-example.html` on `/classify/`;

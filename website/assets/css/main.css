@@ -655,13 +655,12 @@ main { counter-reset: chapter; }
 .roles__more { margin-top: auto; align-self: flex-start; font-size: 0.92rem; }
 .roles code, .vs code { background: var(--ground-2); padding: 1px 6px; border-radius: 3px; overflow-wrap: anywhere; }
 
-.how { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 40px; counter-reset: how; }
-.how li { counter-increment: how; position: relative; padding: 26px 20px 24px; border-radius: var(--r); background: var(--panel); }
+.how { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 40px; counter-reset: how; }
+.how li { counter-increment: how; position: relative; display: flex; flex-direction: column; align-items: center; padding: 26px 24px 28px; border-radius: var(--r); background: var(--panel); text-align: center; }
 /* The band: each step's top edge a shade brighter, the flow of one query from index to agent. */
 .how li { --band: var(--green-dim); box-shadow: inset 0 4px 0 var(--band); }
-.how li:nth-child(2) { --band: color-mix(in srgb, var(--green-dim) 50%, var(--green)); }
-.how li:nth-child(3) { --band: var(--green); }
-.how li:nth-child(4) { --band: var(--green-hi); box-shadow: inset 0 4px 0 var(--band), 0 0 0 1px color-mix(in srgb, var(--green) 40%, transparent), 0 18px 50px -24px rgba(34, 197, 94, 0.45); }
+.how li:nth-child(2) { --band: var(--green); }
+.how li:nth-child(3) { --band: var(--green-hi); box-shadow: inset 0 4px 0 var(--band), 0 0 0 1px color-mix(in srgb, var(--green) 40%, transparent), 0 18px 50px -24px rgba(34, 197, 94, 0.45); }
 /* A pixel arrow in the gap after every step but the last. */
 .how li:not(:last-child)::after {
   content: ""; position: absolute; top: 50%; right: -30px; width: 20px; height: 20px; transform: translateY(-50%);
@@ -672,64 +671,38 @@ main { counter-reset: chapter; }
 @media (prefers-reduced-motion: no-preference) {
   .how li:not(:last-child)::after { animation: flow 1.6s ease-in-out infinite; }
   .how li:nth-child(2)::after { animation-delay: 0.2s; }
-  .how li:nth-child(3)::after { animation-delay: 0.4s; }
 }
 @keyframes flow { 0%, 100% { opacity: 0.45; translate: -3px 0; } 50% { opacity: 1; translate: 3px 0; } }
-.how li::before { content: counter(how, decimal-leading-zero); display: block; margin-bottom: 14px; font: 600 0.8rem/1 var(--mono); color: var(--green-hi); }
-.how__icon { position: absolute; top: 22px; right: 20px; color: var(--green-hi); opacity: 0.9; filter: drop-shadow(0 0 6px rgba(34, 197, 94, 0.45)); }
+.how li::before { content: counter(how, decimal-leading-zero); display: block; margin-bottom: 12px; font: 600 0.8rem/1 var(--mono); color: var(--green-hi); }
+.how__icon { margin-bottom: 14px; color: var(--green-hi); opacity: 0.9; filter: drop-shadow(0 0 6px rgba(34, 197, 94, 0.45)); }
 .how h3 { font: 700 1.9rem/1 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; }
-.how p { margin: 12px 0 0; color: var(--ink-soft); font-size: 0.98rem; }
-/* The spec sheet under the steps: label above value, six cells in a row. */
-/* Cold start: the big value beside a 60-cell track, one cell per 0.2 s of the median run. */
-.coldstart { margin: clamp(40px, 5vw, 56px) 0 0; display: grid; grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.6fr); gap: clamp(20px, 4vw, 56px); align-items: center; padding: clamp(22px, 3vw, 34px); border: 1px solid var(--line); border-radius: 6px; background: linear-gradient(180deg, rgba(34, 197, 94, 0.06), rgba(34, 197, 94, 0) 70%), var(--ground-2); }
-.coldstart__lead { display: flex; flex-direction: column; gap: 12px; }
-.coldstart__value { font: 700 clamp(3.6rem, 7vw, 6rem)/0.85 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; color: var(--green-hi); font-variant-numeric: tabular-nums; text-shadow: 0 0 22px rgba(34, 197, 94, 0.35); }
-.coldstart figcaption { color: var(--ink-soft); font-size: 0.98rem; line-height: 1.45; max-width: 20em; }
+.how p { margin: 12px 0 0; max-width: 22em; color: var(--ink-soft); font-size: 1.05rem; line-height: 1.55; text-wrap: balance; }
+/* The language tiers: one column under each step card, label above its list. */
+.langs { margin: clamp(32px, 4vw, 44px) 0 0; padding: 20px 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 40px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); color: var(--ink-soft); font-size: 1.02rem; line-height: 1.5; text-align: center; text-wrap: balance; }
+.langs strong { display: block; margin-bottom: 4px; color: var(--ink); font-weight: 650; }
+@media (max-width: 900px) { .langs { grid-template-columns: minmax(0, 1fr); max-width: 560px; margin-inline: auto; gap: 14px; } }
+/* Cold start, one compact row: the value, then a caption line and the 60-cell track under it (one cell per 0.2 s of the median run). */
+.coldstart { margin: clamp(32px, 4vw, 44px) 0 0; display: grid; grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "value cap" "value track"; align-items: center; gap: 10px clamp(20px, 3vw, 36px); padding: 18px clamp(20px, 3vw, 32px); text-align: left; border: 1px solid var(--line); border-radius: 6px; background: linear-gradient(180deg, rgba(34, 197, 94, 0.06), rgba(34, 197, 94, 0) 70%), var(--ground-2); }
+.coldstart__value { grid-area: value; font: 700 clamp(2.8rem, 5vw, 4rem)/0.85 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; color: var(--green-hi); font-variant-numeric: tabular-nums; text-shadow: 0 0 22px rgba(34, 197, 94, 0.35); }
+.coldstart figcaption { grid-area: cap; color: var(--ink-soft); font-size: 0.95rem; line-height: 1.5; text-wrap: pretty; }
 .coldstart figcaption b { color: var(--ink); font-weight: 600; }
-.coldstart__run { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.coldstart__track { display: grid; grid-template-columns: repeat(60, minmax(0, 1fr)); gap: 3px; }
-.coldstart__track b { aspect-ratio: 1 / 2.2; border-radius: 1px; background: var(--green-dim); }
+.coldstart figcaption .numbers__tag { margin-right: 6px; }
+.coldstart__track { grid-area: track; display: grid; grid-template-columns: repeat(60, minmax(0, 1fr)); gap: 3px; }
+.coldstart__track b { height: 10px; border-radius: 1px; background: var(--green-dim); }
 .coldstart__track b.is-text { background: var(--green); box-shadow: 0 0 6px rgba(34, 197, 94, 0.6); }
-.coldstart__scale { position: relative; height: 1em; font: 400 0.68rem/1 var(--mono); color: var(--ink-soft); }
-.coldstart__scale em { position: absolute; top: 0; font-style: normal; }
-.coldstart__scale em:nth-child(1) { left: 0; }
-.coldstart__scale em:nth-child(2) { left: calc(100% / 6); transform: translateX(-50%); color: var(--green-hi); }
-.coldstart__scale em:nth-child(3) { right: 0; }
-.coldstart__legend { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 6px 0 0; }
-.coldstart__legend div { display: flex; align-items: baseline; gap: 8px; }
-.coldstart__legend div::before { content: ""; width: 10px; height: 10px; border-radius: 1px; background: var(--green-dim); align-self: center; }
-.coldstart__legend .is-text::before { background: var(--green); box-shadow: 0 0 5px rgba(34, 197, 94, 0.55); }
-.coldstart__legend dt { font: 600 0.72rem/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
-.coldstart__legend dd { margin: 0; color: var(--ink); }
-.coldstart__note { margin: 4px 0 0; color: var(--ink-soft); font-size: 0.86rem; line-height: 1.45; }
 @media (prefers-reduced-motion: no-preference) {
   .coldstart__track b { transition: background-color 0.18s ease-out, box-shadow 0.18s ease-out; }
   .js .coldstart.is-waiting:not(.is-lit) .coldstart__track b { background: transparent; box-shadow: inset 0 0 0 1px var(--cell); }
 }
-@media (max-width: 760px) {
-  .coldstart { grid-template-columns: minmax(0, 1fr); }
-  .coldstart__track { grid-template-columns: repeat(30, minmax(0, 1fr)); }
-  .coldstart__scale { display: none; }
-}
-.specs { margin: 40px 0 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
-.specs div { padding: 20px; }
-.specs div:not(:nth-child(3n+1)) { border-left: 1px solid var(--line); }
-.specs dt { font: 600 0.72rem/1 var(--mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-soft); }
-.specs dd { margin: 10px 0 0; color: var(--ink); }
 @media (max-width: 620px) {
-  .specs { grid-template-columns: minmax(0, 1fr); }
-  .specs div:nth-child(n) { display: grid; grid-template-columns: 110px minmax(0, 1fr); align-items: baseline; gap: 12px; border-left: 0; padding: 16px 0; }
-  .specs div:nth-child(n+2) { border-top: 1px solid var(--line); }
-  .specs dd { margin: 0; }
+  .coldstart { grid-template-columns: minmax(0, 1fr); grid-template-areas: "value" "cap" "track"; text-align: center; }
+  .coldstart__track { grid-template-columns: repeat(30, minmax(0, 1fr)); }
 }
 .how code, .faq code { background: var(--ground-2); padding: 1px 6px; border-radius: 3px; }
-@media (max-width: 1000px) {
-  .how { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 40px 40px; }
-  .how li:nth-child(2)::after { top: auto; bottom: -30px; right: 50%; transform: translateX(50%) rotate(90deg); }
-}
-@media (max-width: 560px) {
-  .how { grid-template-columns: minmax(0, 1fr); }
-  .how li:not(:last-child)::after, .how li:nth-child(2)::after { top: auto; bottom: -30px; right: 50%; transform: translateX(50%) rotate(90deg); }
+/* Three steps never split two and one: below 900px they stack, arrows pointing down. */
+@media (max-width: 900px) {
+  .how { grid-template-columns: minmax(0, 1fr); max-width: 560px; margin-inline: auto; }
+  .how li:not(:last-child)::after { top: auto; bottom: -30px; right: 50%; transform: translateX(50%) rotate(90deg); }
 }
 
 /* ---------- jobs ---------- */
