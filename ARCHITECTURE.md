@@ -150,7 +150,7 @@ Per repository, under `.pixel/` (git-ignored):
 | --- | --- | --- |
 | `base.shard`, `delta.shard`, `state.json`, `build.lock` | `pixel-index` | Base shard for all tracked files at a pinned commit, delta shard for files changed between that commit and HEAD, and `state.json` as the delta-layer sidecar (tombstones for superseded base paths). The dirty working-tree overlay is in memory only. First process to hold `build.lock` builds; others wait. |
 | `graph.v2.db` | `pixel-graph` | SQLite: files, symbols, edges with resolution tier. Built lazily on first graph command. The name moves with the schema (`pixel_daemon::api::GRAPH_DB_FILE`); user-facing messages still say `graph.db`. |
-| `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle, FTS5 trigram indexes. Populated by `pixel build-index --history` or the daemon ingest thread on the first history query; capped by the window and budget above, with `auto_vacuum = INCREMENTAL` so an eviction shrinks the file. |
+| `history.db` (+ `-wal`, `-shm`, `history.db.lock`) | `pixel-facts` | SQLite: commit facts, diff text, lifecycle, FTS5 trigram indexes. Populated by `pixel build-index --history` or the daemon ingest thread on the first history query; capped by the window and budget above, with `auto_vacuum = INCREMENTAL` so an eviction shrinks the file. Schema version `FACTS_SCHEMA_VERSION` (3) in `PRAGMA user_version`: another version is rebuilt, except 2 (`UPGRADES_IN_PLACE_FROM`), whose dates are repaired in place. |
 | `code-vectors/` (`manifest.json`, `seg-*.vec`, `lock`) | `pixel-recall` | `search-meaning` chunk vectors, keyed by the xxh3-128 hash of the chunk text seeded with the model id, embedder revision and `CHUNKER_VERSION`; stored as the model's `f32`s. Written only when the search root carries `base.shard` and is not `$HOME`, never by the daemon's semantic fallback. `flock` on `lock` (shared to read, exclusive to write), segments immutable, the manifest replaced by rename; rewritten with the live rows once unreachable ones exceed a quarter of them. |
 | `targets.json` | CLI `targets` | Active task map (version 2): tasks with ids, timestamps, and P0/P1/P2 paths. Read by the guard hook and re-injected after compaction. |
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
@@ -332,7 +332,10 @@ envelope talks to the daemon socket directly.
   carry its `index_state` (`diffs_evicted`, `diff_coverage_since`). Diff text
   is bounded by an age window (`PIXEL_HISTORY_WINDOW_DAYS`, default 365) and
   a size budget (`PIXEL_HISTORY_BUDGET_MB`); commit metadata is never
-  evicted. So a `file-history --file` answer is complete once phase A is,
+  evicted. Both compare `unixepoch(committed_at)`, the author date, so a
+  date whose offset SQLite cannot read (git prints `+518:00` for an object
+  holding `+51800`) is stored as the same instant in UTC
+  (`normalize_committed_at`). So a `file-history --file` answer is complete once phase A is,
   while a `file-history --token` answer only sees indexed diffs and says
   what it missed in `coverage` (`pixel_facts::lifecycle::DiffCoverage`):
   `lower_bound` when any commit's diff is pending or evicted (more touches

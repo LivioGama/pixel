@@ -104,6 +104,43 @@ pub(crate) mod testutil {
         i64::try_from(now).unwrap() - days * 86_400
     }
 
+    /// `commit`, but with a raw author and committer date (`"<unix> <tz>"`)
+    /// written into the object as is: `git commit` rewrites an offset it
+    /// finds invalid, while real histories hold some (`+51800`). Built on
+    /// top of HEAD, which must exist; moves the branch to it, returns its oid.
+    pub(crate) fn commit_raw_date(
+        root: &Path,
+        files: &[(&str, &[u8])],
+        message: &str,
+        raw_date: &str,
+    ) -> String {
+        for (path, bytes) in files {
+            std::fs::write(root.join(path), bytes).unwrap();
+        }
+        git(root, &["add", "-A"]);
+        let tree = git(root, &["write-tree"]);
+        let parent = git(root, &["rev-parse", "HEAD"]);
+        let object = format!(
+            "tree {tree}\nparent {parent}\nauthor t <t@example.com> {raw_date}\ncommitter t <t@example.com> {raw_date}\n\n{message}\n"
+        );
+        let file = root.join(".git").join("raw-commit");
+        std::fs::write(&file, object).unwrap();
+        let oid = git(
+            root,
+            &[
+                "hash-object",
+                "-t",
+                "commit",
+                "-w",
+                "--literally",
+                file.to_str().unwrap(),
+            ],
+        );
+        std::fs::remove_file(file).unwrap();
+        git(root, &["update-ref", "HEAD", &oid]);
+        oid
+    }
+
     /// Two commits: `src/main.rs` added, then extended with `fn helper`.
     pub(crate) fn two_commit_repo() -> (tempfile::TempDir, String, String) {
         let dir = init_repo();

@@ -60,8 +60,15 @@ pub const SKIP_NOTE_OVER_BUDGET: &str = "over-budget";
 /// per (gram, row) at ~52 bytes a posting, 14 times the text they indexed;
 /// 2 = contentless FTS5 trigram indexes (`diff_fts`, `path_fts`), about 60
 /// times smaller (pixel's own history: ~307 MB of postings to 4.8 MB), with
-/// `auto_vacuum = INCREMENTAL` so eviction shrinks the file.
-pub const FACTS_SCHEMA_VERSION: i64 = 2;
+/// `auto_vacuum = INCREMENTAL` so eviction shrinks the file;
+/// 3 = `commits.committed_at` always readable by SQLite's `unixepoch()`: a
+/// git offset it cannot read (`+518:00`) is stored as the same instant in
+/// UTC. A version-2 db is upgraded in place ([`UPGRADES_IN_PLACE_FROM`]).
+pub const FACTS_SCHEMA_VERSION: i64 = 3;
+
+/// The one older schema version opened without a rebuild: its rows only
+/// need [`normalize_stored_dates`], not a re-ingest of the whole history.
+pub const UPGRADES_IN_PLACE_FROM: i64 = 2;
 
 /// How much diff history the index keeps: a size budget over the whole
 /// database and an age window over the commits whose diff is indexed.
@@ -179,6 +186,71 @@ impl IndexState {
             diff_coverage_since: None,
         }
     }
+}
+
+/// The local time and the UTC offset, in seconds, of a git ISO-8601 date
+/// whose offset SQLite cannot read: it takes `Z` or `±HH:MM` up to `±14:59`,
+/// while git prints whatever the commit object holds (`+518:00` for
+/// `+51800`). `None` for a readable offset, or a date of another shape.
+fn unreadable_offset(iso: &str) -> Option<(&str, i64)> {
+    let local = iso.get(..19)?;
+    let (sign, hhmm) = match iso.get(19..)?.split_at_checked(1)? {
+        ("+", rest) => (1, rest),
+        ("-", rest) => (-1, rest),
+        _ => return None,
+    };
+    let (hh, mm) = hhmm.split_once(':')?;
+    if !(hh.bytes().chain(mm.bytes())).all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i64 = hh.parse().ok()?;
+    let minutes: i64 = mm.parse().ok()?;
+    let readable = hh.len() == 2 && mm.len() == 2 && hours <= 14 && minutes <= 59;
+    if readable {
+        return None;
+    }
+    Some((local, sign * (hours * 3600 + minutes * 60)))
+}
+
+/// `iso` as stored in `commits.committed_at`: unchanged when SQLite reads
+/// its offset, else the same instant written in UTC (`+00:00`). Every
+/// window, budget and coverage query compares `unixepoch(committed_at)`, and
+/// an unreadable date there is NULL: the commit was never windowed out.
+pub(crate) fn normalize_committed_at(conn: &Connection, iso: &str) -> Result<String> {
+    let Some((local, offset)) = unreadable_offset(iso) else {
+        return Ok(iso.to_string());
+    };
+    let utc: Option<String> = conn.query_row(
+        "SELECT strftime('%Y-%m-%dT%H:%M:%S+00:00', ?1, ?2)",
+        rusqlite::params![local, format!("{} seconds", -offset)],
+        |r| r.get(0),
+    )?;
+    Ok(utc.unwrap_or_else(|| iso.to_string()))
+}
+
+/// Rewrite every stored date SQLite cannot read with
+/// [`normalize_committed_at`]; the upgrade from version 2. Returns the
+/// number of rows changed.
+pub(crate) fn normalize_stored_dates(conn: &Connection) -> Result<u64> {
+    let mut stmt =
+        conn.prepare("SELECT id, committed_at FROM commits WHERE unixepoch(committed_at) IS NULL")?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    let mut stale: Vec<(i64, String)> = Vec::new();
+    for row in rows {
+        stale.push(row?);
+    }
+    let mut changed = 0;
+    for (id, iso) in stale {
+        let normalized = normalize_committed_at(conn, &iso)?;
+        if normalized != iso {
+            conn.execute(
+                "UPDATE commits SET committed_at = ?1 WHERE id = ?2",
+                rusqlite::params![normalized, id],
+            )?;
+            changed += 1;
+        }
+    }
+    Ok(changed)
 }
 
 /// A single commit reference (shortened oid + subject + timestamp) used by
@@ -315,7 +387,7 @@ impl FactsStore {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap_or(0);
-        if version == FACTS_SCHEMA_VERSION {
+        if version == FACTS_SCHEMA_VERSION || version == UPGRADES_IN_PLACE_FROM {
             return Ok(false);
         }
         if version == 0 {
@@ -356,6 +428,10 @@ impl FactsStore {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         conn.execute_batch(DDL)?;
+        let stored: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if stored == UPGRADES_IN_PLACE_FROM {
+            normalize_stored_dates(&conn)?;
+        }
         conn.pragma_update(None, "user_version", FACTS_SCHEMA_VERSION)?;
         Ok(conn)
     }
@@ -786,5 +862,126 @@ mod tests {
             store.used_bytes().unwrap(),
             ((pragma("page_count") - free) * pragma("page_size")) as u64
         );
+    }
+
+    /// The rule is SQLite's, not ours: every suffix it can read is left
+    /// alone and every one it cannot is reported, with the offset in
+    /// seconds the instant is corrected by. Checked against the bundled
+    /// SQLite, so a change of its parser shows up here.
+    #[test]
+    fn unreadable_offset_is_exactly_what_sqlite_cannot_read() {
+        let conn = Connection::open_in_memory().unwrap();
+        let local = "2011-09-08T02:38:50";
+        let cases: &[(&str, Option<i64>)] = &[
+            ("Z", None),
+            ("+00:00", None),
+            ("-03:30", None),
+            ("+14:00", None),
+            ("+14:59", None),
+            ("-14:59", None),
+            ("+15:00", Some(54_000)),
+            ("+14:60", Some(54_000)),
+            ("+5:00", Some(18_000)),
+            ("+05:3", Some(18_180)),
+            ("+518:00", Some(1_864_800)),
+            ("-518:00", Some(-1_864_800)),
+        ];
+        for (suffix, expected) in cases {
+            let iso = format!("{local}{suffix}");
+            assert_eq!(
+                unreadable_offset(&iso),
+                expected.map(|o| (local, o)),
+                "{iso}"
+            );
+            let read: Option<i64> = conn
+                .query_row("SELECT unixepoch(?1)", [&iso], |r| r.get(0))
+                .unwrap();
+            assert_eq!(read.is_none(), expected.is_some(), "SQLite on {iso}");
+        }
+        for other in [
+            "",
+            "2011-09-08",
+            "2011-09-08T02:38:50+ab:00",
+            "2011-09-08T02:38:50~01:00",
+        ] {
+            assert_eq!(unreadable_offset(other), None, "{other}");
+        }
+    }
+
+    /// requests' `5e6ecdad` holds `1313584730 +51800`, printed by `%aI` as
+    /// `2011-09-08T02:38:50+518:00`: stored, it must be that instant
+    /// (git's own `%at`) in a form `unixepoch` reads.
+    #[test]
+    fn normalize_committed_at_keeps_the_instant_git_recorded() {
+        let conn = Connection::open_in_memory().unwrap();
+        let fixed = normalize_committed_at(&conn, "2011-09-08T02:38:50+518:00").unwrap();
+        assert_eq!(fixed, "2011-08-17T12:38:50+00:00");
+        let unix: i64 = conn
+            .query_row("SELECT unixepoch(?1)", [&fixed], |r| r.get(0))
+            .unwrap();
+        assert_eq!(unix, 1_313_584_730);
+        assert_eq!(
+            normalize_committed_at(&conn, "2011-09-08T02:38:50-518:00").unwrap(),
+            "2011-09-29T16:38:50+00:00"
+        );
+        for kept in ["2018-08-14T13:30:43+02:00", "2011-13-45T99:00:00+518:00"] {
+            assert_eq!(normalize_committed_at(&conn, kept).unwrap(), kept);
+        }
+    }
+
+    /// A version-2 db keeps its rows (re-ingesting a large history costs
+    /// minutes) and only gets its unreadable dates rewritten; any other old
+    /// version is still rebuilt.
+    #[test]
+    fn a_version_2_db_is_upgraded_in_place_and_older_ones_rebuilt() {
+        let (dir, first, second) = two_commit_repo();
+        let root = dir.path();
+        let mut store = FactsStore::open(root).unwrap();
+        crate::ingest::tests::ingest_within(&mut store);
+        let set_date = |store: &FactsStore, oid: &str, iso: &str| {
+            store
+                .conn()
+                .execute(
+                    "UPDATE commits SET committed_at = ?1 WHERE oid = ?2",
+                    rusqlite::params![iso, oid],
+                )
+                .unwrap();
+        };
+        let date_of = |store: &FactsStore, oid: &str| -> String {
+            store
+                .conn()
+                .query_row(
+                    "SELECT committed_at FROM commits WHERE oid = ?1",
+                    [oid],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        set_date(&store, &first, "2011-09-08T02:38:50+518:00");
+        set_date(&store, &second, "2011-09-08T03:38:50-518:00");
+        assert_eq!(normalize_stored_dates(store.conn()).unwrap(), 2);
+        assert_eq!(
+            normalize_stored_dates(store.conn()).unwrap(),
+            0,
+            "idempotent"
+        );
+
+        set_date(&store, &first, "2011-09-08T02:38:50+518:00");
+        store.conn().pragma_update(None, "user_version", 2).unwrap();
+        drop(store);
+        let store = FactsStore::open(root).unwrap();
+        let version: i64 = store
+            .conn()
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, FACTS_SCHEMA_VERSION);
+        assert_eq!(store.index_state().total_commits, 2, "rows kept");
+        assert_eq!(date_of(&store, &first), "2011-08-17T12:38:50+00:00");
+        assert_eq!(date_of(&store, &second), "2011-09-29T17:38:50+00:00");
+
+        store.conn().pragma_update(None, "user_version", 1).unwrap();
+        drop(store);
+        let store = FactsStore::open(root).unwrap();
+        assert_eq!(store.index_state().total_commits, 0, "version 1 rebuilt");
     }
 }
