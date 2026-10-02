@@ -43,7 +43,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
 
 - `layouts/index.html`: the landing page keeps the original explanatory
   arc: hero promise and token wall, reading problem, scoping example,
-  read-volume evidence and agent-trial limits, what the agent can ask
+  what the agent can ask
   (`#toolbox`: six questions with real output from `data/toolbox.toml`,
   the completeness caveat, `recall`, and the no-MCP / no-hosted-index /
   no-LLM row), local mechanics (`#how`: three steps, the language tiers
@@ -78,9 +78,11 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   classifier example is `shortcodes/classify-example.html` on `/classify/`;
   persona guidance is `/teams/`; workflow and Git recordings are
   `shortcodes/workflow-jobs.html` on `/docs/`. Legacy home fragments
-  `#alternatives`, `#decisions`, `#teams`, `#jobs` and `#savings` link to
+  `#alternatives`, `#decisions`, `#teams`, `#jobs`, `#savings`, `#results` and
+  `#tasks` (the read-volume and Proof chapters the home no longer has) link to
   these destinations and navigate directly with JavaScript. Existing
-  problem, proof, own-repo, local, compatibility and install anchors stay.
+  problem, scoping, toolbox, own-repo, local, compatibility and install
+  anchors stay.
 - At rest until the first scroll: the scroll-driven effects (the
   `data-reveal` fades, the assembling titles, the counting numbers) prime
   only what is still below the fold when the visitor first scrolls

@@ -1,6 +1,6 @@
 ---
 name: section-redesign
-description: Redesign one or two sections of the pixel-cli.dev home (website/layouts/index.html) with the loop the hero went through for task #401 — critique as a visitor, an artifact of 2–3 mocked variants with votable points, the user's vote, synthesis iterations, every claim checked against the code and the benchmarks, then the Hugo implementation with desktop and mobile captures. Use when the user says "/section-redesign", "on itère sur la section …", "refais la section #problem", "même méthode que le hero", or names a home section (#problem, #scope, #results, #tasks, #toolbox, #how, #agents, #faq, #install and its #your-number checks; the page has no closing chapter) to rework.
+description: Redesign one or two sections of the pixel-cli.dev home (website/layouts/index.html) with the loop the hero went through for task #401 — critique as a visitor, an artifact of 2–3 mocked variants with votable points, the user's vote, synthesis iterations, every claim checked against the code and the benchmarks, then the Hugo implementation with desktop and mobile captures. Use when the user says "/section-redesign", "on itère sur la section …", "refais la section #problem", "même méthode que le hero", or names a home section (#problem, #scope, #toolbox, #how, #agents, #faq, #install and its #your-number checks; the page has no closing chapter) to rework.
 ---
 
 # Section redesign
