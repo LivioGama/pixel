@@ -131,6 +131,33 @@ build_arm() {
   for name in plugins skills agents commands context-mode advanced-memory; do
     [ -e "$HOME/.claude/$name" ] && [ ! -e "$cfg/$name" ] && ln -s "$HOME/.claude/$name" "$cfg/$name" || true
   done
+  # codex config: per-arm CODEX_HOME with the payload channel (baseline strips
+  # the pixel-managed block, variants swap its content) plus login state.
+  # Built only when codex is in the run: machines without ~/.codex must be
+  # able to evaluate the other CLIs.
+  local codex_home="$cfg/codex-home"
+  if [[ "$CLIS" != *codex* ]]; then
+    echo "built arm=$arm wt=$wt cfg=$cfg (no codex config: CLIS=$CLIS)"
+    return
+  fi
+  mkdir -p "$codex_home"
+  local variant=""
+  case "$arm" in
+    baseline) variant="" ;;
+    on) variant="frozen-main" ;;
+    vquiet|vslim) variant="slim" ;;
+    vfinal) variant="final" ;;
+    vminimal) variant="minimal" ;;
+    v*) variant="${arm#v}" ;;
+  esac
+  if [ -n "$variant" ]; then
+    local codex_payload="$EVAL_DIR/variants/$variant/agent-prompt.md"
+    [ -f "$codex_payload" ] || { echo "no payload for variant $variant (arm $arm)" >&2; exit 2; }
+    python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" payload "$codex_payload"
+  else
+    python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" baseline
+  fi
+  [ -f "$HOME/.codex/auth.json" ] && cp "$HOME/.codex/auth.json" "$codex_home/" || true
   echo "built arm=$arm wt=$wt cfg=$cfg"
 }
 
