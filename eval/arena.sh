@@ -67,6 +67,9 @@ done
 # all arms in parallel: one container each, all tasks inside
 CONTAINERS=()
 for rep in $(seq 1 "$REPS"); do
+  # fresh snapshot per rep: prior reps' index artifacts and tool edits must
+  # not leak into the next rep's starting state
+  for arm in $ARMS; do rm -rf "$RESULTS/snapshot-$arm"; done
   for arm in $ARMS; do
     launch_arm "$arm" "$rep"
     CONTAINERS+=("arena-$arm-$rep-$$")

@@ -39,6 +39,8 @@ lazy indexing only helps when the agent calls it, and codex needed to be told
 its MCP tools existed (fair-wiring question per tool — see below).
 
 Known first-round integration findings: gortex's `track` ran before its
-daemon accepted registrations (hang); semble/stacklit never got their
-instruction channels read by codex (AGENTS.md/derived map land outside the
-channels codex reads). Both are wiring fixes in the entrypoint, queued.
+daemon accepted registrations (hang — now fixed with a registration poll);
+semble's lazy index only helps if the agent calls its MCP tools, which raw
+codex had no reason to discover — the fair-wiring question per tool is
+queued. Stacklit's derived map lands in `/root/.codex/AGENTS.md`, which
+codex reads, so its 7/12 already includes that channel.

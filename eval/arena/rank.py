@@ -41,15 +41,23 @@ def main():
             seconds = int(sec_file.read_text().strip() or 0)
         rows.append({"arm": arm, "task": scenario, "rep": rep, "score": score,
                      "max": sum(m["points"] for m in rubrics[scenario]["must"]),
-                     "tokens": metrics.get("input_tokens") or 0,
+                     "tokens": (metrics.get("input_tokens") or 0)
+                               + (metrics.get("gen_tokens") or 0),
+                     "answered": bool(metrics.get("answered")),
                      "seconds": seconds})
 
     arms = {}
     for r in rows:
         arms.setdefault(r["arm"], []).append(r)
 
+    # means over the matched task set (tasks every arm has rows for), so arms
+    # with partial runs are not averaged across different denominators
+    matched = set.intersection(*(
+        {(x["task"], x["rep"]) for x in arms[a]} for a in arms if arms[a]
+    )) if arms else set()
+
     def agg(arm):
-        rs = arms.get(arm, [])
+        rs = [x for x in arms.get(arm, []) if (x["task"], x["rep"]) in matched]
         if not rs:
             return None
         return {
@@ -57,7 +65,7 @@ def main():
             "max": max(x["max"] for x in rs),
             "tokens": sum(x["tokens"] for x in rs),
             "seconds": sum(x["seconds"] or 0 for x in rs),
-            "answered": sum(1 for x in rs if x["score"] > 0 or x["tokens"] > 0),
+            "answered": sum(1 for x in rs if x["answered"]),
             "n": len(rs),
         }
 

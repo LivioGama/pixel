@@ -16,7 +16,12 @@ prep_gitnexus() { gitnexus setup && gitnexus analyze /repo; }
 prep_gortex()  {
   gortex daemon start
   gortex track /repo
-  sleep 20   # daemon indexes async; give the warm-up a window
+  # the daemon must acknowledge the repo before the MCP server is useful;
+  # a blind sleep hung the first round
+  for _ in $(seq 1 24); do
+    gortex repos 2>/dev/null | grep -q "/repo" && break
+    sleep 5
+  done
   codex mcp add gortex -- gortex mcp
 }
 prep_pixel()   { pixel install && pixel build-index --history /repo; }
@@ -57,5 +62,8 @@ for task in "${TASK_LIST[@]}"; do
   rc=$?
   t1=$(date +%s)
   echo $((t1 - t0)) > "/out/$tag.seconds"
-  [ "$rc" -ne 0 ] && echo "arm=$ARM_TOOL task=$task rc=$rc" >&2
+  if [ "$rc" -ne 0 ]; then
+    echo "arm=$ARM_TOOL task=$task rc=$rc" >&2
+    touch "/out/$tag.failed"
+  fi
 done
