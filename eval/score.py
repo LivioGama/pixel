@@ -15,7 +15,7 @@ def load_result(path: Path, cli: str):
     """Return (answer, metrics) for a transcript, parsed per CLI."""
     answer, metrics = "", {}
     if cli == "codex":
-        texts, turns, input_tokens = [], 0, 0
+        texts, turns, input_tokens, turn_failed = [], 0, 0, False
         for line in path.read_text().splitlines():
             try:
                 ev = json.loads(line)
@@ -29,8 +29,13 @@ def load_result(path: Path, cli: str):
                 turns += 1
                 usage = ev.get("usage") or {}
                 input_tokens += usage.get("input_tokens") or 0
+            elif ev.get("type") == "turn.failed":
+                turn_failed = True
         answer = "\n\n".join(texts)
-        metrics = {"answered": bool(answer.strip()), "turns": turns or None,
+        # codex emits the message and the turn completion as separate events:
+        # an answer without a completed turn is an interrupted trial.
+        metrics = {"answered": bool(answer.strip()) and turns >= 1 and not turn_failed,
+                   "turns": turns or None,
                    "input_tokens": input_tokens or None, "cost_usd": None}
         return answer, metrics
     if cli == "pi":

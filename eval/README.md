@@ -71,12 +71,14 @@ s2 13.0 vs 11.5 (2 turns vs 20), s3 12.0 vs 12.0.
 | cli | arm | s1 | s2 | s3 | mean |
 | --- | --- | --- | --- | --- | --- |
 | codex | baseline (payload stripped) | 8/16 | 10/13 | 12/12 | 10.0 |
-| codex | vfinal (2.8 KB payload) | 8/16 | 12/13 | 9/12 | 11.0 |
+| codex | vfinal (2.8 KB payload) | 8/16 | 12/13 | 9/12 | 9.7 |
 | pi | coverage (installed state) | 13/16 | 12–13/13 | 12/12 | 12.3–12.7 |
 
 Read: codex answers in a single front-loaded turn (163–341K input tokens — no
-agentic loop), ties its own baseline on mean, and gains on the retrieval-heavy
-scenario while losing line-number precision on the rename scenario at n1. pi
+agentic loop). At n1 it nets slightly below its own baseline on the mean
+(9.7 vs 10.0): +2 on the retrieval-heavy scenario, −3 on the rename scenario
+where the one-turn read loses exact line numbers — inside single-run
+variance, needing n≥2 before any conclusion. pi
 (the QA fleet's harness) scores strong across the board with zero
 configuration. Codex n≥2 reps and per-arm pi isolation are the open
 follow-ups.

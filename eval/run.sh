@@ -135,13 +135,22 @@ build_arm() {
   # the pixel-managed block, variants swap its content) plus login state
   local codex_home="$cfg/codex-home"
   mkdir -p "$codex_home"
+  local variant=""
   case "$arm" in
-    baseline) python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" baseline ;;
-    on)       python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" payload "$EVAL_DIR/variants/frozen-main/agent-prompt.md" ;;
-    vfinal)   python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" payload "$EVAL_DIR/variants/final/agent-prompt.md" ;;
-    vquiet|vslim) python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" payload "$EVAL_DIR/variants/slim/agent-prompt.md" ;;
-    vminimal) python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" payload "$EVAL_DIR/variants/minimal/agent-prompt.md" ;;
+    baseline) variant="" ;;
+    on) variant="frozen-main" ;;
+    vquiet|vslim) variant="slim" ;;
+    vfinal) variant="final" ;;
+    vminimal) variant="minimal" ;;
+    v*) variant="${arm#v}" ;;
   esac
+  if [ -n "$variant" ]; then
+    local codex_payload="$EVAL_DIR/variants/$variant/agent-prompt.md"
+    [ -f "$codex_payload" ] || { echo "no payload for variant $variant (arm $arm)" >&2; exit 2; }
+    python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" payload "$codex_payload"
+  else
+    python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" baseline
+  fi
   [ -f "$HOME/.codex/auth.json" ] && cp "$HOME/.codex/auth.json" "$codex_home/" || true
   echo "built arm=$arm wt=$wt cfg=$cfg"
 }
