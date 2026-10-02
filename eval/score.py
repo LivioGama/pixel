@@ -11,9 +11,37 @@ an unanswered run scores 0 regardless of partial text.
 import argparse, json, re, sys
 from pathlib import Path
 
-def load_result(path: Path):
-    """Return (answer, metrics) for a transcript."""
+def load_result(path: Path, cli: str):
+    """Return (answer, metrics) for a transcript, parsed per CLI."""
     answer, metrics = "", {}
+    if cli == "codex":
+        texts, turns, input_tokens = [], 0, 0
+        for line in path.read_text().splitlines():
+            try:
+                ev = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ev.get("type") == "item.completed":
+                item = ev.get("item") or {}
+                if item.get("type") == "agent_message" and item.get("text"):
+                    texts.append(item["text"])
+            elif ev.get("type") == "turn.completed":
+                turns += 1
+                usage = ev.get("usage") or {}
+                input_tokens += usage.get("input_tokens") or 0
+        answer = "\n\n".join(texts)
+        metrics = {"answered": bool(answer.strip()), "turns": turns or None,
+                   "input_tokens": input_tokens or None, "cost_usd": None}
+        return answer, metrics
+    if cli == "pi":
+        try:
+            r = json.loads(path.read_text())
+        except json.JSONDecodeError:
+            return "", {"answered": False, "turns": None, "input_tokens": None,
+                        "cost_usd": None}
+        return r.get("response") or "", {
+            "answered": r.get("status") == "SUCCESS" and bool((r.get("response") or "").strip()),
+            "turns": r.get("num_turns"), "input_tokens": None, "cost_usd": None}
     for line in path.read_text().splitlines():
         try:
             ev = json.loads(line)
@@ -69,7 +97,7 @@ def main():
         arm, cli = stem[len(scenario) + 1:].rsplit(".", 1)
         if args.arms and arm not in args.arms:
             continue
-        answer, metrics = load_result(f)
+        answer, metrics = load_result(f, cli)
         if not metrics:
             # A transcript with no terminal result (interrupted run) is a
             # failed trial: score it zero instead of dropping it.

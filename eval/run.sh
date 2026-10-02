@@ -131,6 +131,18 @@ build_arm() {
   for name in plugins skills agents commands context-mode advanced-memory; do
     [ -e "$HOME/.claude/$name" ] && [ ! -e "$cfg/$name" ] && ln -s "$HOME/.claude/$name" "$cfg/$name" || true
   done
+  # codex config: per-arm CODEX_HOME with the payload channel (baseline strips
+  # the pixel-managed block, variants swap its content) plus login state
+  local codex_home="$cfg/codex-home"
+  mkdir -p "$codex_home"
+  case "$arm" in
+    baseline) python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" baseline ;;
+    on)       python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" payload "$EVAL_DIR/variants/frozen-main/agent-prompt.md" ;;
+    vfinal)   python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" payload "$EVAL_DIR/variants/final/agent-prompt.md" ;;
+    vquiet|vslim) python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" payload "$EVAL_DIR/variants/slim/agent-prompt.md" ;;
+    vminimal) python3 "$EVAL_DIR/lib/build_codex_cfg.py" "$HOME/.codex/config.toml" "$codex_home/config.toml" payload "$EVAL_DIR/variants/minimal/agent-prompt.md" ;;
+  esac
+  [ -f "$HOME/.codex/auth.json" ] && cp "$HOME/.codex/auth.json" "$codex_home/" || true
   echo "built arm=$arm wt=$wt cfg=$cfg"
 }
 
