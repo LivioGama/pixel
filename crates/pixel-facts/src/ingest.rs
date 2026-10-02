@@ -1816,14 +1816,14 @@ b
         assert_eq!(paths, vec!["a.txt".to_string()]);
     }
 
-    fn no_limits() -> HistoryLimits {
+    pub(crate) fn no_limits() -> HistoryLimits {
         HistoryLimits {
             budget_bytes: u64::MAX,
             window_days: None,
         }
     }
 
-    fn ingest_with(store: &mut FactsStore, limits: HistoryLimits) -> TickReport {
+    pub(crate) fn ingest_with(store: &mut FactsStore, limits: HistoryLimits) -> TickReport {
         let options = IngestOptions {
             limits,
             ..IngestOptions::default()

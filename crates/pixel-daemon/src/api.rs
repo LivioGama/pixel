@@ -2775,6 +2775,12 @@ impl Service {
             (None, None) => return Err("lifecycle requires a path or token".to_string()),
         };
         let mut value = serde_json::to_value(&result).map_err(|e| e.to_string())?;
+        // A token found nowhere is as partial as one found late: the diffs
+        // the index lacks may hold it, and the answer says so.
+        if let (None, None, Some(t)) = (&result, path, token) {
+            let coverage = facts.token_coverage(t, None).map_err(|e| e.to_string())?;
+            value["coverage"] = serde_json::to_value(coverage).map_err(|e| e.to_string())?;
+        }
         value["index_state"] =
             serde_json::to_value(facts.index_state()).map_err(|e| e.to_string())?;
         Ok(value)
@@ -7235,6 +7241,87 @@ mod tests {
         };
         assert!(error.contains("facts lazy ingest failed"), "{error}");
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Issue #487 at the op: with the oldest diff outside the window, a
+    /// token found only there is reported as not found *within the indexed
+    /// diffs*, and one found later says its first_seen may not be the
+    /// origin. A path answer reads metadata only and carries no coverage.
+    #[test]
+    fn op_lifecycle_states_the_diff_coverage_of_every_token_answer() {
+        let root = tmpdir("lifecycle-coverage");
+        std::fs::write(root.join("old.rs"), "fn legacy_token() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        let old_date = format!(
+            "{} +0000",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                - 400 * 86_400
+        );
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["commit", "-qm", "old"])
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .env("GIT_AUTHOR_DATE", &old_date)
+            .env("GIT_COMMITTER_DATE", &old_date)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{out:?}");
+        std::fs::write(root.join("new.rs"), "fn fresh_token() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "new"]);
+        let mut facts = FactsStore::open(&root).unwrap();
+        let options = pixel_facts::ingest::IngestOptions {
+            limits: pixel_facts::store::HistoryLimits {
+                budget_bytes: u64::MAX,
+                window_days: Some(365),
+            },
+            ..pixel_facts::ingest::IngestOptions::default()
+        };
+        let report = pixel_facts::ingest::ingest_until_fresh_within(
+            &mut facts,
+            &options,
+            std::time::Duration::from_secs(30),
+        )
+        .unwrap();
+        assert!(report.fresh, "{report:?}");
+        let mut svc = Service::open(&root).unwrap();
+        // No warm loop outliving the test: the index is already fresh.
+        svc.facts_warmer_started.store(true, Ordering::SeqCst);
+
+        let missing = svc.op_lifecycle(None, Some("legacy_token")).unwrap();
+        assert_eq!(missing["first_seen"], Value::Null, "{missing}");
+        assert_eq!(
+            missing["coverage"],
+            serde_json::to_value(pixel_facts::lifecycle::DiffCoverage::from_counts(
+                "legacy_token",
+                false,
+                1,
+                1
+            ))
+            .unwrap(),
+            "{missing}"
+        );
+        assert_eq!(missing["index_state"]["diffs_evicted"], 1, "{missing}");
+
+        let found = svc.op_lifecycle(None, Some("fresh_token")).unwrap();
+        assert_eq!(found["total_touches"], 1, "{found}");
+        assert_eq!(found["coverage"]["lower_bound"], true, "{found}");
+        assert_eq!(found["coverage"]["first_seen_exact"], false, "{found}");
+
+        let by_path = svc
+            .op_lifecycle(Some("old.rs"), Some("legacy_token"))
+            .unwrap();
+        assert_eq!(by_path["what"], "old.rs", "{by_path}");
+        assert!(by_path.get("coverage").is_none(), "{by_path}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
