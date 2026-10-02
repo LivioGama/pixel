@@ -222,7 +222,6 @@ main h2 { position: relative; }
 .hero__facts span { display: inline-flex; align-items: center; gap: 6px; }
 .hero__facts small { font-size: 0.78rem; opacity: 0.8; }
 .hero__facts .px-icon { color: var(--green-hi); }
-.closing__lede code { background: var(--panel); padding: 1px 6px; border-radius: 3px; }
 .hero__down { grid-column: 1 / -1; justify-self: center; display: grid; place-items: center; width: 48px; height: 48px; margin-top: clamp(8px, 3vh, 32px); color: var(--green-hi); border-radius: var(--r); }
 .hero__down:hover { background: var(--panel); }
 @media (prefers-reduced-motion: no-preference) {
@@ -839,6 +838,8 @@ a.agents__item { text-decoration: none; }
   .get .term__copy { margin-left: 0; flex: none; }
   .get .term__body [data-line] { white-space: pre-wrap; overflow-wrap: anywhere; }
 }
+/* Install is the last chapter: it leaves the breathing room the closing used to give before the footer. */
+#install { padding-bottom: clamp(96px, 14vh, 160px); }
 #install .badges { justify-content: center; margin-top: clamp(32px, 4vw, 48px); padding-top: 26px; box-shadow: inset 0 1px 0 var(--line); }
 #install .badges li { font-weight: 600; font-size: 0.95rem; color: var(--ink-soft); }
 #install .badges li::before { display: none; }
@@ -857,12 +858,8 @@ a.agents__item { text-decoration: none; }
 .faq summary:hover { color: var(--green-hi); }
 .faq p { margin: 0 0 18px 24px; color: var(--ink-soft); max-width: 40em; }
 
-/* ---------- closing ---------- */
-.closing { padding-block: clamp(110px, 18vh, 200px); text-align: center; }
-.closing__title { font: 700 clamp(3.6rem, 10vw, 9rem)/0.88 var(--display); font-variation-settings: "ELSH" 2, "ELGR" 1.5; }
+/* ---------- closing actions (the 404 page) ---------- */
 .closing__cta { display: flex; flex-wrap: wrap; justify-content: center; gap: 12px; margin-top: 40px; }
-.closing__lede { margin: 28px auto 0; max-width: 32em; font-size: clamp(1.1rem, 1.6vw, 1.3rem); color: var(--ink-soft); text-wrap: balance; }
-.closing__cmd { max-width: 560px; margin: 32px auto 0; text-align: left; }
 
 /* ---------- dock: the install command, pinned once the hero is gone ---------- */
 .dock {
