@@ -1,0 +1,81 @@
+# The "What your agent gets" chapter of the home (layouts/index.html, #toolbox):
+# six questions an agent asks around an edit, the command the installed prompt
+# (crates/pixel-install/assets/pixel-agent-prompt.md, "Retrieval commands")
+# maps each one to, and an excerpt of what that command printed.
+#
+# Every excerpt is real output, shortened, never rewritten: paths lose their
+# `src/requests/` prefix, long lines end with `…`, and a run of same-tier rows
+# is counted ("5 tests"); the `risk` line, which the page does not explain,
+# is dropped. Regenerate on a fresh clone with the recorded binary:
+#
+#   git clone https://github.com/psf/requests && cd requests && git checkout 611c616
+#   pixel build-index --history .
+#   pixel search-content -F rebuild_auth
+#   pixel find-code 'redirect handling'
+#   pixel impact rebuild_auth
+#   pixel who-calls resolve_redirects
+#   # edit one line inside resolve_redirects (sessions.py:260), then:
+#   pixel what-changed
+#   pixel plan-rollback 'redirects drop the Authorization header'
+#
+# `tier` colours a row as the graph labels it: `exact` or `probable`.
+
+repo = "psf/requests"
+commit = "611c616"
+pixel = "0.6.1"
+recorded = "2026-10-02"
+
+[[card]]
+question = "Where is `rebuild_auth` used?"
+command = "pixel search-content -F rebuild_auth"
+lines = [
+  { text = "sessions.py:273  self.rebuild_auth(…)" },
+  { text = "sessions.py:309  def rebuild_auth(" },
+]
+
+[[card]]
+question = "Where are redirects handled?"
+command = "pixel find-code 'redirect handling'"
+lines = [
+  { text = "sessions.py:127  SessionRedirectMixin" },
+  { text = "sessions.py:134  get_redirect_target" },
+  { text = "auth.py:268      handle_redirect" },
+]
+
+[[card]]
+question = "What depends on `rebuild_auth`?"
+command = "pixel impact rebuild_auth"
+lines = [
+  { tier = "exact", text = "resolve_redirects  depth 1" },
+  { tier = "exact", text = "send               depth 2" },
+  { tier = "probable", text = "5 tests            depth 2" },
+]
+
+[[card]]
+question = "Who calls `resolve_redirects`?"
+command = "pixel who-calls resolve_redirects"
+lines = [
+  { text = "callers: 7/7" },
+  { tier = "exact", text = "send  sessions.py:804" },
+  { tier = "exact", text = "send  sessions.py:821" },
+  { tier = "probable", text = "5 tests in test_requests.py" },
+]
+
+[[card]]
+question = "What did my edit change?"
+command = "pixel what-changed"
+lines = [
+  { text = "1 file · 2 symbols modified" },
+  { text = "  SessionRedirectMixin" },
+  { text = "  resolve_redirects" },
+]
+
+[[card]]
+question = "Where do I roll back to?"
+command = "pixel plan-rollback '…'"
+lines = [
+  { text = "sessions.py" },
+  { text = "  661970d  Disable commonly ignored…" },
+  { text = "  cd90742  docs: indent continuation…" },
+  { text = "→ recommended: cd90742" },
+]
