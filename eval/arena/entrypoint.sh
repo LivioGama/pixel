@@ -41,6 +41,21 @@ case "${ARM_TOOL:-raw}" in
   pixel)    : ;;   # pixel wires itself via pixel install
 esac
 
-# The container is the sandbox: docker's default seccomp blocks codex's
-# bubblewrap namespaces, so read-only mode would fail every command.
-exec codex exec --json --sandbox danger-full-access --skip-git-repo-check "$PROMPT" > "$OUT" 2> /tmp/arena-err
+IFS=' ' read -r -a TASK_LIST <<< "${TASKS:-s1-hook-install s2-vector-recall s3-rename-impact}"
+MODEL_ARGS=()
+[ -n "${CODEX_MODEL:-}" ] && MODEL_ARGS+=(-m "$CODEX_MODEL")
+[ -n "${CODEX_EFFORT:-}" ] && MODEL_ARGS+=(-c model_reasoning_effort="$CODEX_EFFORT")
+
+for task in "${TASK_LIST[@]}"; do
+  prompt=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['prompt'])" "/prompts/$task.json")
+  tag="${ARM_TOOL}-${task}-${REP}"
+  t0=$(date +%s)
+  # The container is the sandbox: docker's default seccomp blocks codex's
+  # bubblewrap namespaces, so read-only mode would fail every command.
+  codex exec --json --sandbox danger-full-access --skip-git-repo-check \
+    "${MODEL_ARGS[@]}" "$prompt" > "/out/$tag.jsonl" 2> /tmp/err
+  rc=$?
+  t1=$(date +%s)
+  echo $((t1 - t0)) > "/out/$tag.seconds"
+  [ "$rc" -ne 0 ] && echo "arm=$ARM_TOOL task=$task rc=$rc" >&2
+done
