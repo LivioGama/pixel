@@ -1,5 +1,5 @@
-# What people who run Pixel say about it, shown on the home under "Proof"
-# (layouts/index.html, "voices"). The block renders only once this file holds
+# What people who run Pixel say about it, shown on the home in the Install
+# chapter, above the invite that asks for them (layouts/index.html, "voices"). The block renders only once this file holds
 # at least one entry, so an empty file shows nothing.
 #
 # Every entry is a real person who wrote or said these words about Pixel and
