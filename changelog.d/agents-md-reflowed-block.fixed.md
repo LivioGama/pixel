@@ -1,0 +1,1 @@
+**install:** `pixel install --repo` no longer rewrites the Pixel-first block of `AGENTS.md` (and leaves no `AGENTS.md.pixel-bak.*`) when it differs from the shipped text only by line breaks or spaces, as a block wrapped at 80 columns does; `pixel doctor` reports it current. A changed word is still replaced.

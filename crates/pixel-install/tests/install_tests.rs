@@ -5448,6 +5448,31 @@ fn repo_install_should_manage_pixel_first_project_rules_fail_open() {
         CheckStatus::Green
     );
 
+    // The block re-wrapped by hand, as a committed AGENTS.md carries it:
+    // doctor stays green and a reinstall writes nothing, backup included.
+    let reflowed = managed.replace(". ", ".\n  ");
+    assert_ne!(reflowed, managed, "the fixture must change the layout");
+    fs::write(&rules_path, &reflowed).unwrap();
+    let rewrapped = doctor(&doctor_options).unwrap();
+    assert_eq!(
+        check(&rewrapped, "repo.pixel-first").status,
+        CheckStatus::Green
+    );
+    let agents_backups = || {
+        let mut names: Vec<_> = fs::read_dir(&repo)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("AGENTS.md.pixel-bak."))
+            .collect();
+        names.sort();
+        names
+    };
+    let backups_before = agents_backups();
+    let reinstalled = install(&repo_install_options(&repo, &home)).unwrap();
+    assert!(reinstalled.ok, "{reinstalled:?}");
+    assert_eq!(fs::read_to_string(&rules_path).unwrap(), reflowed);
+    assert_eq!(agents_backups(), backups_before);
+
     let stale_text = managed.replace("Optional retrieval helpers", "Mandatory retrieval helpers");
     assert_ne!(
         stale_text, managed,

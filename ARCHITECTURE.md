@@ -377,7 +377,7 @@ so no machine path is committed:
 | `.codex/config.toml`, `.codex/hooks.json` (+ backup sidecar) | Codex | `developer_instructions`, and the `composed-guard` `PreToolUse` group replaying pre-existing project hooks; skipped when the repository tracks `.codex/hooks.json` |
 | `.devin/config.local.json` | Devin | `PreToolUse` rewrite, `PermissionRequest` retrieval approval, prompt-context and metrics hooks |
 | `.pi/extensions/pixel-guard.ts` | Pi | the guard extension |
-| a managed block in `AGENTS.md` | Codex, and any agent that reads `AGENTS.md` | the Pixel-first retrieval rule, which never blocks native tools |
+| a managed block in `AGENTS.md` | Codex, and any agent that reads `AGENTS.md` | the Pixel-first retrieval rule, which never blocks native tools; compared word by word, so a copy re-wrapped by hand is current and left as is |
 
 `doctor` checks them under the `repo.*` ids. `install --repo` and `uninstall
 --repo` also remove the MCP server entry releases up to 0.6.1 wrote into
