@@ -17,52 +17,63 @@
 #   {langs.count}  the code graph's grammars (partials/objections.html, from
 #   {langs.list}     crates/pixel-graph/src/extract.rs): their count, their list
 #
+#   audience  "dev" or "team": the column of the home's chapter it sits in
+#             (questions a developer asks, questions whoever approves it asks)
+#   check     HTML, optional: the "Check it" line under the answer on the
+#             home, a command the visitor runs or the measurement it rests
+#             on; placeholders work there too. The FAQPage and /vs/ read
+#             the answer only.
+#
 # The other facts restate SECURITY.md, docs/bench/measured-performance.md
 # and content/benchmarks.md: change an answer when they change.
 
 [[objection]]
 question = "Will my agent actually use it?"
+audience = "dev"
 answer = [
-  '''Not every time. Agents are trained on <code>grep</code> and fall back to it. Pixel does not wait for the agent to discover a tool: <code>pixel install</code> puts its protocol into every session, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files. The guard advises and never blocks.''',
-  '''Use <code>pixel action-log</code> to check what your agent actually ran. Tool use is not a time or cost measurement: an Opus trial with install hooks found no speed gain on its scoping task. <a class="link" href="{bench}#on-whole-agent-tasks">Method and limits</a>''',
+  '''Not every time: agents fall back to <code>grep</code>. <code>pixel install</code> puts Pixel's protocol into every session, and <code>pixel install --repo</code> adds a guard that flags untargeted reads of large files; it advises, never blocks. Tool use is not a time or cost measurement: an Opus trial with hooks found no speed gain on its scoping task. <a class="link" href="{bench}#on-whole-agent-tasks">Method and limits</a>''',
 ]
+check = '''<code>pixel action-log</code> what Pixel ran in this repository, and how it went'''
 
 [[objection]]
 question = "Why not just grep?"
+audience = "dev"
 comparison = true
 answer = [
-  '''Grep finds the line. The cost is what comes next: the agent opens the whole file to understand the match. On {big.owner} {big.lines}-line {big.file} the full file is {big.full} estimated tokens versus {big.pixel} for its signatures (UTF-8 bytes divided by four). These output volumes do not measure session cost. <code>pixel search-content</code> keeps grep's regex syntax, so the agent can keep familiar search syntax.''',
+  '''Grep finds the line; the agent then opens the file around it. On {big.owner} {big.lines}-line {big.file}, the whole file is {big.full} estimated tokens against {big.pixel} for its signatures (UTF-8 bytes ÷ 4), a volume, not a session cost. <code>pixel search-content</code> keeps grep's regex syntax.''',
 ]
+check = '''<code>pixel audit</code> the same comparison on your twenty largest files'''
 
 [[objection]]
-question = "Why not a language server?"
+question = "Why not a language server or my editor's index?"
+audience = "dev"
 comparison = true
 answer = [
-  '''A language server resolves types, so its "who calls this" is more exact than a syntax graph's. It also needs one running server per language and answers one cursor position at a time. Pixel is one binary, covers {langs.count} languages and your Git history, and says when an answer may be incomplete: static analysis never sees every dynamic call, and every graph answer carries that warning.''',
+  '''A language server resolves types, so its callers are more exact than a syntax graph's, but it needs one running server per language; an editor's index lives inside that editor. Pixel is one binary every agent on this page shares, covers {langs.count} languages and your Git history, and says when an answer may be incomplete.''',
 ]
-
-[[objection]]
-question = "Why not my editor's index?"
-comparison = true
-answer = [
-  '''It lives inside that editor. Pixel runs from the shell, so every agent on this page gets the same index, and it stays in <code>.pixel/</code> at your repository root.''',
-]
-
-[[objection]]
-question = "Pixel or semble?"
-comparison = true
-answer = [
-  '''Both, if you search in plain English a lot. On 45 natural-language queries, semble has the right file in its top 10 for 100%, Pixel 0.6.0 for 96%; Pixel puts it first more often, 87% against 64%. Pixel adds the call graph, blast radius, Git history and guarded Git writes. Together they cost about 5,100 tokens of context per turn. <a class="link" href="{bench}#where-a-specialist-wins">Where a specialist wins</a>''',
-]
+check = '''<code>pixel impact &lt;symbol&gt;</code> each caller marked exact or probable'''
 
 [[objection]]
 question = "Does anything leave my machine?"
+audience = "team"
 answer = [
-  '''Nothing you did not ask for. The index lives in <code>.pixel/</code> and there is no telemetry. Network use includes the embedding model it downloads from Hugging Face on first use, the Git remote operations you run (<code>pixel fetch</code>, <code>pixel push</code>), <code>pixel classify</code>, which sends its question to the model you configure, and <code>pixel web-search</code>, which sends its query to the SearXNG endpoint you configure or, without one, to DuckDuckGo and then Wikipedia. An interactive terminal also checks for releases once a day; <code>PIXEL_NO_UPDATE_CHECK=1</code> disables it. <a class="link" href="{github}/blob/main/SECURITY.md" target="_blank" rel="noopener">Security model</a>''',
+  '''Nothing you did not ask for: no telemetry, and the index stays in <code>.pixel/</code>. The network carries the embedding model's first download, your Git remotes, the two opt-in commands that call a service you configure (<code>pixel classify</code>, <code>pixel web-search</code>), and a daily release check in an interactive terminal (<code>PIXEL_NO_UPDATE_CHECK=1</code> turns it off). <a class="link" href="{github}/blob/main/SECURITY.md" target="_blank" rel="noopener">Security model</a>''',
 ]
+check = '''<code>pixel config</code> every setting and the file it comes from'''
 
 [[objection]]
-question = "Which languages?"
+question = "How do I remove it?"
+audience = "team"
 answer = [
-  '''Text search covers every file Git does not ignore, up to 4 MiB. The code graph covers {langs.list}. The last five go through a generic extractor rather than a dedicated one.''',
+  '''<code>pixel uninstall</code> removes every block, hook and file <code>pixel install</code> wrote, then the binary; <code>pixel uninstall --repo</code> does the same for one repository. The index is the <code>.pixel/</code> folder: delete it.''',
 ]
+check = '''<code>pixel uninstall --dry-run</code> the list, before anything is removed'''
+
+[[objection]]
+question = "Pixel or semble?"
+audience = "team"
+comparison = true
+answer = [
+  '''Both, if you search in plain English a lot. On 45 natural-language queries, semble has the right file in its top 10 for 100%, Pixel for 96%; Pixel puts it first more often, 87% against 64%, and adds the call graph, blast radius, Git history and guarded Git writes.''',
+]
+check = '''<a class="link" href="{bench}#where-a-specialist-wins">Where a specialist wins</a> the queries and both tools' results'''

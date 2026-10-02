@@ -277,15 +277,25 @@
       <header class="section__head" data-reveal>
         <h2 id="faq-title"><span class="glow">Fair</span> questions.</h2>
       </header>
-      <div class="faq" data-reveal="stagger">
-        {{/* data/objections.toml, through partials/objections.html: the home's FAQPage (partials/head.html) reads the same list. */}}
-        {{ range partial "objections.html" (dict "abs" false) }}
-        <details>
-          <summary>{{ .question }}</summary>
-          {{ .answer | safeHTML }}
-        </details>
+      {{/* data/objections.toml, through partials/objections.html: the home's FAQPage (partials/head.html) reads the same list. Two columns by `audience`, the first question of each open; each answer ends on its `check` line, the command or the measurement that verifies it. */}}
+      {{ $qs := partial "objections.html" (dict "abs" false) }}
+      <div class="faq-cols" data-reveal="stagger">
+        {{ range slice (dict "who" "dev" "title" "From developers") (dict "who" "team" "title" "From whoever approves it") }}
+        <div class="faq-col">
+          <p class="faq-col__k">{{ .title }}</p>
+          <div class="faq">
+            {{ range $i, $q := where $qs "audience" .who }}
+            <details{{ if eq $i 0 }} open{{ end }}>
+              <summary>{{ $q.question }}</summary>
+              {{ $q.answer | safeHTML }}
+              {{ with $q.check }}<p class="faq__check"><span>Check it</span> {{ . | safeHTML }}</p>{{ end }}
+            </details>
+            {{ end }}
+          </div>
+        </div>
         {{ end }}
-      </div>      <p class="numbers__more"><a class="link" id="alternatives" href="{{ "vs/" | relURL }}#alternatives">Full comparisons</a> · <a class="link" id="teams" href="{{ "teams/" | relURL }}">For your team</a> · <a class="link" id="decisions" href="{{ "classify/" | relURL }}">Optional classification</a> · <a class="link" id="jobs" href="{{ "docs/" | relURL }}#jobs">Workflow and Git examples</a></p>
+      </div>
+      <p class="numbers__more"><a class="link" id="alternatives" href="{{ "vs/" | relURL }}#alternatives">Full comparisons</a> · <a class="link" id="teams" href="{{ "teams/" | relURL }}">For your team</a> · <a class="link" id="decisions" href="{{ "classify/" | relURL }}">Optional classification</a> · <a class="link" id="jobs" href="{{ "docs/" | relURL }}#jobs">Workflow and Git examples</a></p>
 
     </section>
 

@@ -50,7 +50,8 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   under them, read from `partials/languages.html`, and the cold-start
   measurement), compatibility (`#agents`: the agents of `data/agents.toml` grouped by
   `wiring`, each tile naming what Pixel writes or what the visitor runs), questions
-  (`#faq`) and installation (`#install`), which ends the page: there is
+  (`#faq`: `data/objections.toml` in two columns by
+  `audience`, each answer ending on its `check` line) and installation (`#install`), which ends the page: there is
   no closing chapter. Hero and nav share one primary action: try Pixel on
   your repo, which lands on `#install`. Installation is four steps: step 1 (get the binary)
   full width, its one terminal switching between Script, Read it first,
