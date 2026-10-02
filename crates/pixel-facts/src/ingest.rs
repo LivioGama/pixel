@@ -27,7 +27,7 @@ use crate::poison::{
 use crate::store::{
     DIFF_STATE_EVICTED, DIFF_STATE_INDEXED, DIFF_STATE_PENDING, DIFF_STATE_SKIPPED, FactsStore,
     HistoryLimits, REACH_BRANCH, REACH_REFLOG_ONLY, REACH_REMOTE, REACH_STASH, REACH_TAG, Result,
-    SKIP_NOTE_OUTSIDE_WINDOW, SKIP_NOTE_OVER_BUDGET,
+    SKIP_NOTE_OUTSIDE_WINDOW, SKIP_NOTE_OVER_BUDGET, normalize_committed_at,
 };
 
 /// Default wall-clock budget per tick (250ms per PLAN.md). Queries never wait
@@ -669,7 +669,7 @@ fn insert_phase_a_batch(
                 c.oid,
                 c.parents.join(" "),
                 c.author,
-                c.committed_at,
+                normalize_committed_at(&tx, &c.committed_at)?,
                 c.message,
                 final_reach,
                 diff_state,
@@ -1461,7 +1461,7 @@ fn reclaim(store: &FactsStore) -> Result<()> {
     Ok(())
 }
 
-fn now_unix() -> i64 {
+pub(crate) fn now_unix() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
@@ -1471,7 +1471,9 @@ fn now_unix() -> i64 {
 pub(crate) mod tests {
     use super::*;
     use crate::search::{SearchFacet, search};
-    use crate::testutil::{commit, commit_at, days_ago, git, init_repo, two_commit_repo};
+    use crate::testutil::{
+        commit, commit_at, commit_raw_date, days_ago, git, init_repo, two_commit_repo,
+    };
     use crate::text_index::{CANDIDATE_CAP, matching_hunks};
 
     fn far() -> Instant {
@@ -1993,6 +1995,65 @@ b
             )
             .unwrap();
         assert_eq!(state.diff_coverage_since, Some(new_at));
+    }
+
+    /// Issue #512: a commit whose git object holds an offset SQLite cannot
+    /// read (`+51800`, from psf/requests) was stored verbatim, so
+    /// `unixepoch(committed_at)` was NULL, the window never took it out and
+    /// `diff_coverage_since` claimed its 2011 date. Stored as the same
+    /// instant in UTC, it ages out like any other commit.
+    #[test]
+    fn a_commit_with_an_unreadable_offset_ages_out_of_the_window() {
+        let dir = init_repo();
+        let root = dir.path();
+        let base = commit_at(root, &[("a.rs", b"a\n")], "base", days_ago(30));
+        let garbled = commit_raw_date(
+            root,
+            &[("b.rs", b"b\n")],
+            "malformed offset",
+            "1313584730 +51800",
+        );
+        let recent = commit_at(root, &[("c.rs", b"c\n")], "recent", days_ago(1));
+        assert_eq!(
+            git(root, &["log", "-1", "--format=%aI", &garbled]),
+            "2011-09-08T02:38:50+518:00"
+        );
+        let mut store = FactsStore::open(root).unwrap();
+        ingest_with(
+            &mut store,
+            HistoryLimits {
+                window_days: Some(365),
+                ..no_limits()
+            },
+        );
+        let stored: String = store
+            .conn()
+            .query_row(
+                "SELECT committed_at FROM commits WHERE oid = ?1",
+                [&garbled],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "2011-08-17T12:38:50+00:00");
+        assert_eq!(
+            state_of(&store, &garbled),
+            (
+                DIFF_STATE_EVICTED,
+                Some(SKIP_NOTE_OUTSIDE_WINDOW.to_string())
+            )
+        );
+        assert_eq!(state_of(&store, &recent), (DIFF_STATE_INDEXED, None));
+        let state = store.index_state();
+        assert_eq!(state.diffs_evicted, 1);
+        let base_at: String = store
+            .conn()
+            .query_row(
+                "SELECT committed_at FROM commits WHERE oid = ?1",
+                [&base],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(state.diff_coverage_since, Some(base_at));
     }
 
     /// The window also drops diffs that were indexed while still inside
