@@ -67,6 +67,8 @@ Both audits set `PIXEL_DAEMON_AUTO_START=0` and clean up after themselves;
 | `pixel-demo.sh` | `SCENARIO=scope scripts/pixel-demo.sh [repo]` | one `claude -p` scenario, baseline (`--safe-mode`, pixel hooks stripped) vs pixel; a few minutes |
 | `pixel-bench.sh` | `N=3 scripts/pixel-bench.sh [repo]` | the 4-scenario A/B matrix; 10 to 40 minutes, results in `docs/bench/pixel-bench-results.txt` |
 | `pixel-bench-isolated.sh` | `scripts/pixel-bench-isolated.sh [N]` | pixel's doctrine alone vs a blank agent, both under `--safe-mode`; run `pixel-bench.sh` once first (it writes the prompt files) |
+| `harness-recorder.sh` | `HARNESS_OUTDIR=target/recordings scripts/harness-recorder.sh --provider claude --scenario scope --gif [--post PR]` | record a harness run (Claude Code or Codex, pixel arm wired like `pixel-demo.sh`) under `asciinema rec`: `harness-<provider>-<scenario>.cast` + `.txt` transcript + `.gif` (agg) + `meta.json`, then `--post` a PR comment with the stats table and transcript and a gist of the `.cast` for replay. Scenarios are the four demo prompts plus `rns` (the harness retrieval smoke checklist). `--upload` posts the `.cast` to an asciinema server you have authenticated against (`asciinema auth`). Needs `asciinema` and `python3` (`--gif` needs `agg`: `brew install asciinema agg`); `gh` only with `--post` |
+| `test-harness-recorder.py` | `python3 scripts/test-harness-recorder.py` | contract of `harness-recorder.sh` (stub asciinema/agg/gh/claude/codex: cast header, transcript replay, pixel-call counting, PR-comment body, gh-less `--post` refuses) |
 
 The pixel arm of the `claude -p` benches is given the deployed agent prompt
 (`~/.local/share/pixel/agent-prompt.md`, the bundled
