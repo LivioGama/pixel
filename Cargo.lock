@@ -2296,10 +2296,8 @@ dependencies = [
 name = "pixel-ultraflow"
 version = "0.6.1"
 dependencies = [
- "mutants",
  "pixel-flow",
  "serde",
- "serde_json",
 ]
 
 [[package]]

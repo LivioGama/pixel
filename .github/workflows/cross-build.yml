@@ -93,7 +93,46 @@ jobs:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
 
+      # The skip-guard key (see ci.yml's changes job): the tree of the
+      # commit this job checks out (the merge commit on a pull request),
+      # scoped by profile and target -- the lanes build different feature
+      # sets, so each judges its own verdict (#590).
+      - name: Merge-commit tree and UTC day
+        id: key
+        run: |
+          echo "tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
+          echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      # A green build of this tree, profile and target recorded a marker
+      # under crossbuild-verdict-<profile>-<target>-<tree>-<day> (the save
+      # steps below): a repush with no content change restores it and skips
+      # the lane instead of re-running it. The UTC day in the key bounds the
+      # reuse, the same way ci.yml's does.
+      - name: Restore a green verdict for this exact tree and target
+        id: verdict
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/verdict
+          key: crossbuild-verdict-${{ matrix.profile }}-${{ matrix.target }}-${{ steps.key.outputs.tree }}-${{ steps.key.outputs.day }}
+
+      - name: Skip when this tree already built green on this target
+        id: dup
+        if: steps.verdict.outputs.cache-hit == 'true'
+        run: |
+          if [ ! -f "$RUNNER_TEMP/verdict/green" ]; then
+            echo "the restored cache holds no marker; building"
+            exit 0
+          fi
+          echo "duplicate=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Cross-build ${{ matrix.target }} (${{ matrix.profile }}) skipped"
+            echo
+            echo "This merge tree already built green in $(cat "$RUNNER_TEMP/verdict/green") (same UTC day)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Install Rust toolchain
+        if: steps.dup.outputs.duplicate != 'true'
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           # The SHA pin no longer names the toolchain through the ref, so
@@ -106,6 +145,7 @@ jobs:
       # `build`) restores what this job (`cross-build`) saved on main. A tag
       # run can read the default branch's caches, never another tag's.
       - name: Cache Rust build
+        if: steps.dup.outputs.duplicate != 'true'
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           # PRs read the cache but never write it: only merges into main
@@ -121,7 +161,7 @@ jobs:
       # cross compiles inside its own Docker image, which carries the musl
       # toolchain, so no host musl-tools/perl/make are needed.
       - name: Install cross
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && steps.dup.outputs.duplicate != 'true'
         uses: taiki-e/install-action@9983c65e42da123ff25d1f78505eb6de315aa172 # v2
         with:
           tool: cross
@@ -131,11 +171,29 @@ jobs:
       # Rust and ships in the Linux release. Building without it here would
       # leave the released feature set untested.
       - name: Cross-build (model2vec only — ort-sys has no musl prebuilts)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && steps.dup.outputs.duplicate != 'true'
         run: cross build --profile ${{ matrix.profile }} --locked --no-default-features --features model2vec --target ${{ matrix.target }} -p pixel-cli
 
       # Must match release.yml's macOS step exactly, but for the profile:
       # default features, native.
       - name: Build (macOS native)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.dup.outputs.duplicate != 'true'
         run: cargo build --profile ${{ matrix.profile }} --locked --target ${{ matrix.target }} -p pixel-cli
+
+      # A green build records the verdict under
+      # crossbuild-verdict-<profile>-<target>-<tree>-<day>: a later run of
+      # the same tree, profile and target skips the lane (#590). success()
+      # leaves a failed build nothing to record; a skipped duplicate has no
+      # marker to write -- the entry it restored is the record.
+      - name: Record the green verdict
+        if: success() && steps.dup.outputs.duplicate != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/verdict"
+          printf '%s\n' "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > "$RUNNER_TEMP/verdict/green"
+
+      - name: Save the verdict under the tree-and-day key
+        if: success() && steps.dup.outputs.duplicate != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/verdict
+          key: crossbuild-verdict-${{ matrix.profile }}-${{ matrix.target }}-${{ steps.key.outputs.tree }}-${{ steps.key.outputs.day }}
