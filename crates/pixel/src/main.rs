@@ -7991,27 +7991,30 @@ mod tests {
                 .success()
         );
 
-        let base = || {
-            Command::ScopeTask(ScopeTask {
-                task: Some("a task".into()),
-                path: root.to_path_buf(),
-                json: false,
-                limit: None,
-                no_manifest: false,
-                read_only: true,
-                clear: false,
-                max_tier: None,
-                precision: false,
-            })
+        let base = || Command::ScopeTask {
+            task: Some("a task".into()),
+            path: root.to_path_buf(),
+            json: false,
+            limit: None,
+            no_manifest: false,
+            read_only: true,
+            clear: false,
+            max_tier: None,
+            precision: false,
         };
 
         let reject = |read_only: bool, max_tier: Option<&str>, precision: bool| {
             let mut cmd = base();
             match &mut cmd {
-                Command::ScopeTask(s) => {
-                    s.read_only = read_only;
-                    s.max_tier = max_tier.map(str::to_string);
-                    s.precision = precision;
+                Command::ScopeTask {
+                    read_only: ro,
+                    max_tier: mt,
+                    precision: p,
+                    ..
+                } => {
+                    *ro = read_only;
+                    *mt = max_tier.map(str::to_string);
+                    *p = precision;
                 }
                 _ => unreachable!(),
             }
