@@ -1561,13 +1561,7 @@ impl Service {
                     "test" | "tests" | "spec" | "specs"
                 )
             });
-            let penalty = |path: &str| -> f64 {
-                if pixel_rank::signals::is_test_path(path) && !mentions_tests {
-                    0.7
-                } else {
-                    1.0
-                }
-            };
+            let penalty = |path: &str| -> f64 { test_penalty(path, mentions_tests) };
             let weights =
                 engine::rerank::RerankWeights::from(&engine::signals::SignalOptions::default());
             report.targets =
@@ -3625,6 +3619,20 @@ fn partition_credential_matches(
         }
     }
     (kept, hidden)
+}
+
+/// The per-path test-penalty multiplier shared by `op_targets_mode`'s inline
+/// rerank and `EngineReranker`: a test/spec file is demoted only when the task
+/// does not itself name tests/specs (a test file is a *worse* target for a
+/// non-test task, a *better* one for a test task). Kept as a single operator
+/// line so a unit test can pin the ``&& !mentions_tests`` guard against a
+/// `||`/`!` flip.
+fn test_penalty(path: &str, mentions_tests: bool) -> f64 {
+    if pixel_rank::signals::is_test_path(path) && !mentions_tests {
+        0.7
+    } else {
+        1.0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -8131,6 +8139,24 @@ mod tests {
             vec!["tests/login_test.rs".to_string(), "login.rs".to_string()],
             "a phrase naming tests gates the penalty off, so the higher rrf wins"
         );
+    }
+
+    /// The per-path test penalty shared by `op_targets_mode`'s rerank and
+    /// `EngineReranker`. A test path is demoted (0.7) only when the task does
+    /// not itself name tests/specs: a test file is a *worse* target for a
+    /// production task but a *better* one for a task that names tests. Pins
+    /// the ``&& !mentions_tests`` guard against both flips the gate can make
+    /// (``&&``↔``||`` and deleting the ``!``).
+    #[test]
+    fn op_targets_test_penalty_follows_the_phrase() {
+        let test_path = "tests/login_test.rs";
+        let prod_path = "login.rs";
+        // Task not about tests: the test path is demoted, production untouched.
+        assert_eq!(test_penalty(test_path, false), 0.7, "non-test task demotes test file");
+        assert_eq!(test_penalty(prod_path, false), 1.0);
+        // Task that names tests: the test path is the better target, no demotion.
+        assert_eq!(test_penalty(test_path, true), 1.0, "test-naming task keeps test file");
+        assert_eq!(test_penalty(prod_path, true), 1.0);
     }
 
     /// Rename fixture: a TS definition plus a caller that imports it.
