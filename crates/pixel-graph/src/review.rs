@@ -347,6 +347,9 @@ fn severity_rank(severity: &str) -> u8 {
 /// changed behaviour whose own file is not part of the change set is a
 /// divergence the change-propagation rule makes mechanical. Never claims
 /// the caller is broken — only that it was not routed through the change.
+/// The finding anchors at the changed producer's site, never at the
+/// untouched reader's: an anchor there puts a file the branch never
+/// touched into the review's file list, where it reads as reviewed code.
 fn consumers_outside_change(
     store: &GraphStore,
     changed: &[ChangedSymbol],
@@ -384,12 +387,14 @@ fn consumers_outside_change(
             out.push(ReviewFinding {
                 rule: "producer-reader-divergence".into(),
                 severity: "MEDIUM".into(),
-                file: Some(path),
-                line: Some(caller.start_line),
+                file: Some(cs.path.clone()),
+                line: Some(sym.start_line),
                 evidence: format!(
-                    "{producer} changed; {consumer} reads it and was not changed",
+                    "{producer} changed; {consumer} at {path}:{line} reads it and was not changed",
                     producer = cs.name,
-                    consumer = caller.name
+                    consumer = caller.name,
+                    path = path,
+                    line = caller.start_line,
                 ),
                 fix_hint: "route this consumer through the new behaviour, or record why none \
                            is needed",
@@ -727,10 +732,18 @@ mod tests {
         );
         let d = &divergence[0];
         assert_eq!(d.severity, "MEDIUM");
-        assert_eq!(d.file.as_deref(), Some("src/b.rs"));
-        assert_eq!(d.line, Some(2), "{}", d.evidence);
+        // The finding anchors at the changed producer, so the review's file
+        // list only ever names files the change set touched; the untouched
+        // reader stays locatable through the evidence.
+        assert_eq!(d.file.as_deref(), Some("src/a.rs"));
+        assert_eq!(d.line, Some(1), "{}", d.evidence);
         assert!(d.evidence.contains("consume"), "{}", d.evidence);
         assert!(d.evidence.contains("produce"), "{}", d.evidence);
+        assert!(
+            d.evidence.contains("src/b.rs:2"),
+            "the untouched reader's site is named: {}",
+            d.evidence
+        );
 
         // Strong and weak secret shapes both surface, at their exact lines,
         // and neither echoes the matched value.

@@ -40,13 +40,14 @@ apply to:
 | `change-propagation.md` | always | list every producer and reader of a value before changing it; siblings without the new input, version bumps, named constants, secrets in every sink, timers around the real cost |
 | `graph-resolver.md` | `crates/pixel-graph/**` | the chain a resolution change crosses (extraction, storage, index, six resolution paths, `rename`, diagnostics), the language rule it models, tier honesty |
 | `install-layouts.md` | `crates/pixel-install/**` | repo equal to `$HOME`, foreign configs, quoted paths in pasted commands, global and repo-local state kept apart |
+| `verify-installed-first.md` | always | when a change moves installed behaviour (hooks, deployed prompts, the binary), install and verify against the real installed binary / a real hook payload *before* writing or churning unit tests — a hand-built unit call that passes while the installed path is broken proves nothing |
 | `readme-webp.md` | `docs/examples/*.webp`, `docs/motion/**` | the verified lossless pipeline for README animated webp: render crf=10, 1600×1000 lanczos frames, `img2webp -lossless`, embed `width="800"` |
 | `project-task.md` | always | before any work: find the issue on [project 3, view 1](https://github.com/users/LivioGama/projects/3/views/1) or open one and add it; the PR body opens with `Task <number>` (declared exceptions: `no task: <reason>`); the board Status follows the PR — In Progress at open, Done only at merge, back to Todo when closed unmerged |
 | `review-gate.md` | always | before pushing a feature branch: fetch and rebase on the remote default, then fix every `pixel review-gate` finding at CONCERN or above — the pre-push hook enforces both |
 | `pr-swarm.md` | `scripts/pr-swarm.sh`, `.claude/settings.json` | the rmux pane-per-open-PR reconciler: the tool, the SessionStart watcher that replaces launchd (macOS TCC denies launchd any path under `~/Documents`), and the teardown rails that keep a merged PR's worktree when it is dirty, unpushed or the shared cache |
 
 `.claude/rules` is a symlink to that directory (Claude Code loads it by
-itself, honouring `paths:`), and `CLAUDE.md` is a symlink to this file. A
+itself, honouring `paths:`). A
 tool that does not auto-load a rules directory (Codex, pi, Devin) reads the
 files listed above before its first edit; the `paths:` front matter tells it
 which ones matter for the files it is about to touch. Add a rule as a new
@@ -66,6 +67,7 @@ and its supporting files; `.claude/skills` is a symlink to it.
 | `docker-setup-smoke/` | replaying a new user's setup in Docker: install, personal settings kept, reinstall, first audit, doctor, uninstall | tests a release archive, install.sh, the Homebrew tap or compiled main/PR/commit sources in a disposable Linux container with pre-existing Claude/Codex/pi settings; `--agents` adds Claude Code, Codex and pi sessions against a scripted fake model; no real LLM, host configuration untouched, saved provenance, reports and exit status |
 | `section-redesign/` | reworking a section of the pixel-cli.dev home, "/section-redesign #<anchor>", "même méthode que le hero" | the loop the hero went through: visitor critique, an artifact of mocked variants with votable points (`assets/review-sheet.html`), synthesis iterations, every claim checked against code and benchmarks, the Hugo implementation with desktop and mobile captures; lists the decisions that already bind every section |
 | `improve-codebase-architecture/` | manual only: "/improve-codebase-architecture [area]", an architecture review, where to deepen modules | finds deepening opportunities from churn, `pixel audit`, areas and callers, writes a local HTML report of before/after cards with their measured cost (mutants, diff, `ARCHITECTURE.md` sections, impact risk), then grills the picked candidate into a project-3 task; settled decisions live in `ARCHITECTURE.md` and `.agents/rules/`; adapted from Matt Pocock's MIT skill (`UPSTREAM` pins the commit) |
+| `agent-session-debugging/` | debugging real pi, agy, Claude, or Codex behavior in Herdr, especially Pixel retrieval, metrics, or installed hooks | keeps the main operator pane beside a 2×2 agent grid; inspect real transcripts, ask the CLI directly when its UI is ambiguous, then implement, retest, and redeploy with evidence |
 
 Rules are always-on for the files they name; a skill is read when its
 `description` matches the task. A tool without skill support reads
@@ -114,9 +116,5 @@ Both commands target the account's login shell (from the user database, not `$SH
 - Pure read-only exploration (no edits to `crates/` or rules).
 - The turn only touched docs, prompts, bench scripts, or contributor instructions (`AGENTS.md`, `CONTRIBUTING.md`, `.agents/`) — nothing that changes binary behavior or installed rules.
 <!-- pixel:warp-retrieval:begin -->
-This repository has a Pixel index (`.pixel/`). Optional retrieval helpers:
-`pixel search-content -F '<identifier>'` for exact identifiers,
-`pixel find-code '<concept>'` for behavior-described code, and
-`pixel impact '<symbol>'` before renames. Use them when they fit; native
-tools stay available, and two fruitless pixel calls mean switch to grep.
+This repository has a Pixel index (`.pixel/`). Retrieval starts with Pixel: `pixel search-content -F '<identifier>'` for exact identifiers, `pixel find-code '<concept>'` for behavior-described code, and `pixel impact '<symbol>'` before renames — a native grep/rg over indexed code is a missed retrieval; native tools stay available for everything Pixel does not cover, and two fruitless pixel calls mean switch to grep.
 <!-- pixel:warp-retrieval:end -->

@@ -2373,6 +2373,11 @@ impl Service {
     /// epistemics can read a 0 ms staleness signal, and the caps the pass
     /// fired ride the `caps` array up to `derive_epistemics`.
     fn op_review_gate(&mut self, base: Option<&str>) -> Result<Value, String> {
+        // Findings anchor at working-tree lines; a cached graph predating
+        // an unprocessed watcher event would anchor them at the producer's
+        // old line. Dropping the handle forces ensure_graph's freshness
+        // walk before the review reads a single symbol.
+        self.graph = None;
         let built = self.ensure_graph()?;
         let root = self.root.clone();
         let store = self.graph.as_ref().unwrap();

@@ -574,20 +574,31 @@ fn devin_should_rewrite_exec_and_allow_native_retrieval_by_default() {
             "{command}"
         );
     }
+    let discovery_note = "Pixel suggestion: repository discovery: use pixel search-content, find-code, or list-areas. Original call proceeds.";
+    assert_eq!(
+        guard(
+            "devin",
+            &payload("read", json!({"path":"src/lib.rs","limit":50}), &dir),
+            &[]
+        ),
+        Value::Null,
+        "bounded native reads proceed without an advisory"
+    );
     for event in [
-        payload("read", json!({"path":"src/lib.rs","limit":50}), &dir),
         payload("grep", json!({"path":"src","pattern":"needle"}), &dir),
         payload("glob", json!({"path":"src","pattern":"*.rs"}), &dir),
     ] {
-        let response = guard("devin", &event, &[]);
-        assert!(
-            response.is_null(),
-            "native retrieval proceeds without a hook denial by default: {response}"
+        assert_eq!(
+            guard("devin", &event, &[]),
+            json!({"systemMessage":discovery_note,"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":discovery_note}}),
+            "native discovery proceeds with the Pixel advisory"
         );
     }
+    let inspection_note =
+        "Pixel suggestion: repository inspection: use pixel repo-state. Original call proceeds.";
     assert_eq!(
         guard("devin", &devin_exec("git status", &dir), &[]),
-        Value::Null
+        json!({"systemMessage":inspection_note,"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":inspection_note}})
     );
     assert_eq!(
         guard(
@@ -597,17 +608,41 @@ fn devin_should_rewrite_exec_and_allow_native_retrieval_by_default() {
         ),
         json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"command":"pixel search-like-rg rg -- 'needle' 'src/lib.rs'"}}})
     );
-    for mode in ["advisory", "off"] {
-        for event in [
+    assert_eq!(
+        guard(
+            "devin",
+            &payload("read", json!({"path":"src/lib.rs"}), &dir),
+            &[("PIXEL_POLICY", "advisory")]
+        ),
+        json!({"systemMessage":"Pixel suggestion: repository read: use exec with pixel search-content or pixel pack-context <uid>. Original call proceeds.","hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Pixel suggestion: repository read: use exec with pixel search-content or pixel pack-context <uid>. Original call proceeds."}})
+    );
+    for (event, reason) in [
+        (
             devin_exec("git status", &dir),
+            "Pixel suggestion: repository inspection: use pixel repo-state.",
+        ),
+        (
             payload("read", json!({"path":"src/lib.rs"}), &dir),
-        ] {
-            assert_eq!(
-                guard("devin", &event, &[("PIXEL_POLICY", mode)]),
-                Value::Null,
-                "{mode}"
-            );
-        }
+            "Pixel suggestion: repository read: use exec with pixel search-content or pixel pack-context <uid>.",
+        ),
+        (
+            payload("grep", json!({"path":"src","pattern":"needle"}), &dir),
+            "Pixel suggestion: repository discovery: use pixel search-content, find-code, or list-areas.",
+        ),
+    ] {
+        let advisory = guard("devin", &event, &[("PIXEL_POLICY", "advisory")]);
+        assert_eq!(
+            advisory["systemMessage"],
+            format!("{reason} Original call proceeds.")
+        );
+        assert!(
+            advisory["decision"].is_null(),
+            "advisory must not deny: {advisory}"
+        );
+        assert_eq!(
+            guard("devin", &event, &[("PIXEL_POLICY", "off")]),
+            Value::Null
+        );
     }
     let envs = [("PIXEL_POLICY", "enforce")];
     assert_eq!(
@@ -620,7 +655,8 @@ fn devin_should_rewrite_exec_and_allow_native_retrieval_by_default() {
             &payload("read", json!({"path":"src/lib.rs"}), &dir),
             &envs
         ),
-        json!({"decision":"block","reason":"pixel policy: repository read: use exec with pixel search-content or pixel pack-context <uid>"})
+        json!({"decision":"block","reason":"pixel policy: repository read: use exec with pixel search-content or pixel pack-context <uid>"}),
+        "unbounded native reads remain subject to enforce mode"
     );
     assert_eq!(
         guard(
@@ -628,7 +664,8 @@ fn devin_should_rewrite_exec_and_allow_native_retrieval_by_default() {
             &payload("read", json!({"path":"src/lib.rs","limit":50}), &dir),
             &envs
         ),
-        json!({"decision":"block","reason":"pixel policy: repository read: use exec with pixel search-content or pixel pack-context <uid>"})
+        Value::Null,
+        "bounded native reads remain allowed even in enforce mode"
     );
     assert_eq!(
         guard("devin", &devin_exec("cargo test", &dir), &envs),
@@ -790,10 +827,34 @@ fn devin_and_zcode_rewrite_rtk_read_head_tail_like_cat() {
             "read src/lib.rs",
             "head src/lib.rs | cat",
         ] {
-            assert!(
-                rewrites(command, provider).is_null(),
-                "{provider}: must stay native by default: {command}"
-            );
+            let response = rewrites(command, provider);
+            if provider == "devin"
+                && [
+                    "rtk read src/big.rs -l 1-201",
+                    "rtk read src/big.rs",
+                    "head src/big.rs",
+                    "rtk read .env",
+                    "awk '{print}' src/lib.rs",
+                    "head src/lib.rs | cat",
+                ]
+                .contains(&command)
+            {
+                assert!(
+                    response["systemMessage"].as_str().is_some_and(
+                        |message| message.contains("Pixel suggestion: repository read:")
+                    ),
+                    "Devin advises on unbounded repository reads: {command}: {response}"
+                );
+                assert!(
+                    response["decision"].is_null(),
+                    "advisory must not deny: {response}"
+                );
+            } else {
+                assert!(
+                    response.is_null(),
+                    "{provider}: must stay native without an advisory: {command}: {response}"
+                );
+            }
         }
     }
     // Codex has no reader rewrite: the call proceeds, with the same advisory
@@ -820,7 +881,7 @@ fn enforce_blocks_head_tail_awk_sed_and_rtk_read_like_cat() {
     let range = "repository read: `rtk read -l` takes a level (none, minimal, aggressive), not a line range; use sed -n 'START,ENDp' <file> (at most 200 lines) or pixel pack-context <uid>";
     let block =
         |reason: &str| json!({"decision":"block","reason":format!("pixel policy: {reason}")});
-    // Devin: flagged forms too. Unrewritable ones reach the block.
+    // Devin: flagged forms too. Bounded reads are allowed; unbounded reads block.
     for (command, reason) in [
         ("awk '{print}' src/lib.rs", read),
         ("awk -F, 'NR==1' src/lib.rs", read),
@@ -1462,6 +1523,155 @@ fn prompt_submit_should_treat_a_harness_task_notification_as_no_prompt() {
         .as_str()
         .expect("a human prompt quoting an envelope is still a prompt");
     assert!(context.contains("Pixel-first retrieval"), "{context}");
+}
+
+/// Codex's UserPromptSubmit guidance is always-on, like Devin's: any
+/// repository prompt names the Pixel-first retrieval to attempt, never
+/// blocks, and stays quiet where there is no repository to retrieve from.
+#[test]
+fn codex_prompt_submit_injects_pixel_first_guidance_on_every_repository_prompt() {
+    let dir = indexed_dir("codex-prompt-context");
+    let submit = |cwd: &Path| {
+        hook(
+            &["run-hook", "prompt-submit", "--provider", "codex"],
+            &json!({
+                "hook_event_name":"UserPromptSubmit",
+                // A plain coding prompt: nothing Pixel-named, still guided.
+                "prompt":"where is the foreign-denial precedence decided in the guard?",
+                "cwd":cwd
+            }),
+            &[],
+        )
+    };
+    let response = submit(dir.as_ref());
+    let context = response["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("a repository prompt carries the Codex Pixel guidance");
+    assert!(context.starts_with("Pixel-first retrieval"), "{context}");
+    assert!(context.contains("pixel search-content -F"), "{context}");
+    assert!(context.contains("pixel find-code"), "{context}");
+    assert!(
+        context.contains("Do not answer from memory, a generic web search"),
+        "{context}"
+    );
+    assert!(context.contains("never block the task"), "{context}");
+    assert!(!response.get("decision").is_some(), "{response}");
+    let outside = Scratch::for_test("pixel-guard-policy", "codex-prompt-outside");
+    assert_eq!(
+        submit(outside.as_ref()),
+        Value::Null,
+        "outside a repository there is no index to point at"
+    );
+    // The Codex guidance is Codex's alone: an indexed repository must not
+    // make it ride along on another provider's prompt.
+    let devin = hook(
+        &["run-hook", "prompt-submit", "--provider", "devin"],
+        &json!({
+            "hook_event_name":"UserPromptSubmit",
+            "prompt":"explain the guard's precedence rules",
+            "cwd":dir.as_ref()
+        }),
+        &[],
+    );
+    let devin_context = devin["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("Devin keeps its own guidance");
+    assert!(
+        !devin_context.contains("for this repository prompt"),
+        "{devin_context}"
+    );
+}
+
+/// The task_context/task_boundary opt-outs silence the task notes, not the
+/// Pixel-first guidance: with both disabled, an indexed repository's prompt
+/// still carries the guidance for Codex and for a real Claude host.
+#[test]
+fn prompt_submit_still_guides_when_task_features_are_disabled() {
+    let dir = indexed_dir("prompt-features-disabled");
+    let envs = [("PIXEL_TASK_CONTEXT", "0"), ("PIXEL_TASK_BOUNDARY", "0")];
+    let submit = |provider: &str| {
+        hook(
+            &["run-hook", "prompt-submit", "--provider", provider],
+            &json!({
+                "hook_event_name":"UserPromptSubmit",
+                "prompt":"where is the foreign-denial precedence decided in the guard?",
+                "cwd":dir.as_ref()
+            }),
+            &envs,
+        )
+    };
+    let codex = submit("codex")["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("Codex guidance survives the task feature opt-outs")
+        .to_string();
+    assert!(codex.starts_with("Pixel-first retrieval"), "{codex}");
+    assert!(codex.contains("pixel find-code"), "{codex}");
+    let claude = submit("claude")["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("Claude guidance survives the task feature opt-outs")
+        .to_string();
+    assert!(claude.starts_with("Pixel-first retrieval"), "{claude}");
+    assert!(claude.contains("pixel-indexed repository"), "{claude}");
+}
+
+/// Claude Code's guidance is always-on, like Devin's and Codex's, but only
+/// on a real Claude host: a prompt-submit runs its task packet regardless, and
+/// the Pixel-first retrieval to attempt rides on every indexed-repository
+/// prompt. An imported Claude config (a Devin session reading
+/// `~/.claude/settings.json` verbatim) must not prepend a second guidance over
+/// Devin's own, so the host gate decides injection, not the provider alone.
+#[test]
+fn claude_prompt_submit_injects_pixel_first_guidance_on_a_real_claude_host() {
+    let dir = indexed_dir("claude-prompt-context");
+    let submit = |cwd: &Path| {
+        hook(
+            &["run-hook", "prompt-submit", "--provider", "claude"],
+            &json!({
+                "hook_event_name":"UserPromptSubmit",
+                // A plain coding prompt: nothing Pixel-named, still guided.
+                "prompt":"where is the foreign-denial precedence decided in the guard?",
+                "cwd":cwd
+            }),
+            &[],
+        )
+    };
+    let response = submit(dir.as_ref());
+    let context = response["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("a repository prompt carries the Claude Pixel guidance on a real Claude host");
+    assert!(context.starts_with("Pixel-first retrieval"), "{context}");
+    assert!(
+        context.contains("this is a pixel-indexed repository"),
+        "{context}"
+    );
+    assert!(context.contains("pixel search-content -F"), "{context}");
+    assert!(context.contains("pixel find-code"), "{context}");
+    assert!(context.contains("never block the task"), "{context}");
+    assert!(!response.get("decision").is_some(), "{response}");
+    let outside = Scratch::for_test("pixel-guard-policy", "claude-prompt-outside");
+    assert_eq!(
+        submit(outside.as_ref()),
+        Value::Null,
+        "outside a repository there is no index to point at"
+    );
+    // The Claude guidance is Claude's alone: an importing Devin host gets its
+    // own guidance, not a repeat of Claude's over it.
+    let devin = hook(
+        &["run-hook", "prompt-submit", "--provider", "devin"],
+        &json!({
+            "hook_event_name":"UserPromptSubmit",
+            "prompt":"explain the guard's precedence rules",
+            "cwd":dir.as_ref()
+        }),
+        &[],
+    );
+    let devin_context = devin["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("Devin keeps its own guidance");
+    assert!(
+        !devin_context.contains("this is a pixel-indexed repository"),
+        "{devin_context}"
+    );
 }
 
 /// Devin loads `~/.claude/settings.json` hooks verbatim, so the Claude entry

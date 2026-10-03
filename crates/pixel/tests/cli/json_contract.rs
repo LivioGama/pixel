@@ -616,7 +616,9 @@ fn review_gate_json_contract_is_an_enveloped_finding_list() {
     let dir = fixture("review-gate");
     // Change `login_user` and append a credential-shaped line in the same
     // file. `src/caller.rs` — which calls `login_user` — is untouched, so
-    // the divergence rule must name it.
+    // the divergence rule must anchor at the changed site and name the
+    // untouched reader's location in its evidence, never list the reader's
+    // file as the finding's own.
     std::fs::write(
         dir.join("src/login.rs"),
         "pub fn login_user(name: &str) -> bool {\n    name.len() > 0\n}\nconst LEAK: &str = \"ghp_1234567890abcdef\";\n",
@@ -641,8 +643,16 @@ fn review_gate_json_contract_is_an_enveloped_finding_list() {
         .filter(|f| f["rule"] == "producer-reader-divergence")
         .collect();
     assert_eq!(divergence.len(), 1, "{doc}");
-    assert_eq!(divergence[0]["file"], "src/caller.rs", "{doc}");
+    assert_eq!(divergence[0]["file"], "src/login.rs", "{doc}");
+    assert_eq!(divergence[0]["line"], 1, "{doc}");
     assert_eq!(divergence[0]["severity"], "MEDIUM", "{doc}");
+    assert!(
+        divergence[0]["evidence"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("src/caller.rs:2"),
+        "the untouched reader's site is named in the evidence: {doc}"
+    );
 
     let secret: Vec<&serde_json::Value> = findings
         .iter()

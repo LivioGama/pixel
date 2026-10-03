@@ -179,6 +179,10 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
         "---\nname: pixel\ndescription: >-\n  Deterministic code retrieval: indexed search, concept resolve, impact\n  analysis, caller/callee tracing, task targets, plan generation, and git\n  history archaeology via the `pixel` CLI.\n---\n\n{AGENT_PROMPT_ASSET}"
     );
     let guard_cmd = format!("'{}' run-hook guard --provider antigravity", exe.display());
+    let metrics_cmd = format!(
+        "'{}' run-hook metrics --provider antigravity",
+        exe.display()
+    );
     let plugin_hooks = json!({
         "pixel-guard": {
             "enabled": true,
@@ -199,6 +203,18 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
                     "type": "command",
                     "command": guard_cmd,
                     "timeout": 10
+                }
+            ],
+            "PostToolUse": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": metrics_cmd,
+                            "timeout": 10
+                        }
+                    ]
                 }
             ]
         }
@@ -280,6 +296,10 @@ pub fn enable_plugin_in_config(home: &Path, dry_run: bool) -> Result<InstallStep
 pub fn install_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let h_path = hooks_path(home);
     let guard_cmd = format!("'{}' run-hook guard --provider antigravity", exe.display());
+    let metrics_cmd = format!(
+        "'{}' run-hook metrics --provider antigravity",
+        exe.display()
+    );
 
     if dry_run {
         return Ok(InstallStep {
@@ -319,6 +339,18 @@ pub fn install_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<In
                 "type": "command",
                 "command": guard_cmd,
                 "timeout": 10
+            }
+        ],
+        "PostToolUse": [
+            {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": metrics_cmd,
+                        "timeout": 10
+                    }
+                ]
             }
         ]
     });
@@ -559,6 +591,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn antigravity_prompt_should_require_scoped_reads_after_pixel_hits() {
+        assert!(
+            AGENT_PROMPT_ASSET.contains("that answer is the retrieval"),
+            "Antigravity guidance must treat a Pixel hit as the retrieval"
+        );
+        assert!(
+            // The bundled phrase is line-wrapped in the asset ("the\nserved
+            // window"), so assert the contiguous run that is actually present.
+            AGENT_PROMPT_ASSET.contains("served window")
+                && AGENT_PROMPT_ASSET.contains("`sed -n '<line>,+40p' <path>`")
+                && AGENT_PROMPT_ASSET.contains("`offset=<line>, limit≈40` read"),
+            "Antigravity guidance must give bounded scoped-read examples"
+        );
+        assert!(
+            AGENT_PROMPT_ASSET.contains("a whole-file read pays for the answer"),
+            "Antigravity guidance must reject whole-file reads after a Pixel hit"
+        );
+    }
+
+    #[test]
     fn test_antigravity_deploy_and_check() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
@@ -642,6 +694,10 @@ mod tests {
             assert_eq!(
                 installed["pixel-guard"]["PreInvocation"],
                 json!([{"type": "command", "command": expected_command, "timeout": 10}])
+            );
+            assert_eq!(
+                installed["pixel-guard"]["PostToolUse"],
+                json!([{"matcher": "*", "hooks": [{"type": "command", "command": "'/usr/local/bin/pixel' run-hook metrics --provider antigravity", "timeout": 10}]}])
             );
             for defect in ["missing", "wrong-command", "wrong-type", "disabled"] {
                 let mut broken = installed.clone();

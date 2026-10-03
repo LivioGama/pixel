@@ -908,7 +908,7 @@ fn doctor_install_artifact_checks_red_and_green() {
     let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
     let mut edited = fs::read_to_string(&prompt_path).expect("agent-prompt deployed");
     assert!(
-        edited.contains("## Retrieval commands") && edited.contains("## Reading results"),
+        edited.contains("## The stopping rule") && edited.contains("## Retrieval commands"),
         "fixture: the edited prompt must still satisfy the old heuristic"
     );
     edited.push_str("\nOne extra rule the bundled prompt does not carry.\n");
@@ -2793,7 +2793,7 @@ fn doctor_codex_config_check_is_red_until_the_current_block_is_in_place() {
     let written = fs::read_to_string(codex_config_path(home)).unwrap();
     fs::write(
         codex_config_path(home),
-        written.replace("## Reading results", "## Reading output"),
+        written.replace("## Retrieval commands", "## Retrieval output"),
     )
     .unwrap();
     let check = status();
@@ -5544,7 +5544,7 @@ fn repo_install_should_manage_pixel_first_project_rules_fail_open() {
     assert_eq!(fs::read_to_string(&rules_path).unwrap(), reflowed);
     assert_eq!(agents_backups(), backups_before);
 
-    let stale_text = managed.replace("Optional retrieval helpers", "Mandatory retrieval helpers");
+    let stale_text = managed.replace("missed retrieval", "optional retrieval");
     assert_ne!(
         stale_text, managed,
         "the test mutation must alter managed policy"
@@ -6642,7 +6642,7 @@ fn hook_review_options(home: &Path, exe: &Path, id: &str, repo: Option<&Path>) -
 }
 
 /// Codex 0.159 skips a hook the user has not reviewed (`/hooks`), without a
-/// message: Pixel's metrics hook installed but never reviewed is dormant, so
+/// message: Pixel's metrics and prompt-submit hooks installed but never reviewed are dormant, so
 /// doctor must say so, with the step only the user can take, and turn green
 /// once Codex's config records the review for that exact hook.
 #[test]
@@ -6668,7 +6668,7 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
     assert_eq!(
         unreviewed.summary,
         format!(
-            "Codex skips 10 of the 10 Pixel hook(s) in {} until you review them (Interrupt #0.0, PostToolUse #0.0, PostToolUse #1.0, PreToolUse #0.0, SessionEnd #0.0, SessionStart #0.0, Stop #0.0, SubagentStart #0.0, SubagentStop #0.0, UserPromptSubmit #0.0): \
+            "Codex skips 11 of the 11 Pixel hook(s) in {} until you review them (Interrupt #0.0, PostToolUse #0.0, PostToolUse #1.0, PreToolUse #0.0, SessionEnd #0.0, SessionStart #0.0, Stop #0.0, SubagentStart #0.0, SubagentStop #0.0, UserPromptSubmit #0.0, UserPromptSubmit #1.0): \
              start `codex` in this directory, run `/hooks` and trust them",
             hooks.display()
         )
@@ -6740,6 +6740,7 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
         ("subagent_start", 0),
         ("subagent_stop", 0),
         ("user_prompt_submit", 0),
+        ("user_prompt_submit", 1),
     ] {
         reviews.push_str(&format!(
             "\n[hooks.state.\"{}:{event}:{group}:0\"]\ntrusted_hash = \"sha256:fixture\"\n",
@@ -6753,7 +6754,7 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
     assert_eq!(
         reviewed.summary,
         format!(
-            "Codex has reviewed the 10 Pixel hook(s) in {}",
+            "Codex has reviewed the 11 Pixel hook(s) in {}",
             hooks.display()
         )
     );
