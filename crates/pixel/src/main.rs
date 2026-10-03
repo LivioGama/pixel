@@ -3813,21 +3813,35 @@ fn dev_install_path(home: &Path) -> PathBuf {
 const CARGO_CACHEDIR_TAG: &[u8] = b"Signature: 8a477f597d28d172789f06886806bc55\n\
 # This file is a cache directory tag created by cargo.";
 
+/// The lock files cargo takes in a profile directory (`target/debug/`)
+/// on every build: `.cargo-lock`, and `.cargo-artifact-lock` in the
+/// directory final artifacts land in since cargo split the build directory
+/// from the artifact one. Unlike `CACHEDIR.TAG` they exist whoever created
+/// `target/`.
+const CARGO_PROFILE_LOCKS: [&str; 2] = [".cargo-lock", ".cargo-artifact-lock"];
+
 /// True when `path` is cargo build output, never an install location: it
-/// has a `target` directory component, or a directory above it holds
-/// cargo's `CACHEDIR.TAG`. The tag is what still names a build directory
-/// once `canonicalize` has resolved a `target/` symlink into a cache or a
-/// `CARGO_TARGET_DIR` elsewhere: without it the running test binary was
-/// taken for an install and overwritten (#513).
+/// has a `target` directory component, or a directory above it is a cargo
+/// build directory ([`is_cargo_build_dir`]). That is what still names a
+/// build directory once `canonicalize` has resolved a `target/` symlink
+/// into a cache or a `CARGO_TARGET_DIR` elsewhere: without it the running
+/// test binary was taken for an install and overwritten (#513, #530).
 fn is_cargo_target_path(path: &Path) -> bool {
     path.components()
         .any(|c| c.as_os_str() == std::ffi::OsStr::new("target"))
         || path.ancestors().skip(1).any(is_cargo_build_dir)
 }
 
-/// `dir` holds the `CACHEDIR.TAG` cargo writes in a build directory.
+/// `dir` holds the `CACHEDIR.TAG` cargo writes at the root of a target
+/// directory it creates, or one of the [`CARGO_PROFILE_LOCKS`] of a profile
+/// directory. The tag alone missed a build cache that creates `target/`
+/// itself (cargo then writes no tag), so its test binary was overwritten
+/// again (#530).
 fn is_cargo_build_dir(dir: &Path) -> bool {
     std::fs::read(dir.join("CACHEDIR.TAG")).is_ok_and(|tag| tag.starts_with(CARGO_CACHEDIR_TAG))
+        || CARGO_PROFILE_LOCKS
+            .iter()
+            .any(|lock| dir.join(lock).is_file())
 }
 
 /// Every `pixel` executable on `path_var`, in PATH order, symlinks

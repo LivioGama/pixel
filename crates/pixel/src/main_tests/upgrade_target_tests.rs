@@ -156,6 +156,44 @@ fn a_build_dir_reached_through_a_symlink_is_still_build_output() {
     let _ = std::fs::remove_dir_all(&d);
 }
 
+/// #530: cargo writes `CACHEDIR.TAG` only into a target directory it
+/// creates, so a build cache that creates `target/` itself leaves none,
+/// and the running test binary was overwritten again. Cargo still takes
+/// its lock in the profile directory beside the binary, whoever created
+/// `target/`: either lock file, alone, marks build output. A directory
+/// that merely has the lock's name does not.
+#[test]
+fn a_build_cache_target_without_the_tag_is_still_build_output() {
+    for lock in [".cargo-lock", ".cargo-artifact-lock"] {
+        let d = sandbox("untagged-target");
+        let build = d.join("cache/build");
+        let built = touch(&build.join("debug/pixel"));
+        std::fs::write(build.join("debug").join(lock), b"").unwrap();
+        std::fs::create_dir_all(d.join("repo")).unwrap();
+        std::os::unix::fs::symlink(&build, d.join("repo/target")).unwrap();
+        assert!(!build.join("CACHEDIR.TAG").exists());
+        assert!(is_cargo_target_path(&built), "{lock}");
+
+        let via_link = d.join("repo/target/debug/pixel");
+        let path_var = std::env::join_paths([built.parent().unwrap()]).unwrap();
+        let t = resolve_upgrade_target(None, Some(via_link), Some(&path_var), &d);
+        assert_eq!(
+            (t.path, t.source),
+            (d.join(".local/bin/pixel"), "default"),
+            "{lock}: neither the exe nor PATH"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    let d = sandbox("lock-named-dir");
+    let installed = touch(&d.join("opt/bin/pixel"));
+    std::fs::create_dir_all(d.join("opt/bin/.cargo-lock")).unwrap();
+    assert!(!is_cargo_target_path(&installed));
+    let t = resolve_upgrade_target(None, Some(installed.clone()), None, &d);
+    assert_eq!((t.path, t.source), (installed, "running binary"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 #[test]
 fn shadow_is_reported_only_when_a_different_pixel_comes_first() {
     let d = sandbox("shadow");
