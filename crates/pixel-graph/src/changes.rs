@@ -187,19 +187,22 @@ pub struct ChangesReport {
 }
 
 #[derive(Debug, PartialEq)]
-enum FileStatus {
+pub(crate) enum FileStatus {
     Added,
     Deleted,
     Modified,
 }
 
+/// One changed file's mapping. Field visibility is `pub(crate)` because the
+/// `review` pass re-reads the same parsed diff for its own two walks
+/// (added-line secret scan, caller containment); it changes nothing here.
 #[derive(Debug)]
-struct FileDiff {
-    path: String,
+pub(crate) struct FileDiff {
+    pub(crate) path: String,
     /// Where the file's base content lives, which a rename moves: the old
     /// side of the diff is read from this path, not from `path`.
     old_path: String,
-    status: FileStatus,
+    pub(crate) status: FileStatus,
     /// Changed line ranges in the NEW file's coordinates (inclusive),
     /// including the one-line anchor a pure deletion leaves behind so an
     /// adjacent symbol is still reported as changed.
@@ -208,13 +211,13 @@ struct FileDiff {
     /// of the new side is computed from these, so a deletion's anchor —
     /// which points at a line the hunk did not write — never turns into an
     /// uncovered addition.
-    added_ranges: Vec<(u32, u32)>,
+    pub(crate) added_ranges: Vec<(u32, u32)>,
     /// Removed line ranges in the OLD file's coordinates (inclusive). Empty
     /// for a pure addition.
     old_ranges: Vec<(u32, u32)>,
     /// False when git described the change without a text hunk: a binary
     /// patch, or a mode-only change. Both are `non_text_change`.
-    text: bool,
+    pub(crate) text: bool,
 }
 
 impl FileDiff {
@@ -275,7 +278,7 @@ fn hunk_range(spec: &str) -> Option<(u32, u32)> {
 /// kept as a `text: false` entry. Without it such a file is invisible to
 /// change detection, which would let a report claim to cover a change it
 /// never saw.
-fn parse_diff(output: &str) -> Vec<FileDiff> {
+pub(crate) fn parse_diff(output: &str) -> Vec<FileDiff> {
     let mut files: Vec<FileDiff> = Vec::new();
     let mut old_path: Option<String> = None;
     // The header being read, and whether it has produced a text hunk yet.
@@ -679,15 +682,12 @@ pub fn detect(
     base_ref: Option<&str>,
     include_tests: bool,
 ) -> Result<ChangesReport, BoxError> {
-    // Without `--base` the diff is `git diff`: the working tree against the
-    // index, so staged edits are not part of it.
-    let base = base_ref.unwrap_or("index").to_string();
     let runner = GitRunner::new(root);
     let diff_bytes = match runner.diff_unified0(base_ref) {
         Ok(bytes) => bytes,
         Err(_) => {
             return Ok(ChangesReport {
-                base,
+                base: base_ref.unwrap_or("index").to_string(),
                 changed_files: 0,
                 symbols: Vec::new(),
                 affected_processes: Vec::new(),
@@ -706,6 +706,23 @@ pub fn detect(
     };
     let diff = String::from_utf8_lossy(&diff_bytes).into_owned();
     let file_diffs = parse_diff(&diff);
+    detect_diffs(store, root, base_ref, &file_diffs, include_tests)
+}
+
+/// `detect` over an already-parsed diff: a caller that read the diff itself
+/// (`review`) shares the same change set instead of running a second
+/// `git diff` that could observe a newer tree. Without `--base` the diff is
+/// `git diff`: the working tree against the index, so staged edits are not
+/// part of it.
+pub(crate) fn detect_diffs(
+    store: &GraphStore,
+    root: &Path,
+    base_ref: Option<&str>,
+    file_diffs: &[FileDiff],
+    include_tests: bool,
+) -> Result<ChangesReport, BoxError> {
+    let base = base_ref.unwrap_or("index").to_string();
+    let runner = GitRunner::new(root);
 
     let mut symbols: Vec<ChangedSymbol> = Vec::new();
     let mut proc_set: BTreeSet<String> = BTreeSet::new();
@@ -717,7 +734,7 @@ pub fn detect(
     let mut consumers: BTreeSet<Consumer> = BTreeSet::new();
     let mut base_reads = 0usize;
 
-    for fd in &file_diffs {
+    for fd in file_diffs {
         let file = match store.file_by_path(&fd.path)? {
             Some(f) => f,
             None => continue, // not indexed (e.g. new file before re-index)
@@ -823,7 +840,7 @@ pub fn detect(
         (Vec::new(), false, String::new())
     };
 
-    let uncovered = scan_uncovered(store, root, &runner, base_ref, &file_diffs)?;
+    let uncovered = scan_uncovered(store, root, &runner, base_ref, file_diffs)?;
     // A deleted symbol has no edges left; its former callers are the
     // unresolved sites that still write its name.
     let mut file_symbols: HashMap<i64, Vec<SymbolRow>> = HashMap::new();

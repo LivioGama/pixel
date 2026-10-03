@@ -135,6 +135,37 @@ enum FailOn {
     Red,
 }
 
+/// `pixel review-gate --fail-on`: the lowest finding severity that exits 1.
+/// The names are the code-review vocabulary the human render prints.
+#[derive(Copy, Clone, ValueEnum)]
+enum ReviewFailOn {
+    Blocker,
+    Concern,
+    Suggestion,
+    Nit,
+}
+
+impl ReviewFailOn {
+    /// The severity rank (LOW 1 .. CRITICAL 4) at or above which the gate fails.
+    fn threshold(self) -> u8 {
+        match self {
+            Self::Blocker => 4,
+            Self::Concern => 3,
+            Self::Suggestion => 2,
+            Self::Nit => 1,
+        }
+    }
+}
+
+fn review_severity_rank(severity: &str) -> u8 {
+    match severity {
+        "CRITICAL" => 4,
+        "HIGH" => 3,
+        "MEDIUM" => 2,
+        _ => 1,
+    }
+}
+
 impl FailOn {
     fn threshold(self) -> pixel_install::doctor::CheckStatus {
         match self {
@@ -775,6 +806,25 @@ enum Command {
         /// Cap output bytes.
         #[arg(long)]
         byte_cap: Option<usize>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Deterministic pre-review: `what-changed` plus the mechanical rules
+    /// (credential-shaped added lines, changed symbols whose callers were
+    /// not themselves changed), each finding carrying the witness that
+    /// established it. Feed the output to a real review as the narrowed
+    /// context it starts from.
+    ReviewGate {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Base ref to diff against (default: the uncommitted diff, or the
+        /// branch's merge-base with the remote default when the tree is clean).
+        #[arg(long)]
+        base: Option<String>,
+        /// Lowest finding level that makes the command exit 1 — the pre-push
+        /// gate sets it, a plain review leaves it off.
+        #[arg(long, value_enum)]
+        fail_on: Option<ReviewFailOn>,
         #[arg(long)]
         json: bool,
     },
@@ -2546,6 +2596,91 @@ fn symbol_line(s: &Value) -> String {
         s.get("end_line").and_then(Value::as_u64).unwrap_or(0),
         s.get("uid").and_then(Value::as_str).unwrap_or("?"),
     )
+}
+
+/// Whether the worst finding in the report meets the `--fail-on` threshold.
+/// Separated from the match arm so the boundary is unit-testable.
+fn review_gate_blocked(data: &Value, threshold: u8) -> bool {
+    let worst = data
+        .get("findings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.get("severity").and_then(Value::as_str))
+        .map(review_severity_rank)
+        .max()
+        .unwrap_or(0);
+    worst >= threshold
+}
+
+/// Findings list for `review-gate`: severity, anchor, rule, witness, fix —
+/// the code review's problems and where they are, nothing else.
+fn pretty_review_gate(d: &Value) -> Option<String> {
+    let findings = d.get("findings")?.as_array()?;
+    let snapshot = d.get("snapshot");
+    let anchor = snapshot
+        .map(|s| {
+            format!(
+                "{} @ {}",
+                s.get("branch").and_then(Value::as_str).unwrap_or("?"),
+                s.get("head")
+                    .and_then(Value::as_str)
+                    .map_or("?", |h| &h[..h.len().min(7)]),
+            )
+        })
+        .unwrap_or_default();
+    let mut output = String::new();
+    if findings.is_empty() {
+        let status = if d
+            .get("caps")
+            .and_then(Value::as_array)
+            .is_some_and(|caps| !caps.is_empty())
+        {
+            "incomplete"
+        } else {
+            "clean"
+        };
+        output.push_str(&format!("{status} — 0 findings ({anchor})\n"));
+    } else {
+        for f in findings {
+            let file = f.get("file").and_then(Value::as_str);
+            let line = f.get("line").and_then(Value::as_u64);
+            let at = match (file, line) {
+                (Some(file), Some(line)) => format!("{file}:{line}"),
+                (Some(file), None) => file.to_string(),
+                _ => "repo-wide".to_string(),
+            };
+            let severity = match f.get("severity").and_then(Value::as_str).unwrap_or("?") {
+                "CRITICAL" => "BLOCKER",
+                "HIGH" => "CONCERN",
+                "MEDIUM" => "SUGGESTION",
+                "LOW" => "NIT",
+                other => other,
+            };
+            output.push_str(&format!(
+                "{:<10} {}  {}\n",
+                severity,
+                at,
+                f.get("rule").and_then(Value::as_str).unwrap_or("?"),
+            ));
+            let evidence = f.get("evidence").and_then(Value::as_str).unwrap_or("");
+            if !evidence.is_empty() {
+                output.push_str(&format!("          {evidence}\n"));
+            }
+            let hint = f.get("fix_hint").and_then(Value::as_str).unwrap_or("");
+            if !hint.is_empty() {
+                output.push_str(&format!("          fix: {hint}\n"));
+            }
+            output.push('\n');
+        }
+        output.push_str(&format!("{} finding(s) ({anchor})\n", findings.len()));
+    }
+    if let Some(caps) = d.get("caps").and_then(Value::as_array) {
+        for cap in caps {
+            output.push_str(&format!("cap: {}\n", cap.as_str().unwrap_or("?")));
+        }
+    }
+    Some(output)
 }
 
 /// Tiered pretty rendering for `targets`.
@@ -5472,6 +5607,21 @@ fn run_command(
                 false,
             )?;
             finish_graph_cmd(data, json, |_| None)?;
+            Ok(())
+        }
+        Command::ReviewGate {
+            path,
+            base,
+            fail_on,
+            json,
+        } => {
+            let data = execute(&path, Request::ReviewGate { base }, false)?;
+            if let Some(fail_on) = fail_on
+                && review_gate_blocked(&data, fail_on.threshold())
+            {
+                owned_exit.set(Some(1));
+            }
+            finish_graph_cmd(data, json, pretty_review_gate)?;
             Ok(())
         }
         Command::RebuildGraph { path, json } => {
@@ -8907,3 +9057,7 @@ mod classify_setup_prompt_tests;
 #[cfg(test)]
 #[path = "main_tests/commit_message_tests.rs"]
 mod commit_message_tests;
+
+#[cfg(test)]
+#[path = "main_tests/review_gate_pretty_tests.rs"]
+mod review_gate_pretty_tests;

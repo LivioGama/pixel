@@ -105,6 +105,13 @@ pub enum Op {
         #[serde(default)]
         include_tests: bool,
     },
+    /// Deterministic pre-review: the `what-changed` engine plus the two
+    /// mechanical passes an LLM review would otherwise start from scratch
+    /// (credential-shaped added lines, change-propagation divergence).
+    ReviewGate {
+        #[serde(default)]
+        base: Option<String>,
+    },
     /// Build the code graph. By default a full rebuild, whatever is stored.
     /// With `if_stale`, the stored graph is kept when its signature still
     /// matches the tree and updated in place when few files drifted: a
@@ -375,6 +382,7 @@ impl Op {
             Op::Processes { .. } => "processes",
             Op::Clusters { .. } => "clusters",
             Op::Changes { .. } => "changes",
+            Op::ReviewGate { .. } => "review_gate",
             Op::Graph { .. } => "graph",
             Op::Status {} => "status",
             Op::Resolve { .. } => "resolve",
@@ -429,6 +437,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "processes",
     "clusters",
     "changes",
+    "review_gate",
     "graph",
     "status",
     "resolve",
@@ -709,6 +718,7 @@ mod tests {
                 },
                 "changes",
             ),
+            (Op::ReviewGate { base: None }, "review_gate"),
             (Op::Graph { if_stale: false }, "graph"),
             (Op::Status {}, "status"),
             (
@@ -919,6 +929,7 @@ mod tests {
             "processes",
             "clusters",
             "changes",
+            "review_gate",
             "graph",
             "status",
             "resolve",

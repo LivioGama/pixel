@@ -14,7 +14,7 @@ normal outcome, not an error to work around.
 | callers + callees of a symbol | `pixel impact '<symbol>'` — worth a look before renames and edits |
 | direct edges only | `pixel who-calls '<fn>' --role callers` |
 | past sessions, deleted code | `pixel recall search '<token>' --since 30d` · `pixel recall ask '<topic>'` |
-| what already differs in this tree | `pixel what-changed` · `pixel review-changes` |
+| what already differs in this tree | `pixel what-changed` · `pixel review-changes` · `pixel review-gate` (deterministic findings: secrets, changed symbols read by untouched callers) |
 | before multi-file edits / "it worked before" / branch sync | `pixel scope-task '<task>'` · `pixel plan-rollback '<problem>'` · `pixel sync-branch` |
 | index freshness | `pixel status` |
 

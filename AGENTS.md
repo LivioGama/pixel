@@ -42,7 +42,7 @@ apply to:
 | `install-layouts.md` | `crates/pixel-install/**` | repo equal to `$HOME`, foreign configs, quoted paths in pasted commands, global and repo-local state kept apart |
 | `readme-webp.md` | `docs/examples/*.webp`, `docs/motion/**` | the verified lossless pipeline for README animated webp: render crf=10, 1600×1000 lanczos frames, `img2webp -lossless`, embed `width="800"` |
 | `project-task.md` | always | before any work: find the issue on [project 3, view 1](https://github.com/users/LivioGama/projects/3/views/1) or open one and add it; the PR body opens with `Task <number>` (declared exceptions: `no task: <reason>`); the board Status follows the PR — In Progress at open, Done only at merge, back to Todo when closed unmerged |
-| `coderabbit-cli.md` | always | when the `coderabbit` CLI is installed: run `coderabbit review --committed --base <pr-base> --agent` on the branch and converge its findings before opening the PR; never block on the CLI itself — a rate limit or outage means open without it |
+| `review-gate.md` | always | before pushing a feature branch: fetch and rebase on the remote default, then fix every `pixel review-gate` finding at CONCERN or above — the pre-push hook enforces both |
 | `pr-swarm.md` | `scripts/pr-swarm.sh`, `.claude/settings.json` | the rmux pane-per-open-PR reconciler: the tool, the SessionStart watcher that replaces launchd (macOS TCC denies launchd any path under `~/Documents`), and the teardown rails that keep a merged PR's worktree when it is dirty, unpushed or the shared cache |
 
 `.claude/rules` is a symlink to that directory (Claude Code loads it by
