@@ -205,7 +205,12 @@ cross build --release --no-default-features --features model2vec \
 
 ## Tests: where they live and what they must prove
 
-- **Unit tests** sit next to the code in each crate (`#[cfg(test)] mod tests`).
+- **Unit tests** sit next to the code in each crate (`#[cfg(test)] mod tests`),
+  after the file's last production item. Two tests read the workspace
+  sources and skip everything from a file's first `#[cfg(test)] mod` on
+  (the git boundary in `pixel-git`, the stale-command check in `docs_drift`),
+  so a production item placed after a test module is invisible to both;
+  `cargo test -p pixel-git --test boundary` fails on one.
 - **Daemon tests** (`crates/pixel-daemon`) build small git fixtures in a temp
   dir and call `Service::handle` directly.
 - **CLI integration tests** (`crates/pixel/tests/cli/<name>.rs`) run the

@@ -7,6 +7,13 @@ paths:
 
 Loaded when a Rust source file is in play. Companion of `mutation-gate.md`.
 
+- **Test modules come last in their file.** Every `#[cfg(test)] mod`
+  (inline, or declared as `mod x;` with its body in another file) follows
+  the file's last production item: the source walks in
+  `crates/pixel-git/tests/boundary.rs` and `docs_drift` stop reading at the
+  first test module, and `pixel/src/main.rs` once hid about 5 800
+  production lines behind twelve interleaved ones (#528). A new test module
+  goes to the end of the file, never next to the function it tests.
 - **One git fixture helper per crate**, in `#[cfg(test)] pub(crate) mod
   testutil` at the crate root: `git()` with author/committer identity and
   `GIT_CONFIG_GLOBAL=/dev/null`, `init_repo()`, `commit(root, files, msg)`.
