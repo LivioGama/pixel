@@ -108,7 +108,7 @@ class PrepareContract(unittest.TestCase):
     def prepare(self):
         shutil.copy(PREPARE, self.repo / "prepare.sh")
         self.git("add", "prepare.sh")
-        self.git("commit", "-qm", "script", "--allow-empty")
+        self.git("commit", "-qm", "script")
         return subprocess.run(
             ["sh", "prepare.sh", "0.2.0", "--date", "2026-02-01"],
             cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=30,
@@ -274,35 +274,34 @@ class PrepareContract(unittest.TestCase):
             changelog)
         self.assertNotIn("/pull/42", changelog)
 
-    def test_an_entry_the_cut_cannot_link_is_refused_before_any_write(self):
-        """No entry ships without its reference: a commit that names no pull
-        request (a push straight to main) and a fragment no commit added
-        both stop the cut, with the tree as it was."""
-        for name, commit in [("pushed.fixed.md", "fix(thing): pushed straight to main"),
-                             ("loose.fixed.md", None)]:
-            with self.subTest(name):
-                self.write("changelog.d/" + name, "**thing:** it no longer breaks.\n")
-                if commit:
-                    self.git("add", ".")
-                    self.git("commit", "-qm", commit)
-                before = self.changelog()
+    def assert_refused_before_any_write(self, name, reason):
+        """No entry ships without its reference: the cut stops on `name`,
+        says why and how to fix it, and leaves the tree as it was."""
+        before = self.changelog()
 
-                result = self.prepare()
+        result = self.prepare()
 
-                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-                self.assertIn(name + ": no pull request referenced", result.stderr)
-                self.assertIn(
-                    "the commit that added it" if commit else "no commit added it",
-                    result.stderr)
-                if commit:
-                    self.assertIn(commit, result.stderr)
-                self.assertIn("https://github.com/LivioGama/pixel/pull/<number>", result.stderr)
-                self.assertEqual(self.changelog(), before)
-                self.assertIn(name, self.fragments())
-                self.assertIn('version = "0.1.0"', (self.repo / "crates/a/Cargo.toml").read_text())
-                (self.repo / "changelog.d" / name).unlink()
-                self.git("add", "-A")
-                self.git("commit", "-qm", "drop " + name, "--allow-empty")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(name + ": no pull request referenced, and " + reason, result.stderr)
+        self.assertIn("https://github.com/LivioGama/pixel/pull/<number>", result.stderr)
+        self.assertEqual(self.changelog(), before)
+        self.assertIn(name, self.fragments())
+        self.assertIn('version = "0.1.0"', (self.repo / "crates/a/Cargo.toml").read_text())
+        return result
+
+    def test_an_entry_pushed_straight_to_main_is_refused_before_any_write(self):
+        """A commit that names no pull request leaves the cut nothing to link."""
+        self.write("changelog.d/pushed.fixed.md", "**thing:** it no longer breaks.\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fix(thing): pushed straight to main")
+        result = self.assert_refused_before_any_write(
+            "pushed.fixed.md", "the commit that added it (")
+        self.assertIn("fix(thing): pushed straight to main) names none", result.stderr)
+
+    def test_an_entry_no_commit_added_is_refused_before_any_write(self):
+        """An uncommitted fragment was never merged by any pull request."""
+        self.write("changelog.d/loose.fixed.md", "**thing:** it no longer breaks.\n")
+        self.assert_refused_before_any_write("loose.fixed.md", "no commit added it")
 
     def test_the_highlights_lead_the_released_section(self):
         """The release narrative, once per release instead of once per entry.
