@@ -7717,6 +7717,29 @@ mod tests {
         assert!(reason.contains("repository read"), "{reason}");
     }
 
+    /// The camelCase alias is applied where [`enforce_reason`] decides the
+    /// provider, and only for OpenCode: a `read` whose path arrives as
+    /// `filePath` denies through the full call, which the direct
+    /// [`opencode_tool_input`] unit test above never exercises. Without that
+    /// gate the read falls through every path spelling and passes unjudged.
+    #[test]
+    fn opencode_file_path_reads_deny_through_enforce_reason() {
+        let root = scratch_repo("opencode-file-path");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".pixel")).unwrap();
+        std::fs::write(root.join(".pixel/base.shard"), "indexed\n").unwrap();
+        std::fs::write(root.join("secret.ts"), "text\n").unwrap();
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "read",
+            "tool_input": {"filePath": root.join("secret.ts")},
+            "cwd": root,
+        });
+        let reason = enforce_reason(Provider::Opencode, &payload)
+            .expect("a camelCase filePath read denies for OpenCode");
+        assert!(reason.contains("repository read"), "{reason}");
+    }
+
     /// Every reader of a repository file is judged like `cat`, with or
     /// without the `rtk` wrapper, and each form of "must not be denied"
     /// stays untouched. Consuming paths: Codex (`enforce_retrieval` false,
