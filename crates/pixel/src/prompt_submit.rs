@@ -450,9 +450,9 @@ fn over_budget(base: usize, extra: usize, budget: usize) -> bool {
 }
 
 /// True when a `next`-byte target row still fits behind the reserved tail of
-/// `budget`; the `+ 1` accounts for the trailing newline.
+/// `budget`; the strict `<` accounts for the trailing newline byte.
 fn targets_fit(used: usize, next: usize, budget: usize) -> bool {
-    used + next + 1 <= budget.saturating_sub(100)
+    used + next < budget.saturating_sub(100)
 }
 
 /// Quote source evidence as data and never carry the old closed-world directive.
