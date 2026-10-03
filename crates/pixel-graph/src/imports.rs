@@ -61,11 +61,13 @@ fn first_suffix_match(all_files: &[String], suffix: &str) -> Option<String> {
 }
 
 /// Directory-suffix match used by the package imports (Go, Java wildcard):
-/// the first `ext` file inside the only directory whose path suffix is
+/// the smallest `ext` path inside the only directory whose path suffix is
 /// `suffix` (or that is `suffix` itself). Several files in one directory are
 /// one package and count as one candidate; a suffix shared by several
 /// directories names no single package, so it stays unresolved rather than
-/// follow directory traversal order.
+/// follow directory traversal order. The smallest path, not the first
+/// listed, because the full build lists files in walk order and the
+/// incremental update in store order, and both must store the same row.
 fn first_suffix_dir_match(all_files: &[String], suffix: &str, ext: &str) -> Option<String> {
     let tail = format!("/{suffix}");
     let mut dirs: Vec<&str> = Vec::new();
@@ -84,8 +86,8 @@ fn first_suffix_dir_match(all_files: &[String], suffix: &str, ext: &str) -> Opti
     }
     all_files
         .iter()
-        .filter(|f| f.ends_with(ext))
-        .find(|f| dir_of(f) == *first_dir)
+        .filter(|f| f.ends_with(ext) && dir_of(f) == *first_dir)
+        .min()
         .cloned()
 }
 
@@ -230,7 +232,7 @@ fn resolve_python(spec: &str, importer_rel: &str, all_files: &[String]) -> Optio
 
 fn resolve_go(spec: &str, all_files: &[String]) -> Option<String> {
     // Match a directory whose path suffix equals the import path (or its
-    // trailing segments); its first .go file stands for the package. A suffix
+    // trailing segments); its smallest .go path stands for the package. A suffix
     // shared by several directories names no single package (see
     // `first_suffix_dir_match`).
     let segs: Vec<&str> = spec.split('/').filter(|s| !s.is_empty()).collect();

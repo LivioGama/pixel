@@ -84,29 +84,46 @@ fn unique_suffix_imports_and_missing_imports_keep_their_behavior() {
 #[test]
 fn several_files_in_one_package_directory_are_one_candidate() {
     // A Go package and a Java package are directories: a second file in the
-    // same directory is the same package, not a competing answer, so the
-    // first one still stands for it.
+    // same directory is the same package, not a competing answer. The
+    // package's smallest path stands for it, whatever order the walk or the
+    // store lists the files in: a full build and an incremental update list
+    // them differently and must still store the same import row.
     let cases = [
         (
             "example.com/acme/util",
             "svc/caller/main.go",
-            ["svc/a/util/util.go", "svc/a/util/parse.go"],
-            "svc/a/util/util.go",
+            // A smaller path that is not a `.go` file, and a smaller `.go`
+            // file outside the package, must both be passed over.
+            &[
+                "svc/a/util/util.go",
+                "svc/a/util/README.md",
+                "svc/a/aaa.go",
+                "svc/a/util/parse.go",
+            ][..],
+            "svc/a/util/parse.go",
         ),
         (
             "com.example.*",
             "apps/caller/Main.java",
-            [
+            &[
                 "apps/a/com/example/Util.java",
                 "apps/a/com/example/Helper.java",
-            ],
-            "apps/a/com/example/Util.java",
+            ][..],
+            "apps/a/com/example/Helper.java",
         ),
     ];
     for (specifier, importer, candidates, expected) in cases {
+        let mut files = paths(candidates);
         assert_eq!(
-            resolve_import(specifier, importer, &paths(&candidates)),
-            Some(expected.to_owned())
+            resolve_import(specifier, importer, &files),
+            Some(expected.to_owned()),
+            "{specifier} in listed order"
+        );
+        files.reverse();
+        assert_eq!(
+            resolve_import(specifier, importer, &files),
+            Some(expected.to_owned()),
+            "{specifier} in reverse order"
         );
     }
 }
