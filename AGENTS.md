@@ -94,6 +94,8 @@ Complete this checklist once per finished reviewable implementation unit—inclu
 
 Do not report the unit complete without evidence that self-update succeeded, both parallel tracks completed, and doctor exited 0. If a step cannot run, report the unit as incomplete and name the blocker rather than silently skipping it.
 
+One check needs a human and no `--fix` clears it: `repo.codex-hook-review`. Codex runs a repository's hooks only after someone reviews them with `/hooks` in `codex`, and it keys that review by the `hooks.json` path, so every new worktree starts yellow; pixel never writes that trust itself. In a worktree Codex will not run in, add `--skip repo.codex-hook-review` to the doctor command (here and in the side build below) and name the skip in the report. Where Codex will run, review the hooks once with `/hooks` instead.
+
 ### Side build (`pixel-dev`)
 
 With a mise or Homebrew `pixel`, the home install (the Claude hooks in `~/.claude/settings.json`, the deployed prompts, the Codex and pi config) belongs to that managed binary and every other repository runs it. A global `pixel-dev install` rewires all of it to a branch build until someone runs `pixel install` again, so the side build stays in this repository:
