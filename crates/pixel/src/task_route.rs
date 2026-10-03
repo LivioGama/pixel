@@ -57,12 +57,22 @@ pub(crate) fn route(
         .open(locks.join(format!("{}-{key}", task.task_id)))
         .map_err(error)?;
     lock.lock_exclusive().map_err(error)?;
-    if let Some(cached) = store
-        .events(&task.task_id)
-        .map_err(error)?
-        .into_iter()
-        .find(|event| event.id == cache_id)
-    {
+    let events = store.events(&task.task_id).map_err(error)?;
+    let classifier_id = format!("classify-{key}");
+    if let Some(previous) = events.iter().find(|event| event.id == classifier_id) {
+        let duration_ms = previous.data["data"]["duration_ms"]
+            .as_u64()
+            .ok_or("recorded classifier duration is unavailable")?;
+        // Resume a failed export even when inference or the route is cached.
+        crate::task_bridge::record_internal(
+            store,
+            &task,
+            &classifier_id,
+            pixel_task::replay::InternalActor::Classifier,
+            duration_ms,
+        )?;
+    }
+    if let Some(cached) = events.into_iter().find(|event| event.id == cache_id) {
         return Ok(cached.data["data"].clone());
     }
     let labels: Vec<_> = decision
@@ -132,16 +142,17 @@ pub(crate) fn route(
     }
     let result = json!({"schema_version":1,"task_id":task.task_id,"policy_version":pixel_task::POLICY_VERSION,
         "decision":decision,"ranked_routes":ranked,"recommended":ranked.first(),"classifier":prediction.as_ref().map(|(_,scores,model)| json!({"scores":scores,"model":model})),"frame":frame});
-    observe(store, &task, &cache_id, "route", result.clone())?;
     if invoked {
         crate::task_bridge::record_internal(
             store,
             &task,
-            &format!("classify-{key}"),
+            &classifier_id,
             pixel_task::replay::InternalActor::Classifier,
             start.elapsed().as_millis() as u64,
         )?;
     }
+    // A committed route must never hide an unrecorded classifier operation.
+    observe(store, &task, &cache_id, "route", result.clone())?;
     Ok(result)
 }
 

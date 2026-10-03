@@ -122,6 +122,32 @@ fn hook_with_policy(
 }
 
 #[test]
+fn task_should_verify_and_finish_an_unborn_repository() {
+    let root = Scratch::for_test("task-cli", "unborn");
+    git(&root, &["init", "-q"]);
+    std::fs::write(root.join("source.txt"), "correct\n").unwrap();
+    std::fs::write(root.join(".gitignore"), ".pixel/\n").unwrap();
+    git(&root, &["add", "."]);
+    std::fs::create_dir(root.join(".pixel")).unwrap();
+    let id = begin(&root);
+    good(&root, &["task", "prepare", &id, "--json"]);
+    good(&root, &["task", "verify", &id, "--json"]);
+    let review = good(&root, &["task", "review", &id, "--json"]);
+    assert_eq!(review["review"]["passed"], true);
+    assert_eq!(review["review"]["findings"], json!([]));
+    assert_eq!(
+        good(&root, &["task", "finish", &id, "--json"])["phase"],
+        "complete"
+    );
+    assert!(
+        pixel_task::snapshot::capture(&root, &serde_json::from_value(contract()).unwrap(), true)
+            .unwrap()
+            .head
+            .is_none()
+    );
+}
+
+#[test]
 fn read_only_prompts_should_stay_free_and_mutation_fallback_should_retain_the_objective() {
     let root = repo("intent");
     for (session, prompt) in [
@@ -217,6 +243,222 @@ fn enforced_tasks_should_reject_runtime_policy_downgrades() {
         )["decision"],
         "observe"
     );
+    assert_eq!(
+        hook_with_policy(
+            &root,
+            "pi",
+            "pre-tool-use",
+            json!({"session_id":"baseline","tool_name":"Write","tool_use_id":"second"}),
+            "retrieval"
+        )["decision"],
+        "observe"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn weakening_should_require_both_terminal_streams_and_the_exact_confirmation() {
+    use std::fs::File;
+    use std::os::fd::FromRawFd;
+
+    for (input_terminal, output_terminal, correct_answer) in [
+        (false, false, true),
+        (true, false, true),
+        (false, true, true),
+        (true, true, true),
+        (true, true, false),
+    ] {
+        let root = repo(&format!(
+            "waiver-{input_terminal}-{output_terminal}-{correct_answer}"
+        ));
+        let id = begin(&root);
+        let mut weaker = contract();
+        weaker["checks"][0]["argv"] = json!(["/usr/bin/true"]);
+        std::fs::write(root.join(".pixel/weaker.json"), weaker.to_string()).unwrap();
+        let mut master = -1;
+        let mut slave = -1;
+        // SAFETY: openpty initializes two owned descriptors; optional attributes are null.
+        assert_eq!(
+            unsafe {
+                libc::openpty(
+                    &raw mut master,
+                    &raw mut slave,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                )
+            },
+            0
+        );
+        // SAFETY: each successful openpty descriptor is adopted exactly once.
+        let (mut master, slave) = unsafe { (File::from_raw_fd(master), File::from_raw_fd(slave)) };
+        let mut child = pixel_command()
+            .current_dir(&root)
+            .env("PIXEL_METRICS", "0")
+            .args([
+                "task",
+                "contract",
+                &id,
+                "--file",
+                ".pixel/weaker.json",
+                "--authorize-weakening",
+                "--json",
+            ])
+            .stdin(if input_terminal {
+                Stdio::from(slave.try_clone().unwrap())
+            } else {
+                Stdio::piped()
+            })
+            .stderr(if output_terminal {
+                Stdio::from(slave)
+            } else {
+                Stdio::piped()
+            })
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let answer = if correct_answer {
+            id.as_str()
+        } else {
+            "wrong-task"
+        };
+        if input_terminal {
+            writeln!(master, "{answer}").unwrap();
+        } else {
+            let _ = writeln!(child.stdin.take().unwrap(), "{answer}");
+        }
+        let output = child.wait_with_output().unwrap();
+        let authorized = input_terminal && output_terminal && correct_answer;
+        assert_eq!(
+            output.status.success(),
+            authorized,
+            "terminal tuple {input_terminal}/{output_terminal}/{correct_answer}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if authorized {
+            let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(
+                result["contract"]["checks"][0]["argv"],
+                json!(["/usr/bin/true"])
+            );
+        } else if !input_terminal && !output_terminal {
+            assert!(String::from_utf8_lossy(&output.stderr).contains("interactive human terminal"));
+        }
+    }
+}
+
+#[test]
+fn native_stop_should_publish_only_verified_completion_and_preserve_live_observation() {
+    let root = repo("verified-stop");
+    std::fs::write(root.join(".pixel/contract.json"), contract().to_string()).unwrap();
+    let task = good(
+        &root,
+        &[
+            "task",
+            "begin",
+            "fix source",
+            "--contract",
+            ".pixel/contract.json",
+            "--provider",
+            "pi",
+            "--session",
+            "s",
+            "--json",
+        ],
+    );
+    let id = task["task_id"].as_str().unwrap();
+    good(&root, &["task", "prepare", id, "--json"]);
+    good(&root, &["task", "verify", id, "--json"]);
+    good(&root, &["task", "review", id, "--json"]);
+    let finished = hook(
+        &root,
+        "pi",
+        "stop",
+        json!({"session_id":"s","event_id":"verified"}),
+    );
+    assert_eq!(finished["decision"], "allow");
+    assert_eq!(finished["phase"], "complete");
+    assert_eq!(finished["reason"], "verified complete");
+    let marker: Value = serde_json::from_slice(
+        &std::fs::read(root.join(".pixel/task-hook-observations.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(marker["pi"]["session_id"], "s");
+    assert_eq!(marker["pi"]["event"], "stop");
+    assert!(marker["pi"]["observed_unix"].as_u64().unwrap() > 0);
+    let events = good(&root, &["task", "events", id, "--json"]);
+    assert_eq!(events["trajectory"]["coordinator_calls"], 1);
+    let repeated = hook(
+        &root,
+        "pi",
+        "stop",
+        json!({"session_id":"s","event_id":"verified"}),
+    );
+    assert_eq!(repeated["decision"], "allow");
+    assert_eq!(
+        good(&root, &["task", "events", id, "--json"])["trajectory"]["coordinator_calls"],
+        1
+    );
+}
+
+#[test]
+fn native_outcomes_should_preserve_failures_without_inventing_unknown_success() {
+    use pixel_task::replay::{Observation, TelemetryEvent, ToolOutcome};
+
+    let root = repo("outcomes");
+    hook(
+        &root,
+        "pi",
+        "prompt-submit",
+        json!({"session_id":"s","event_id":"prompt","prompt":"fix source"}),
+    );
+    for (id, event, result) in [
+        ("success", "post-tool-use", json!({"success":true})),
+        ("failed", "post-tool-use", json!({"success":false})),
+        ("failure-event", "tool-failure", json!({})),
+        ("unknown", "post-tool-use", json!({})),
+    ] {
+        hook(
+            &root,
+            "pi",
+            "pre-tool-use",
+            json!({"session_id":"s","tool_name":"Read","tool_use_id":id}),
+        );
+        let mut payload = json!({"session_id":"s","tool_name":"Read","tool_use_id":id});
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(result.as_object().unwrap().clone());
+        hook(&root, "pi", event, payload);
+    }
+    let store = pixel_task::Store::open(&root).unwrap();
+    let task = store.find_session("pi", "s").unwrap().unwrap();
+    let outcomes: std::collections::BTreeMap<_, _> = store
+        .events(&task.task_id)
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == "observation" && event.data["kind"] == "telemetry")
+        .filter_map(|event| {
+            let telemetry: TelemetryEvent =
+                serde_json::from_value(event.data["data"].clone()).unwrap();
+            match telemetry.observation {
+                Observation::ToolFinished {
+                    request_id,
+                    outcome,
+                    ..
+                } => Some((request_id, outcome)),
+                _ => None,
+            }
+        })
+        .collect();
+    assert_eq!(
+        outcomes,
+        std::collections::BTreeMap::from([
+            ("success".into(), ToolOutcome::Succeeded),
+            ("failed".into(), ToolOutcome::Failed),
+            ("failure-event".into(), ToolOutcome::Failed)
+        ])
+    );
 }
 
 #[test]
@@ -283,15 +525,16 @@ fn unconfigured_task_should_accept_an_inline_contract_without_authorizing_a_file
     );
     let id = task["task_id"].as_str().unwrap();
     let definition = contract().to_string();
-    assert_eq!(
-        hook(
-            &root,
-            "pi",
-            "pre-tool-use",
-            json!({"session_id":"s","tool_name":"Write","tool_use_id":"write"})
-        )["decision"],
-        "deny"
+    let denied = hook(
+        &root,
+        "pi",
+        "pre-tool-use",
+        json!({"session_id":"s","tool_name":"Write","tool_use_id":"write"}),
     );
+    assert_eq!(denied["decision"], "deny");
+    let reason = denied["reason"].as_str().unwrap();
+    assert!(reason.contains(id));
+    assert!(reason.contains("--definition '<JSON>'"));
     let declaration = format!("pixel task contract {id} --definition '{definition}' --json");
     assert_ne!(
         hook(

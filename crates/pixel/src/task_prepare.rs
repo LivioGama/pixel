@@ -134,10 +134,11 @@ fn evidence(result: Result<Value, String>) -> Value {
 }
 
 fn complete(value: &Value) -> bool {
-    value.get("error").is_none()
+    value.is_object()
+        && value.get("error").is_none()
         && !matches!(
             value["status"].as_str(),
-            Some("unresolved" | "unknown" | "capped")
+            Some("unresolved" | "unknown" | "unavailable" | "capped")
         )
         && value["truncated"] != true
         && value["epistemics"]["lower_bound"] != true
@@ -159,20 +160,11 @@ pub(crate) fn review(
     let source = pixel_task::snapshot::capture(root, &task.contract, true).map_err(error)?;
     let review = pixel_ops::review::review(root, None, Some(131_072))?;
     let git = pixel_git::GitRunner::new(root);
-    if git.run(&["diff", "--check", "HEAD"]).is_err() {
+    if git.run(&["diff", "--check"]).is_err() || git.run(&["diff", "--cached", "--check"]).is_err()
+    {
         findings.push("git diff --check failed".into());
     }
-    if review["truncated"] == true
-        || review["count"].as_u64() != Some(git.status_porcelain().len() as u64)
-    {
-        findings.push("review is capped; narrow the change before completion".into());
-    }
-    if review["items"]
-        .as_array()
-        .is_some_and(|items| items.iter().any(|item| item["kind"] == "conflicted"))
-    {
-        findings.push("unresolved merge conflicts".into());
-    }
+    append_review_findings(&review, git.status_porcelain().len(), &mut findings);
     let after = pixel_task::snapshot::capture(root, &task.contract, true).map_err(error)?;
     if after.content_id != source.content_id {
         return Err("source changed while reviewing; retry review".into());
@@ -202,9 +194,51 @@ pub(crate) fn review(
         .map_err(error)
 }
 
+fn append_review_findings(review: &Value, changed_files: usize, findings: &mut Vec<String>) {
+    if review["truncated"] == true || review["count"].as_u64() != Some(changed_files as u64) {
+        findings.push("review is capped; narrow the change before completion".into());
+    }
+    if review["items"]
+        .as_array()
+        .is_some_and(|items| items.iter().any(|item| item["kind"] == "conflicted"))
+    {
+        findings.push("unresolved merge conflicts".into());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_should_reject_hidden_changes_and_conflicts_independently() {
+        let clean = json!({"count":1,"truncated":false,"items":[{"kind":"modified"}]});
+        let mut findings = vec!["acceptance review still pending".into()];
+        append_review_findings(&clean, 1, &mut findings);
+        assert_eq!(findings, ["acceptance review still pending"]);
+        for (review, expected) in [
+            (
+                json!({"count":1,"truncated":true,"items":[]}),
+                "review is capped; narrow the change before completion",
+            ),
+            (
+                json!({"count":0,"truncated":false,"items":[]}),
+                "review is capped; narrow the change before completion",
+            ),
+            (
+                json!({"truncated":false,"items":[]}),
+                "review is capped; narrow the change before completion",
+            ),
+            (
+                json!({"count":1,"truncated":false,"items":[{"kind":"conflicted"}]}),
+                "unresolved merge conflicts",
+            ),
+        ] {
+            let mut findings = Vec::new();
+            append_review_findings(&review, 1, &mut findings);
+            assert_eq!(findings, [expected]);
+        }
+    }
 
     #[test]
     fn unavailable_retrieval_should_require_an_explicit_conservative_suite() {
@@ -257,8 +291,55 @@ mod tests {
             json!({"next_offset":20}),
             json!({"envelope":{"graph":"stale"}}),
             json!({"status":"unknown"}),
+            json!({"status":"unavailable"}),
+            json!({"status":"unresolved"}),
+            json!({"status":"capped"}),
+            json!({"error":"failed"}),
+            json!({"epistemics":{"lower_bound":true}}),
+            json!({"envelope":{"lower_bound":true}}),
+            json!({"warnings":["coverage missing"]}),
+            Value::Null,
+            json!([]),
         ] {
             assert!(!complete(&value));
         }
+        assert!(complete(
+            &json!({"status":"complete","truncated":false,"next_offset":null,
+            "epistemics":{"lower_bound":false},"envelope":{"lower_bound":false,"graph":"fresh"},"warnings":[]})
+        ));
+    }
+
+    #[test]
+    fn impact_should_require_every_collection_and_honor_the_exact_symbol_cap() {
+        for count in [0, IMPACT_LIMIT, IMPACT_LIMIT + 1] {
+            let scope = json!({"targets":[{"symbols":(0..count).map(|n|json!({"uid":format!("symbol-{n}")})).collect::<Vec<_>>()}]});
+            let observations = collect("source", &[], Ok(scope.clone()), Ok(json!({})), |_| {
+                Ok(json!({}))
+            });
+            assert_eq!(observations[1].complete, count == IMPACT_LIMIT);
+            assert_eq!(observations[1].data["capped"], count > IMPACT_LIMIT);
+            assert_eq!(
+                observations[1].data["collection"].as_array().unwrap().len(),
+                count.min(IMPACT_LIMIT)
+            );
+            if count == IMPACT_LIMIT {
+                for (scope, changes, impact) in [
+                    (Err("scope".into()), Ok(json!({})), Ok(json!({}))),
+                    (Ok(scope.clone()), Err("changes".into()), Ok(json!({}))),
+                    (Ok(scope.clone()), Ok(json!({})), Err("impact".into())),
+                ] {
+                    let unresolved = collect("source", &[], scope, changes, |_| impact.clone());
+                    assert!(!unresolved[1].complete);
+                }
+            }
+        }
+        assert_eq!(
+            evidence(Ok(json!({"targets":["source.rs"]}))),
+            json!({"targets":["source.rs"]})
+        );
+        assert_eq!(
+            evidence(Err("private diagnostic".into()))["status"],
+            "unavailable"
+        );
     }
 }

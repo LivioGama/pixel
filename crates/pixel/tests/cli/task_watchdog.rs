@@ -38,6 +38,10 @@ fn command(root: &Path) -> Command {
 
 fn hook(root: &Path, event: &str, mut payload: Value, sink: Option<&Path>) -> Value {
     payload["cwd"] = json!(root);
+    hook_raw(root, event, &payload.to_string(), sink)
+}
+
+fn hook_raw(root: &Path, event: &str, raw: &str, sink: Option<&Path>) -> Value {
     let mut command = command(root);
     if let Some(sink) = sink {
         command.env("PIXEL_TASK_TELEMETRY_PATH", sink);
@@ -60,7 +64,7 @@ fn hook(root: &Path, event: &str, mut payload: Value, sink: Option<&Path>) -> Va
         .stdin
         .take()
         .unwrap()
-        .write_all(payload.to_string().as_bytes())
+        .write_all(raw.as_bytes())
         .unwrap();
     let output = child.wait_with_output().unwrap();
     assert_eq!(
@@ -75,6 +79,61 @@ fn hook(root: &Path, event: &str, mut payload: Value, sink: Option<&Path>) -> Va
             String::from_utf8_lossy(&output.stdout)
         )
     })
+}
+
+#[test]
+fn native_hook_payload_boundary_should_preserve_reads_and_reject_oversized_events() {
+    let root = repo("payload-boundary");
+    for (size, allowed) in [(1_048_576, true), (1_048_577, false)] {
+        let mut payload = json!({"cwd":root.as_ref(),"session_id":"size-session","tool_name":"Read","padding":""});
+        let empty_length = payload.to_string().len();
+        payload["padding"] = json!("x".repeat(size - empty_length));
+        assert_eq!(payload.to_string().len(), size);
+        let result = hook_raw(&root, "pre-tool-use", &payload.to_string(), None);
+        if allowed {
+            assert_eq!(result, json!({}));
+            // A complete JSON value followed by one extra whitespace byte
+            // still exceeds the host-event bound; truncating to MAX hides it.
+            let oversized = format!("{payload} ");
+            assert_eq!(
+                hook_raw(&root, "pre-tool-use", &oversized, None)["hookSpecificOutput"]["permissionDecision"],
+                "deny"
+            );
+        } else {
+            assert_eq!(result["hookSpecificOutput"]["permissionDecision"], "deny");
+        }
+    }
+}
+
+#[test]
+fn imported_claude_task_entries_should_stay_silent_without_suppressing_codex() {
+    let root = repo("imported-entry");
+    for (provider, imported) in [("claude", true), ("claude", false), ("codex", true)] {
+        let mut command = command(&root);
+        command.args([
+            "run-hook",
+            "task-event",
+            "--provider",
+            provider,
+            "--event",
+            "stop",
+        ]);
+        if imported {
+            command.env("DEVIN_PROJECT_DIR", root.as_ref());
+        } else {
+            command.env_remove("DEVIN_PROJECT_DIR");
+        }
+        // Empty stdin invokes the fail-closed native Stop envelope, except for
+        // an imported Claude entry whose actual host owns the task lifecycle.
+        let output = command.stdin(Stdio::null()).output().unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        if provider == "claude" && imported {
+            assert_eq!(output.stdout, b"");
+        } else {
+            let value: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(value["continue"], false);
+        }
+    }
 }
 
 #[test]

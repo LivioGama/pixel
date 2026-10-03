@@ -41,7 +41,7 @@ shared = ["~/.local/share/pixel/agent-prompt.md", "~/.local/share/pixel/subagent
 
 # Repo-wide install artifacts and doctor checks, not owned by one agent entry.
 repo_shared = ["AGENTS.md"]
-repo_shared_checks = ["repo.warp-mcp", "repo.pixel-first"]
+repo_shared_checks = ["repo.warp-mcp", "repo.pixel-first", "repo.task-hook-observations"]
 
 [[agent]]
 slug = "claude-code"

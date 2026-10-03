@@ -454,3 +454,264 @@ pub enum Action {
     },
     Recover,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    type Change = (&'static str, Box<dyn Fn(&mut TaskContract)>);
+
+    fn contract() -> TaskContract {
+        serde_json::from_value(json!({"objective":"fix source","checks":[{"id":"check","argv":["true"]}],"criteria":[{"id":"acceptance","description":"source fixed","checks":["check"]}],"inputs":["src"],"outputs":["build"],"conservative_checks":["check"],"toolchain":{"compiler":"a".repeat(64)}})).unwrap()
+    }
+
+    #[test]
+    fn serde_defaults_are_concrete_contract_obligations() {
+        let value = contract();
+        assert_eq!(value.version, 1);
+        assert_eq!(value.checks[0].timeout_ms, 300_000);
+        assert_eq!(value.checks[0].cwd, ".");
+        assert!(value.checks[0].required);
+        assert!(value.require_preparation);
+        assert!(value.require_review);
+        assert_eq!(TaskContract::default().version, 1);
+        assert!(value.validate().is_ok());
+        let mut changed = value.clone();
+        changed.objective.push('!');
+        assert_ne!(value.id().unwrap(), changed.id().unwrap());
+    }
+
+    #[test]
+    fn contract_validation_rejects_each_independent_invalid_field() {
+        let cases: Vec<Change> = vec![
+            ("version", Box::new(|c| c.version = 2)),
+            ("objective", Box::new(|c| c.objective = " \n".into())),
+            (
+                "duplicate check",
+                Box::new(|c| c.checks.push(c.checks[0].clone())),
+            ),
+            ("empty argv", Box::new(|c| c.checks[0].argv.clear())),
+            ("empty program", Box::new(|c| c.checks[0].argv[0].clear())),
+            (
+                "nul argument",
+                Box::new(|c| c.checks[0].argv.push("bad\0arg".into())),
+            ),
+            ("timeout zero", Box::new(|c| c.checks[0].timeout_ms = 0)),
+            (
+                "duplicate criterion",
+                Box::new(|c| c.criteria.push(c.criteria[0].clone())),
+            ),
+            (
+                "empty criterion description",
+                Box::new(|c| c.criteria[0].description = " \n".into()),
+            ),
+            (
+                "unknown criterion check",
+                Box::new(|c| c.criteria[0].checks.push("absent".into())),
+            ),
+            (
+                "optional conservative check",
+                Box::new(|c| c.checks[0].required = false),
+            ),
+            (
+                "unknown conservative check",
+                Box::new(|c| c.conservative_checks = vec!["absent".into()]),
+            ),
+            (
+                "empty toolchain program",
+                Box::new(|c| c.toolchain = BTreeMap::from([(String::new(), "a".repeat(64))])),
+            ),
+            (
+                "nul toolchain program",
+                Box::new(|c| {
+                    c.toolchain = BTreeMap::from([("bad\0program".into(), "a".repeat(64))])
+                }),
+            ),
+            (
+                "short toolchain hash",
+                Box::new(|c| {
+                    c.toolchain.insert("compiler".into(), "a".repeat(63));
+                }),
+            ),
+            (
+                "nonhex toolchain hash",
+                Box::new(|c| {
+                    c.toolchain.insert("compiler".into(), "g".repeat(64));
+                }),
+            ),
+            (
+                "uppercase toolchain hash",
+                Box::new(|c| {
+                    c.toolchain.insert("compiler".into(), "A".repeat(64));
+                }),
+            ),
+        ];
+        for (name, change) in cases {
+            let mut value = contract();
+            change(&mut value);
+            assert!(value.validate().is_err(), "{name}");
+        }
+    }
+
+    #[test]
+    fn bounded_contract_fields_accept_the_cap_and_reject_one_more() {
+        let mut value = contract();
+        value.objective = "x".repeat(16_384);
+        assert!(value.validate().is_ok());
+        value.objective.push('x');
+        assert!(value.validate().is_err());
+        let mut value = contract();
+        value.checks[0].timeout_ms = 86_400_000;
+        assert!(value.validate().is_ok());
+        value.checks[0].timeout_ms += 1;
+        assert!(value.validate().is_err());
+        for field in ["checks", "criteria", "inputs", "outputs"] {
+            let cap = if matches!(field, "checks" | "criteria") {
+                128
+            } else {
+                256
+            };
+            let mut value = contract();
+            for index in 1..=cap {
+                match field {
+                    "checks" => {
+                        let mut check = value.checks[0].clone();
+                        check.id = format!("check-{index}");
+                        value.checks.push(check);
+                    }
+                    "criteria" => {
+                        let mut criterion = value.criteria[0].clone();
+                        criterion.id = format!("criterion-{index}");
+                        value.criteria.push(criterion);
+                    }
+                    "inputs" => value.inputs.push(format!("input-{index}")),
+                    "outputs" => value.outputs.push(format!("output-{index}")),
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    value.validate().is_ok(),
+                    index < cap,
+                    "{field} with {} items",
+                    index + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn identifiers_paths_and_overlap_preserve_exact_boundaries() {
+        for id in ["a", "A0-_:.", &"x".repeat(128)] {
+            assert!(valid_id(id).is_ok(), "{id}");
+        }
+        for id in ["", ".", "..", "a/b", "a b", "é", &"x".repeat(129)] {
+            assert!(valid_id(id).is_err(), "{id}");
+        }
+        for path in ["file", "dir/file", "./dir/file"] {
+            assert!(relative_path(path, false).is_ok(), "{path}");
+        }
+        assert!(relative_path(".", true).is_ok());
+        for path in ["", ".", "../x", "/x", "a/../b", "a\0b"] {
+            assert!(relative_path(path, false).is_err(), "{path}");
+        }
+        for path in ["", "../x", "/x", "a\0b"] {
+            assert!(relative_path(path, true).is_err());
+        }
+        for (left, right, expected) in [
+            ("src", "src/a", true),
+            ("src/a", "src", true),
+            ("src", "src", true),
+            ("src", "src2", false),
+            ("a", "b", false),
+        ] {
+            assert_eq!(overlaps(left, right), expected, "{left}, {right}");
+        }
+        assert!(Phase::Complete.terminal());
+        assert!(Phase::Cancelled.terminal());
+        assert!(!Phase::Contracted.terminal());
+    }
+
+    #[test]
+    fn preservation_requires_every_prior_obligation_independently() {
+        let prior = contract();
+        assert!(prior.preserves(&prior));
+        let changes: Vec<Change> = vec![
+            ("objective", Box::new(|c| c.objective.push('!'))),
+            ("preparation", Box::new(|c| c.require_preparation = false)),
+            ("review", Box::new(|c| c.require_review = false)),
+            (
+                "check command",
+                Box::new(|c| c.checks[0].argv = vec!["other".into()]),
+            ),
+            ("check removed", Box::new(|c| c.checks.clear())),
+            ("criterion removed", Box::new(|c| c.criteria.clear())),
+            ("criterion id", Box::new(|c| c.criteria[0].id.push('x'))),
+            (
+                "criterion description",
+                Box::new(|c| c.criteria[0].description.push('x')),
+            ),
+            (
+                "criterion mapping",
+                Box::new(|c| c.criteria[0].checks.clear()),
+            ),
+            ("input", Box::new(|c| c.inputs.clear())),
+            (
+                "conservative checks",
+                Box::new(|c| c.conservative_checks.clear()),
+            ),
+            ("extra output", Box::new(|c| c.outputs.push("extra".into()))),
+            ("toolchain removed", Box::new(|c| c.toolchain.clear())),
+            (
+                "toolchain changed",
+                Box::new(|c| {
+                    c.toolchain.insert("compiler".into(), "b".repeat(64));
+                }),
+            ),
+        ];
+        for (name, change) in changes {
+            let mut next = prior.clone();
+            change(&mut next);
+            assert!(!next.preserves(&prior), "{name}");
+        }
+        let mut optional = prior.clone();
+        optional.checks[0].required = false;
+        optional.conservative_checks.clear();
+        let mut next = optional.clone();
+        next.checks.clear();
+        assert!(
+            !next.preserves(&optional),
+            "mapped optional checks remain obligations"
+        );
+        optional.criteria.clear();
+        next.criteria.clear();
+        assert!(
+            next.preserves(&optional),
+            "unmapped optional checks can be removed"
+        );
+        let mut loose = prior.clone();
+        loose.require_preparation = false;
+        loose.require_review = false;
+        assert!(prior.preserves(&loose));
+        assert!(loose.preserves(&loose));
+        let mut empty = TaskContract {
+            objective: "fix source".into(),
+            ..TaskContract::default()
+        };
+        let mut configured = empty.clone();
+        configured.outputs.push("build".into());
+        assert!(configured.preserves(&empty));
+        empty.criteria.push(Criterion {
+            id: "empty".into(),
+            description: "pending".into(),
+            checks: vec![],
+        });
+        configured = empty.clone();
+        configured.outputs.push("build".into());
+        assert!(configured.preserves(&empty));
+        // Even an incomplete old mapping represents an obligation, not an unconfigured contract.
+        empty.criteria[0].checks.push("future".into());
+        configured = empty.clone();
+        configured.outputs.push("build".into());
+        assert!(!configured.preserves(&empty));
+    }
+}

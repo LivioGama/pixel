@@ -501,16 +501,6 @@ fn shell_leaf_mutates(command: &str, recovery: bool) -> bool {
 
 fn mutation(tool: &str, input: &Value) -> bool {
     match tool {
-        "Edit"
-        | "Write"
-        | "MultiEdit"
-        | "NotebookEdit"
-        | "apply_patch"
-        | "edit"
-        | "write"
-        | "edit_file"
-        | "write_to_file"
-        | "replace_file_content" => true,
         "Bash" | "bash" | "shell" | "local_shell" | "unified_exec" | "exec_command" => {
             string(input, &["command", "cmd"]).is_none_or(shell_mutates)
         }
@@ -757,6 +747,151 @@ pub fn run(provider: TaskProvider, event: TaskHookEvent) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contextual_envelopes_should_name_every_native_event_exactly() {
+        for (provider, name) in [
+            (TaskProvider::Claude, "claude"),
+            (TaskProvider::Codex, "codex"),
+            (TaskProvider::Pi, "pi"),
+        ] {
+            assert_eq!(provider.as_str(), name);
+        }
+        for (event, cli, host) in [
+            (TaskHookEvent::SessionStart, "session-start", "SessionStart"),
+            (
+                TaskHookEvent::PromptSubmit,
+                "prompt-submit",
+                "UserPromptSubmit",
+            ),
+            (TaskHookEvent::PreToolUse, "pre-tool-use", "PreToolUse"),
+            (TaskHookEvent::PostToolUse, "post-tool-use", "PostToolUse"),
+            (
+                TaskHookEvent::ToolFailure,
+                "tool-failure",
+                "PostToolUseFailure",
+            ),
+            (TaskHookEvent::Stop, "stop", "Stop"),
+            (TaskHookEvent::SessionEnd, "session-end", "SessionEnd"),
+            (TaskHookEvent::Interrupt, "interrupt", "Interrupt"),
+            (
+                TaskHookEvent::SubagentStart,
+                "subagent-start",
+                "SubagentStart",
+            ),
+            (TaskHookEvent::SubagentStop, "subagent-stop", "SubagentStop"),
+            (
+                TaskHookEvent::ModelResponse,
+                "model-response",
+                "ModelResponse",
+            ),
+            (TaskHookEvent::UserBash, "user-bash", "UserBash"),
+        ] {
+            assert_eq!(event.as_str(), cli);
+            for provider in [TaskProvider::Claude, TaskProvider::Codex] {
+                assert_eq!(
+                    envelope(provider, event, &json!({"context":"prepare task-1"})),
+                    json!({"hookSpecificOutput":{"hookEventName":host,"additionalContext":"prepare task-1"}})
+                );
+                assert_eq!(envelope(provider, event, &json!({"context":42})), json!({}));
+            }
+        }
+    }
+
+    #[test]
+    fn normalization_should_preserve_each_cancellation_and_success_signal() {
+        for (event, payload) in [
+            (TaskHookEvent::Interrupt, json!({})),
+            (TaskHookEvent::Stop, json!({"cancelled":true})),
+            (TaskHookEvent::Stop, json!({"is_interrupt":true})),
+            (TaskHookEvent::Stop, json!({"stop_reason":"aborted"})),
+            (TaskHookEvent::Stop, json!({"stopReason":"error"})),
+        ] {
+            assert_eq!(
+                normalize(event, &payload)["cancelled"],
+                true,
+                "{event:?}: {payload}"
+            );
+        }
+        assert_eq!(
+            normalize(TaskHookEvent::Stop, &json!({}))["cancelled"],
+            false
+        );
+        for (payload, expected) in [
+            (json!({"isError":true}), json!(false)),
+            (json!({"isError":false}), json!(true)),
+            (json!({"success":false,"isError":false}), json!(false)),
+            (json!({"success":true,"isError":true}), json!(true)),
+            (json!({}), Value::Null),
+        ] {
+            assert_eq!(
+                normalize(TaskHookEvent::PostToolUse, &payload)["success"],
+                expected
+            );
+        }
+        let response = json!({"request_ids":["c1"],"coverage_complete":false});
+        assert_eq!(
+            normalize(TaskHookEvent::ModelResponse, &response)["coverage_complete"],
+            false
+        );
+        assert_eq!(
+            normalize(
+                TaskHookEvent::Stop,
+                &json!({"session_id":"","sessionId":"fallback"})
+            )["session_id"],
+            "fallback"
+        );
+    }
+
+    #[test]
+    fn argv_and_uniq_boundaries_should_preserve_literals_without_accepting_outputs() {
+        for (command, expected) in [
+            ("rg \"needle text\" \"\"", vec!["rg", "needle text", ""]),
+            (
+                "rg\t'quoted $literal' src",
+                vec!["rg", "quoted $literal", "src"],
+            ),
+            ("rg \"x'y\" src", vec!["rg", "x'y", "src"]),
+            ("rg 'a\nb'", vec!["rg", "a\nb"]),
+        ] {
+            assert_eq!(
+                task_argv(command),
+                Some(expected.into_iter().map(String::from).collect()),
+                "{command}"
+            );
+            assert!(!shell_mutates(command), "{command}");
+        }
+        for command in [
+            "rg \0",
+            "rg '\0'",
+            "rg \u{000b}",
+            "rg > out",
+            "rg unquoted*",
+            "rg \"unfinished",
+        ] {
+            assert_eq!(task_argv(command), None, "{command:?}");
+        }
+        for args in [
+            vec!["input", "output"],
+            vec!["--", "input", "output"],
+            vec!["input", "--", "output"],
+            vec!["-c", "-d", "input", "output"],
+        ] {
+            assert!(!uniq_read(
+                &args.into_iter().map(String::from).collect::<Vec<_>>()
+            ));
+        }
+        for command in [
+            "uniq input",
+            "uniq -c -d input",
+            "uniq input --",
+            "uniq -- input",
+            "rg x | pixel find-code x",
+        ] {
+            assert!(!shell_mutates(command), "{command}");
+        }
+        assert!(shell_mutates("uniq --unknown"));
+    }
 
     #[test]
     fn deadline_should_deny_edits_and_completion_but_preserve_proven_reads() {

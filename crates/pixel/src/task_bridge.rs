@@ -517,19 +517,14 @@ fn record_host(
                 payload,
                 &format!("coverage-{key}"),
                 Observation::Coverage {
-                    complete: payload["coverage_complete"] == true
-                        && payload["all_children_observed"] == true,
+                    // A finalized model response covers that response only. None
+                    // of the native adapters proves full task/child coverage.
+                    complete: false,
                     child_spans: children,
-                    missing: if payload["coverage_complete"] == true
-                        && payload["all_children_observed"] == true
-                    {
-                        vec![]
-                    } else {
-                        vec![
-                            "native hooks do not establish full model and child request coverage"
-                                .into(),
-                        ]
-                    },
+                    missing: vec![
+                        "native hooks do not establish full model and child request coverage"
+                            .into(),
+                    ],
                 },
             )?;
         }
@@ -585,13 +580,17 @@ pub(crate) fn record_internal(
     duration_ms: u64,
 ) -> Result<(), String> {
     // Repeat delivery of a host event is the same internal operation, not new work.
-    if store
+    if let Some(previous) = store
         .events(&task.task_id)
         .map_err(error)?
-        .iter()
-        .any(|event| event.id == id)
+        .into_iter()
+        .find(|event| event.id == id)
     {
-        return Ok(());
+        // A previous delivery can commit its duration before export fails.
+        // Re-export those frozen bytes rather than replacing the observation.
+        let event: TelemetryEvent =
+            serde_json::from_value(previous.data["data"].clone()).map_err(error)?;
+        return export(&event);
     }
     record(
         store,
@@ -672,6 +671,94 @@ pub(crate) fn replay_frames(events: &[TrajectoryEvent]) -> Result<Vec<ReplayFram
 mod tests {
     use super::*;
 
+    struct Scratch(std::path::PathBuf);
+    impl Scratch {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "pixel-task-bridge-{}",
+                crate::task_commands::request()
+            ));
+            std::fs::create_dir(&root).unwrap();
+            Self(root)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn prompt_context_should_bound_content_preserve_sessions_and_report_corruption() {
+        let root = Scratch::new();
+        assert_eq!(
+            session_prompt(&root.0, "one", "pre-tool-use", &json!({})).unwrap(),
+            ""
+        );
+        let bounded = "é".repeat(4096);
+        assert_eq!(
+            session_prompt(
+                &root.0,
+                "one",
+                "prompt-submit",
+                &json!({"prompt":format!("{bounded}extra")})
+            )
+            .unwrap(),
+            bounded
+        );
+        assert_eq!(
+            session_prompt(
+                &root.0,
+                "one",
+                "pre-tool-use",
+                &json!({"prompt":"not a user prompt"})
+            )
+            .unwrap(),
+            bounded
+        );
+        assert_eq!(
+            session_prompt(&root.0, "two", "pre-tool-use", &json!({})).unwrap(),
+            ""
+        );
+        let path = root.0.join(".pixel/tasks/session-context/one.json");
+        std::fs::write(&path, "{").unwrap();
+        assert!(session_prompt(&root.0, "one", "pre-tool-use", &json!({})).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(session_prompt(&root.0, "one", "pre-tool-use", &json!({})).is_err());
+    }
+
+    #[test]
+    fn observed_markers_should_preserve_each_provider_and_reject_corruption() {
+        let root = Scratch::new();
+        observed(
+            &root.0,
+            "pi",
+            "pre-tool-use",
+            "pi-session",
+            &json!({"model":"partial"}),
+        )
+        .unwrap();
+        observed(
+            &root.0,
+            "codex",
+            "stop",
+            "codex-session",
+            &json!({"model":"partial"}),
+        )
+        .unwrap();
+        let path = root.0.join(".pixel/task-hook-observations.json");
+        let markers: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(markers.as_object().unwrap().len(), 2);
+        assert_eq!(markers["pi"]["session_id"], "pi-session");
+        assert_eq!(markers["codex"]["event"], "stop");
+        for corrupt in ["[]", "{"] {
+            std::fs::write(&path, corrupt).unwrap();
+            assert!(observed(&root.0, "pi", "stop", "s", &json!({})).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), corrupt);
+        }
+    }
+
     #[test]
     fn identity_should_separate_sessions_and_event_kinds_without_content_deduplication() {
         assert_ne!(session_key("one").unwrap(), session_key("two").unwrap());
@@ -690,5 +777,14 @@ mod tests {
         );
         assert!(coding_prompt("Implement a task gate"));
         assert!(!coding_prompt("What is a gate?"));
+        assert!(!coding_prompt(""));
+        assert!(!coding_prompt("How do I implement this?"));
+        assert!(coding_prompt("  Please implement this"));
+        assert_eq!(session_key("valid-session").unwrap(), "valid-session");
+        assert!(
+            session_key("invalid session/path")
+                .unwrap()
+                .starts_with("session-")
+        );
     }
 }

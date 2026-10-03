@@ -179,6 +179,148 @@ pub fn evaluate(suite: &EvaluationSuite) -> Result<EvaluationReport, EvaluationE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn suite() -> EvaluationSuite {
+        serde_json::from_value(serde_json::json!({"schema_version":1,"id":"fixture","image":"fixture","gateway_image":"fixture","output_dir":"results","repetitions":1,"timeout_ms":1000,"max_interactions":10,"runners":[],"arms":[],"network":{"kind":"offline"},"cases":[]})).unwrap()
+    }
+
+    fn gateway(name: &str) -> EvaluationNetwork {
+        EvaluationNetwork::ModelGateway {
+            endpoint: "https://model.invalid/v1/messages".into(),
+            request_path: "/v1/messages".into(),
+            model: "fixture".into(),
+            credential_env: name.into(),
+            auth_header: "authorization".into(),
+            auth_prefix: "Bearer ".into(),
+        }
+    }
+
+    #[test]
+    fn evaluator_rejects_each_invalid_bound_and_credential_name_before_launch() {
+        for field in ["version", "timeout", "interactions"] {
+            let mut value = suite();
+            match field {
+                "version" => value.schema_version = 2,
+                "timeout" => value.timeout_ms = 0,
+                "interactions" => value.max_interactions = 0,
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(evaluate(&value), Err(EvaluationError::Invalid(message)) if message == "version and positive timeout/interaction budget are required"),
+                "{field}"
+            );
+        }
+        for name in [
+            "ANTHROPIC_API_KEY",
+            "",
+            "lowercase",
+            "BAD-NAME",
+            "BAD NAME",
+            "É",
+        ] {
+            let mut value = suite();
+            value.network = gateway(name);
+            assert!(
+                matches!(evaluate(&value), Err(EvaluationError::Invalid(message)) if message == "use a named registered OAuth/provider credential"),
+                "{name}"
+            );
+        }
+        let mut value = suite();
+        let name = format!("PIXEL_EVALUATION_ABSENT_{}", std::process::id());
+        value.network = gateway(&name);
+        assert!(
+            matches!(evaluate(&value), Err(EvaluationError::Invalid(message)) if message == format!("missing registered credential: {name}"))
+        );
+    }
+
+    #[test]
+    fn evaluator_runs_frozen_subprocess_protocol_and_rejects_failure_or_bad_json() {
+        for scenario in ["success", "failure", "bad-json", "gateway"] {
+            let directory = tempfile::tempdir().unwrap();
+            let binary = directory.path().join("bun");
+            let response = serde_json::json!({"schema_version":1,"suite_id":"fixture","output_dir":"results","order_seed":"fixture-seed","order_algorithm":"fake-v1","rows":[{"fixture":true}],"gates":[{"passed":false}],"all_passed":false}).to_string();
+            let stdout = if scenario == "bad-json" {
+                "not-json"
+            } else {
+                &response
+            };
+            let exit = if scenario == "failure" { 7 } else { 0 };
+            std::fs::write(&binary, format!("#!/bin/sh\n/bin/cat > \"$HOME/input.json\"\n/usr/bin/env > \"$HOME/runner.env\"\nprintf '%s' '{stdout}'\nprintf '%s' 'fixture stderr' >&2\nexit {exit}\n")).unwrap();
+            std::fs::set_permissions(&binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "evaluation::tests::evaluation_subprocess_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("HOME", directory.path())
+                .env("PATH", directory.path())
+                .env("PIXEL_TEST_EVAL_SCENARIO", scenario)
+                .env("PIXEL_EVAL_TEST_42", "fake-oauth-value")
+                .env("PIXEL_TEST_EVAL_UNRELATED_SECRET", "must-not-reach-runner")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{scenario}: {} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let input: Value = serde_json::from_slice(
+                &std::fs::read(directory.path().join("input.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(input["suite"]["id"], "fixture");
+            assert_eq!(input["suite"]["timeout_ms"], 1000);
+            assert_eq!(input["suite"]["max_interactions"], 10);
+            assert_eq!(
+                input["resources"]["scorer"],
+                include_str!("../../../eval/score.py")
+            );
+            assert_eq!(
+                input["resources"]["gate"],
+                include_str!("../../../eval/gate.py")
+            );
+            let environment = std::fs::read_to_string(directory.path().join("runner.env")).unwrap();
+            assert!(!environment.contains("must-not-reach-runner"));
+            assert!(!environment.contains("PIXEL_TEST_EVAL_SCENARIO"));
+            assert_eq!(
+                environment.contains("PIXEL_EVAL_TEST_42=fake-oauth-value"),
+                scenario == "gateway"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "invoked by subprocess protocol test with an isolated HOME and fake Bun"]
+    fn evaluation_subprocess_child() {
+        let scenario = std::env::var("PIXEL_TEST_EVAL_SCENARIO").unwrap();
+        let mut value = suite();
+        if scenario == "gateway" {
+            value.network = gateway("PIXEL_EVAL_TEST_42");
+        }
+        let result = evaluate(&value);
+        match scenario.as_str() {
+            "failure" => assert!(
+                matches!(result, Err(EvaluationError::Runner(message)) if message == "fixture stderr")
+            ),
+            "bad-json" => assert!(matches!(result, Err(EvaluationError::Json(_)))),
+            "success" | "gateway" => {
+                let report = result.unwrap();
+                assert_eq!(report.schema_version, 1);
+                assert_eq!(report.suite_id, "fixture");
+                assert_eq!(report.output_dir, PathBuf::from("results"));
+                assert_eq!(report.order_seed, "fixture-seed");
+                assert_eq!(report.order_algorithm, "fake-v1");
+                assert_eq!(report.rows, vec![serde_json::json!({"fixture":true})]);
+                assert_eq!(report.gates, vec![serde_json::json!({"passed":false})]);
+                assert!(!report.all_passed);
+            }
+            _ => panic!("unexpected test scenario"),
+        }
+    }
 
     #[test]
     fn suite_requires_explicit_timeout_before_starting_a_process() {

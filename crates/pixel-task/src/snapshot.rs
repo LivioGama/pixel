@@ -15,6 +15,21 @@ use crate::{Error, Result, digest, now_ms};
 const MAX_SOURCE_FILES: usize = 100_000;
 const MAX_FILE_BYTES: u64 = 268_435_456;
 
+#[derive(Clone, Copy)]
+struct CaptureLimits {
+    files: usize,
+    file_bytes: u64,
+}
+
+impl Default for CaptureLimits {
+    fn default() -> Self {
+        Self {
+            files: MAX_SOURCE_FILES,
+            file_bytes: MAX_FILE_BYTES,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Stat {
     dev: u64,
@@ -75,7 +90,17 @@ fn git_refs(root: &Path) -> Result<Vec<u8>> {
 }
 
 fn git_state(root: &Path) -> Result<(Option<String>, String, String)> {
-    let head = String::from_utf8(git(root, &["rev-parse", "--revs-only", "HEAD"])?)
+    let head = parse_head(git(root, &["rev-parse", "--revs-only", "HEAD"])?)?;
+    let index = git(root, &["ls-files", "--stage", "-v", "-z"])?;
+    Ok((
+        head,
+        hex::encode(Sha256::digest(index)),
+        hex::encode(Sha256::digest(git_refs(root)?)),
+    ))
+}
+
+fn parse_head(bytes: Vec<u8>) -> Result<Option<String>> {
+    let head = String::from_utf8(bytes)
         .map_err(|_| Error::Unavailable("invalid Git HEAD identity".into()))?;
     let head = head.trim();
     if !head.is_empty()
@@ -83,12 +108,7 @@ fn git_state(root: &Path) -> Result<(Option<String>, String, String)> {
     {
         return Err(Error::Unavailable("invalid Git HEAD identity".into()));
     }
-    let index = git(root, &["ls-files", "--stage", "-v", "-z"])?;
-    Ok((
-        (!head.is_empty()).then(|| head.to_string()),
-        hex::encode(Sha256::digest(index)),
-        hex::encode(Sha256::digest(git_refs(root)?)),
-    ))
+    Ok((!head.is_empty()).then(|| head.to_string()))
 }
 
 pub(crate) fn source_identity(
@@ -100,7 +120,7 @@ pub(crate) fn source_identity(
     digest(&(files, head, index_id, refs_id))
 }
 
-fn listed(root: &Path, contract: &TaskContract) -> Result<BTreeSet<String>> {
+fn listed(root: &Path, contract: &TaskContract, limits: CaptureLimits) -> Result<BTreeSet<String>> {
     let bytes = git(
         root,
         &[
@@ -151,20 +171,20 @@ fn listed(root: &Path, contract: &TaskContract) -> Result<BTreeSet<String>> {
         if excluded(input) {
             return Err(Error::Invalid(format!("reserved source input: {input}")));
         }
-        add_input(root, root.join(input), &mut paths)?;
+        add_input(root, root.join(input), &mut paths, limits.files)?;
     }
-    if paths.len() > MAX_SOURCE_FILES {
+    if paths.len() > limits.files {
         return Err(Error::Unavailable("source file limit exceeded".into()));
     }
     Ok(paths)
 }
 
-fn add_input(root: &Path, path: PathBuf, paths: &mut BTreeSet<String>) -> Result<()> {
+fn add_input(root: &Path, path: PathBuf, paths: &mut BTreeSet<String>, limit: usize) -> Result<()> {
     let mut pending = vec![path];
     let mut visited = 0;
     while let Some(path) = pending.pop() {
         visited += 1;
-        if visited > MAX_SOURCE_FILES {
+        if visited > limit {
             return Err(Error::Unavailable(
                 "declared input enumeration limit exceeded".into(),
             ));
@@ -186,10 +206,15 @@ fn add_input(root: &Path, path: PathBuf, paths: &mut BTreeSet<String>) -> Result
     Ok(())
 }
 
-fn source_file(root: &Path, path: &str, paths: &BTreeSet<String>) -> Result<SourceFile> {
+fn source_file(
+    root: &Path,
+    path: &str,
+    paths: &BTreeSet<String>,
+    byte_limit: u64,
+) -> Result<SourceFile> {
     let absolute = root.join(path);
     let before = fs::symlink_metadata(&absolute)?;
-    if before.len() > MAX_FILE_BYTES {
+    if before.len() > byte_limit {
         return Err(Error::Unavailable(format!(
             "source file exceeds capture limit: {path}"
         )));
@@ -244,10 +269,20 @@ fn source_file(root: &Path, path: &str, paths: &BTreeSet<String>) -> Result<Sour
 
 /// Capture current source; strict mode bypasses the metadata digest cache.
 pub fn capture(root: &Path, contract: &TaskContract, strict: bool) -> Result<SourceSnapshot> {
+    capture_with(root, contract, strict, CaptureLimits::default(), || Ok(()))
+}
+
+fn capture_with(
+    root: &Path,
+    contract: &TaskContract,
+    strict: bool,
+    limits: CaptureLimits,
+    after_read: impl FnOnce() -> Result<()>,
+) -> Result<SourceSnapshot> {
     contract.validate()?;
     let root = root.canonicalize()?;
     let (head, index_id, refs_id) = git_state(&root)?;
-    let before = listed(&root, contract)?;
+    let before = listed(&root, contract, limits)?;
     let cache_path = root.join(".pixel/tasks/source-cache.json");
     let cache: BTreeMap<String, Cached> = if strict {
         BTreeMap::new()
@@ -266,7 +301,7 @@ pub fn capture(root: &Path, contract: &TaskContract, strict: bool) -> Result<Sou
             .filter(|entry| entry.stat == stat && entry.file.symlink.is_none())
         {
             Some(entry) => entry.file.clone(),
-            None => source_file(&root, path, &before)?,
+            None => source_file(&root, path, &before, limits.file_bytes)?,
         };
         next.insert(
             path.clone(),
@@ -277,8 +312,9 @@ pub fn capture(root: &Path, contract: &TaskContract, strict: bool) -> Result<Sou
         );
         files.push(file);
     }
+    after_read()?;
     if (head.clone(), index_id.clone(), refs_id.clone()) != git_state(&root)?
-        || before != listed(&root, contract)?
+        || before != listed(&root, contract, limits)?
         || next.iter().any(|(path, entry)| {
             fs::symlink_metadata(root.join(path))
                 .map(|meta| Stat::from(&meta))
@@ -309,6 +345,14 @@ pub fn capture(root: &Path, contract: &TaskContract, strict: bool) -> Result<Sou
 
 /// A private copy owns every source file; live worktree edits cannot affect it.
 pub fn materialize(snapshot: &SourceSnapshot) -> Result<tempfile::TempDir> {
+    materialize_with(snapshot, |_| Ok(()), |_| Ok(()))
+}
+
+fn materialize_with(
+    snapshot: &SourceSnapshot,
+    mut before_copy: impl FnMut(&str) -> Result<()>,
+    after_copy: impl FnOnce(&Path) -> Result<()>,
+) -> Result<tempfile::TempDir> {
     let directory = tempfile::Builder::new()
         .prefix("pixel-task-check-")
         .tempdir()?;
@@ -394,13 +438,19 @@ pub fn materialize(snapshot: &SourceSnapshot) -> Result<tempfile::TempDir> {
         .map(|file| file.path.clone())
         .collect();
     for file in &snapshot.files {
-        let live = source_file(Path::new(&snapshot.root), &file.path, &paths)?;
+        let live = source_file(
+            Path::new(&snapshot.root),
+            &file.path,
+            &paths,
+            MAX_FILE_BYTES,
+        )?;
         if &live != file {
             return Err(Error::Unavailable(format!(
                 "source changed before copy: {}",
                 file.path
             )));
         }
+        before_copy(&file.path)?;
         let target = directory.path().join(&file.path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
@@ -419,6 +469,7 @@ pub fn materialize(snapshot: &SourceSnapshot) -> Result<tempfile::TempDir> {
             fs::set_permissions(&target, fs::Permissions::from_mode(file.mode))?;
         }
     }
+    after_copy(directory.path())?;
     if git_state(live_root)? != expected_git || git_state(directory.path())? != expected_git {
         return Err(Error::Unavailable(
             "Git state changed during capture copy".into(),
@@ -444,4 +495,316 @@ pub(crate) fn mutation_marker(root: &Path, snapshot: &SourceSnapshot) -> Result<
         })
         .collect::<std::io::Result<_>>()?;
     digest(&stats)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{contract, git, repo};
+
+    #[test]
+    fn reserved_runtime_paths_are_exact_and_not_similarly_named_source() {
+        for path in [
+            ".git",
+            ".git/index",
+            ".pixel",
+            ".pixel/tasks/a",
+            "target",
+            "target/debug/a",
+        ] {
+            assert!(excluded(path), "{path}");
+        }
+        for path in [
+            ".gitignore",
+            ".pixel-source",
+            "targets",
+            "src/target",
+            "src/.git",
+        ] {
+            assert!(!excluded(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn head_parser_distinguishes_unborn_valid_hashes_and_corrupt_output() {
+        assert_eq!(parse_head(Vec::new()).unwrap(), None);
+        for size in [40, 64] {
+            let value = "a".repeat(size);
+            assert_eq!(
+                parse_head(format!("{value}\n").into_bytes()).unwrap(),
+                Some(value)
+            );
+        }
+        for value in [
+            "a".repeat(39),
+            "a".repeat(41),
+            "a".repeat(63),
+            "a".repeat(65),
+            "g".repeat(40),
+            "z".repeat(64),
+        ] {
+            assert!(parse_head(value.into_bytes()).is_err());
+        }
+        assert!(parse_head(vec![255]).is_err());
+    }
+
+    #[test]
+    fn enumeration_and_file_size_limits_allow_the_boundary_and_reject_one_more() {
+        let root = repo();
+        let limits = CaptureLimits {
+            files: 2,
+            file_bytes: MAX_FILE_BYTES,
+        };
+        let exact = capture_with(root.path(), &contract(), true, limits, || Ok(())).unwrap();
+        assert_eq!(exact.files.len(), 2);
+        fs::write(root.path().join("third"), "x").unwrap();
+        assert!(matches!(
+            capture_with(root.path(), &contract(), true, limits, || Ok(())),
+            Err(Error::Unavailable(_))
+        ));
+        let paths = BTreeSet::from(["source.txt".into()]);
+        let exact = source_file(root.path(), "source.txt", &paths, 5).unwrap();
+        assert_eq!(exact.sha256, hex::encode(Sha256::digest(b"value")));
+        assert!(matches!(
+            source_file(root.path(), "source.txt", &paths, 4),
+            Err(Error::Unavailable(_))
+        ));
+        assert_eq!(CaptureLimits::default().files, 100_000);
+        assert_eq!(CaptureLimits::default().file_bytes, 268_435_456);
+    }
+
+    #[test]
+    fn declared_directory_traversal_is_bounded_and_includes_ignored_inputs() {
+        let root = repo();
+        fs::create_dir(root.path().join("ignored")).unwrap();
+        fs::write(root.path().join("ignored/one"), "one").unwrap();
+        let mut paths = BTreeSet::new();
+        add_input(root.path(), root.path().join("ignored"), &mut paths, 2).unwrap();
+        assert_eq!(paths, BTreeSet::from(["ignored/one".into()]));
+        fs::write(root.path().join("ignored/two"), "two").unwrap();
+        assert!(matches!(
+            add_input(
+                root.path(),
+                root.path().join("ignored"),
+                &mut BTreeSet::new(),
+                2
+            ),
+            Err(Error::Unavailable(_))
+        ));
+        let mut configured = contract();
+        configured.inputs.push("ignored".into());
+        let captured = capture(root.path(), &configured, true).unwrap();
+        assert!(captured.files.iter().any(|file| file.path == "ignored/one"));
+        assert!(captured.files.iter().any(|file| file.path == "ignored/two"));
+    }
+
+    #[test]
+    fn tracked_reserved_paths_submodules_and_nonmissing_io_errors_fail_closed() {
+        for reserved in [".pixel", "target"] {
+            let root = repo();
+            fs::create_dir(root.path().join(reserved)).unwrap();
+            fs::write(root.path().join(reserved).join("source"), "x").unwrap();
+            git(root.path(), &["add", "-f", reserved]);
+            assert!(matches!(
+                capture(root.path(), &contract(), true),
+                Err(Error::Unavailable(_))
+            ));
+        }
+        let root = repo();
+        let head = String::from_utf8(git(root.path(), &["rev-parse", "HEAD"])).unwrap();
+        git(
+            root.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{},module", head.trim()),
+            ],
+        );
+        fs::create_dir(root.path().join("module")).unwrap();
+        assert!(matches!(
+            capture(root.path(), &contract(), true),
+            Err(Error::Unavailable(_))
+        ));
+        let root = repo();
+        fs::create_dir(root.path().join("folder")).unwrap();
+        fs::write(root.path().join("folder/file"), "x").unwrap();
+        git(root.path(), &["add", "folder/file"]);
+        fs::remove_dir_all(root.path().join("folder")).unwrap();
+        fs::write(root.path().join("folder"), "not a directory").unwrap();
+        assert!(matches!(
+            capture(root.path(), &contract(), true),
+            Err(Error::Io(_))
+        ));
+    }
+
+    #[test]
+    fn symlinks_capture_only_internal_file_and_directory_targets() {
+        let root = repo();
+        fs::create_dir(root.path().join("dir")).unwrap();
+        fs::write(root.path().join("dir/value"), "inside").unwrap();
+        symlink("source.txt", root.path().join("file-link")).unwrap();
+        symlink("dir", root.path().join("dir-link")).unwrap();
+        fs::set_permissions(
+            root.path().join("source.txt"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+        let captured = capture(root.path(), &contract(), true).unwrap();
+        assert_eq!(
+            captured
+                .files
+                .iter()
+                .find(|file| file.path == "source.txt")
+                .unwrap()
+                .mode,
+            0o755
+        );
+        assert_eq!(
+            captured
+                .files
+                .iter()
+                .find(|file| file.path == "file-link")
+                .unwrap()
+                .symlink
+                .as_deref(),
+            Some("source.txt")
+        );
+        let copy = materialize(&captured).unwrap();
+        assert_eq!(
+            fs::read_link(copy.path().join("dir-link")).unwrap(),
+            Path::new("dir")
+        );
+        fs::create_dir(root.path().join("ignored")).unwrap();
+        fs::write(root.path().join("ignored/hidden"), "hidden").unwrap();
+        symlink("ignored/hidden", root.path().join("hidden-link")).unwrap();
+        assert!(matches!(
+            capture(root.path(), &contract(), true),
+            Err(Error::Unavailable(_))
+        ));
+        let mut configured = contract();
+        configured.inputs.push("ignored/hidden".into());
+        assert!(capture(root.path(), &configured, true).is_ok());
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret"), "outside").unwrap();
+        let target = format!(
+            "../{}/secret",
+            outside.path().file_name().unwrap().to_str().unwrap()
+        );
+        symlink(target, root.path().join("escape")).unwrap();
+        assert!(matches!(
+            capture(root.path(), &configured, true),
+            Err(Error::Unavailable(_))
+        ));
+    }
+
+    #[test]
+    fn capture_rejects_independent_content_path_and_ref_changes_during_collection() {
+        for change in ["content", "path", "ref"] {
+            let root = repo();
+            let result = capture_with(
+                root.path(),
+                &contract(),
+                true,
+                CaptureLimits::default(),
+                || {
+                    match change {
+                        "content" => fs::write(root.path().join("source.txt"), "other")?,
+                        "path" => fs::write(root.path().join("new"), "new")?,
+                        _ => {
+                            git(root.path(), &["update-ref", "refs/heads/moved", "HEAD"]);
+                        }
+                    }
+                    Ok(())
+                },
+            );
+            assert!(matches!(result, Err(Error::Unavailable(_))), "{change}");
+        }
+    }
+
+    #[test]
+    fn materialization_rejects_stale_source_copy_races_and_each_git_race() {
+        let root = repo();
+        let captured = capture(root.path(), &contract(), true).unwrap();
+        fs::write(root.path().join("source.txt"), "other").unwrap();
+        assert!(matches!(materialize(&captured), Err(Error::Unavailable(_))));
+        fs::write(root.path().join("source.txt"), "value").unwrap();
+        let result = materialize_with(
+            &captured,
+            |path| {
+                if path == "source.txt" {
+                    fs::write(root.path().join(path), "racing")?;
+                }
+                Ok(())
+            },
+            |_| Ok(()),
+        );
+        assert!(matches!(result, Err(Error::Unavailable(_))));
+        for change_private in [false, true] {
+            let root = repo();
+            let captured = capture(root.path(), &contract(), true).unwrap();
+            let result = materialize_with(
+                &captured,
+                |_| Ok(()),
+                |private| {
+                    git(
+                        if change_private { private } else { root.path() },
+                        &["update-ref", "refs/heads/race", "HEAD"],
+                    );
+                    Ok(())
+                },
+            );
+            assert!(matches!(result, Err(Error::Unavailable(_))));
+        }
+    }
+
+    #[test]
+    fn unborn_repositories_and_missing_index_are_captured_without_fabricated_head() {
+        let root = tempfile::tempdir().unwrap();
+        git(root.path(), &["init", "-q"]);
+        fs::write(root.path().join("file"), "untracked").unwrap();
+        let captured = capture(root.path(), &contract(), true).unwrap();
+        assert_eq!(captured.head, None);
+        assert_eq!(captured.files.len(), 1);
+        let copied = materialize(&captured).unwrap();
+        assert_eq!(
+            fs::read_to_string(copied.path().join("file")).unwrap(),
+            "untracked"
+        );
+    }
+
+    #[test]
+    fn unmerged_and_split_indexes_are_rejected_independently_before_copy() {
+        let root = repo();
+        git(root.path(), &["update-index", "--split-index"]);
+        let captured = capture(root.path(), &contract(), true).unwrap();
+        assert!(
+            matches!(materialize(&captured), Err(Error::Unavailable(message)) if message.contains("unmerged or split"))
+        );
+
+        let root = repo();
+        git(root.path(), &["checkout", "-qb", "other"]);
+        fs::write(root.path().join("source.txt"), "other").unwrap();
+        git(root.path(), &["commit", "-qam", "other"]);
+        git(root.path(), &["checkout", "-q", "--detach", "HEAD~1"]);
+        fs::write(root.path().join("source.txt"), "ours").unwrap();
+        git(root.path(), &["commit", "-qam", "ours"]);
+        assert!(
+            pixel_git::GitRunner::new(root.path())
+                .run_isolated(&[
+                    "-c",
+                    "user.name=Task tests",
+                    "-c",
+                    "user.email=task@example.com",
+                    "merge",
+                    "other",
+                ])
+                .is_err()
+        );
+        assert!(!git(root.path(), &["ls-files", "--unmerged"]).is_empty());
+        let captured = capture(root.path(), &contract(), true).unwrap();
+        assert!(
+            matches!(materialize(&captured), Err(Error::Unavailable(message)) if message.contains("unmerged or split"))
+        );
+    }
 }

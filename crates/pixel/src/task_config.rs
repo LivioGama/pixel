@@ -182,6 +182,7 @@ mod tests {
         assert_eq!(merged["criteria"], json!([{"id":"bug","checks":["test"]}]));
         assert_eq!(merged["inputs"], json!(["data", "fixtures"]));
         assert_eq!(merged["outputs"], json!(["target"]));
+        assert_eq!(merge_required(&config, merged.clone()).unwrap(), merged);
     }
 
     #[test]
@@ -220,5 +221,26 @@ mod tests {
         );
         assert!(merge_required(&config, json!({"toolchain":{"compiler":"c".repeat(64)}})).is_err());
         assert_eq!(merge_required(&config, merged.clone()).unwrap(), merged);
+    }
+
+    #[test]
+    fn criterion_requirements_should_preserve_identity_description_and_every_mapping() {
+        let required =
+            json!({"id":"acceptance","description":"expected behavior","checks":["test"]});
+        let stronger = json!({"id":"acceptance","description":"expected behavior","checks":["test","additional"]});
+        assert!(equivalent_requirement("criteria", &stronger, &required).unwrap());
+        for weaker in [
+            json!({"id":"different","description":"expected behavior","checks":["test"]}),
+            json!({"id":"acceptance","description":"different","checks":["test"]}),
+            json!({"id":"acceptance","description":"expected behavior","checks":[]}),
+        ] {
+            assert!(!equivalent_requirement("criteria", &weaker, &required).unwrap());
+        }
+        let config = json!({"criteria":[required.clone()]});
+        assert_eq!(
+            merge_required(&config, json!({})).unwrap()["criteria"],
+            json!([required])
+        );
+        assert!(merge_required(&config, json!({"criteria":[{"id":"acceptance","description":"different","checks":["test"]}]})).is_err());
     }
 }

@@ -354,6 +354,8 @@ pub(crate) fn request() -> String {
             .as_nanos()
     )
 }
+// Diagnostic conversion only; authorization and outcomes are decided by callers.
+#[cfg_attr(test, mutants::skip)]
 pub(crate) fn error(error: impl std::fmt::Display) -> String {
     error.to_string()
 }

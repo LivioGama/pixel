@@ -246,6 +246,53 @@ fn task_route_should_cache_the_prediction_and_reclassify_changed_source() {
 }
 
 #[test]
+fn task_route_should_recover_frozen_classifier_telemetry_without_reinference() {
+    let server = Classifier::start(Duration::from_millis(25), false);
+    let (root, home, task) = fixture("export-retry", &server.base, true, "local");
+    let sink = home.join("telemetry.jsonl");
+    std::fs::create_dir(&sink).unwrap();
+    let run = || {
+        command(&root, &home, &task, "gates_classifier")
+            .env("PIXEL_TASK_TELEMETRY_PATH", &sink)
+            .output()
+            .unwrap()
+    };
+    assert!(!run().status.success());
+    assert_eq!(server.count.load(Ordering::SeqCst), 1);
+    assert!(events(&root, &task, "route").is_empty());
+    let recorded = events(&root, &task, "telemetry");
+    assert_eq!(recorded.len(), 1);
+    let frozen = recorded[0].data["data"].clone();
+    assert_eq!(frozen["actor"], "classifier");
+    assert!(frozen["duration_ms"].as_u64().unwrap() >= 25);
+
+    std::fs::remove_dir(&sink).unwrap();
+    let recovered = decode(run());
+    assert_fallback(&recovered);
+    let read_sink = || {
+        std::fs::read_to_string(&sink)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(read_sink(), vec![frozen.clone()]);
+    assert_eq!(events(&root, &task, "route").len(), 1);
+
+    // Replaying a cached route must retry export too, without changing duration.
+    std::fs::remove_file(&sink).unwrap();
+    std::fs::create_dir(&sink).unwrap();
+    assert!(!run().status.success());
+    std::fs::remove_dir(&sink).unwrap();
+    assert_eq!(decode(run()), recovered);
+    assert_eq!(decode(run()), recovered);
+    assert_eq!(read_sink(), vec![frozen.clone(), frozen]);
+    assert_eq!(events(&root, &task, "telemetry").len(), 1);
+    assert_eq!(events(&root, &task, "route_attempt").len(), 1);
+    assert_eq!(server.count.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn task_route_should_share_one_inflight_prediction_between_processes() {
     let server = Classifier::start(Duration::from_millis(150), false);
     let (root, home, task) = fixture("concurrent", &server.base, true, "local");

@@ -41,6 +41,22 @@ impl Commit {
 #[derive(Debug, Clone)]
 pub struct Store {
     root: PathBuf,
+    limits: StoreLimits,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StoreLimits {
+    journal_bytes: u64,
+    events: usize,
+}
+
+impl Default for StoreLimits {
+    fn default() -> Self {
+        Self {
+            journal_bytes: MAX_JOURNAL_BYTES,
+            events: MAX_EVENTS,
+        }
+    }
 }
 
 struct TaskLock(File);
@@ -57,6 +73,7 @@ impl Store {
     pub fn open(root: &Path) -> Result<Self> {
         Ok(Self {
             root: root.canonicalize()?,
+            limits: StoreLimits::default(),
         })
     }
 
@@ -97,7 +114,7 @@ impl Store {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
         };
-        if file.metadata()?.len() > MAX_JOURNAL_BYTES {
+        if file.metadata()?.len() > self.limits.journal_bytes {
             return Err(Error::Corrupt("task journal exceeds supported size".into()));
         }
         let mut bytes = Vec::new();
@@ -122,7 +139,7 @@ impl Store {
                 ));
             }
             commits.push(record);
-            if commits.len() > MAX_EVENTS {
+            if commits.len() > self.limits.events {
                 return Err(Error::Corrupt("task journal event limit exceeded".into()));
             }
         }
@@ -681,7 +698,7 @@ impl Store {
         kind: &str,
         data: Value,
     ) -> Result<Task> {
-        if commits.len() >= MAX_EVENTS {
+        if commits.len() >= self.limits.events {
             return Err(Error::Unavailable("task event limit exceeded".into()));
         }
         task.revision = commits.last().map_or(1, |prior| prior.task.revision + 1);
@@ -725,7 +742,7 @@ impl Store {
             .iter()
             .rposition(|byte| *byte == b'\n')
             .map_or(0, |offset| offset + 1);
-        if committed_len as u64 + line.len() as u64 > MAX_JOURNAL_BYTES {
+        if committed_len as u64 + line.len() as u64 > self.limits.journal_bytes {
             return Err(Error::Unavailable(
                 "task journal byte limit exceeded".into(),
             ));
@@ -770,4 +787,388 @@ fn process_alive(pid: u32) -> bool {
     // SAFETY: signal zero probes process existence without delivering a signal.
     let result = unsafe { libc::kill(pid, 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{contract, repo};
+
+    fn begin(store: &Store, request: &str) -> Task {
+        store
+            .begin(contract(), "pi", Some("session"), request)
+            .unwrap()
+    }
+
+    fn rewrite_task(store: &Store, id: &str, change: impl FnOnce(&mut Task)) {
+        let mut records = store.read_commits(id).unwrap();
+        let record = records.last_mut().unwrap();
+        change(&mut record.task);
+        record.checksum = record.checksum().unwrap();
+        let mut bytes = Vec::new();
+        for record in records {
+            bytes.extend(serde_json::to_vec(&record).unwrap());
+            bytes.push(b'\n');
+        }
+        fs::write(store.directory(id).unwrap().join("journal.jsonl"), bytes).unwrap();
+    }
+
+    #[test]
+    fn root_and_lock_ownership_survive_canonical_paths_and_inherited_descriptors() {
+        let root = repo();
+        let store = Store::open(&root.path().join(".")).unwrap();
+        assert_eq!(store.root(), root.path().canonicalize().unwrap());
+        let lock = store.lock("task-lock").unwrap();
+        let inherited = lock.0.try_clone().unwrap();
+        assert!(matches!(store.lock("task-lock"), Err(Error::Busy(_))));
+        drop(lock);
+        drop(
+            store
+                .lock("task-lock")
+                .expect("explicit unlock must release inherited descriptor ownership"),
+        );
+        drop(inherited);
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join(".pixel/tasks/escape"))
+            .unwrap();
+        assert!(matches!(store.lock("escape"), Err(Error::Invalid(_))));
+    }
+
+    #[test]
+    fn journal_read_and_append_limits_are_inclusive_and_atomic() {
+        let root = repo();
+        let mut store = Store::open(root.path()).unwrap();
+        assert_eq!(store.limits.events, 10_000);
+        assert_eq!(store.limits.journal_bytes, 67_108_864);
+        store.limits.events = 2;
+        let task = begin(&store, "begin");
+        let task = store
+            .update(
+                &task.task_id,
+                task.revision,
+                "claim",
+                Action::Claim {
+                    text: "claim".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(store.status(&task.task_id).unwrap().revision, 2);
+        assert!(matches!(
+            store.update(
+                &task.task_id,
+                task.revision,
+                "extra",
+                Action::Claim {
+                    text: "extra".into()
+                }
+            ),
+            Err(Error::Unavailable(_))
+        ));
+        store.limits.events = 1;
+        assert!(matches!(
+            store.status(&task.task_id),
+            Err(Error::Corrupt(_))
+        ));
+
+        let root = repo();
+        let mut store = Store::open(root.path()).unwrap();
+        let task = begin(&store, "begin");
+        let journal = store
+            .directory(&task.task_id)
+            .unwrap()
+            .join("journal.jsonl");
+        let before = fs::read(&journal).unwrap();
+        store.limits.journal_bytes = before.len() as u64;
+        assert_eq!(store.status(&task.task_id).unwrap(), task);
+        store.limits.journal_bytes -= 1;
+        assert!(matches!(
+            store.status(&task.task_id),
+            Err(Error::Corrupt(_))
+        ));
+        store.limits.journal_bytes = MAX_JOURNAL_BYTES;
+        store
+            .update(
+                &task.task_id,
+                task.revision,
+                "claim",
+                Action::Claim {
+                    text: "value".into(),
+                },
+            )
+            .unwrap();
+        let exact_size = fs::metadata(&journal).unwrap().len();
+        fs::write(&journal, &before).unwrap();
+        store.limits.journal_bytes = exact_size;
+        assert_eq!(
+            store
+                .update(
+                    &task.task_id,
+                    task.revision,
+                    "claim",
+                    Action::Claim {
+                        text: "value".into()
+                    }
+                )
+                .unwrap()
+                .revision,
+            2
+        );
+        assert_eq!(fs::metadata(&journal).unwrap().len(), exact_size);
+        fs::write(&journal, &before).unwrap();
+        store.limits.journal_bytes = exact_size - 1;
+        assert!(matches!(
+            store.update(
+                &task.task_id,
+                task.revision,
+                "claim",
+                Action::Claim {
+                    text: "value".into()
+                }
+            ),
+            Err(Error::Unavailable(_))
+        ));
+        assert_eq!(fs::read(journal).unwrap(), before);
+    }
+
+    #[test]
+    fn missing_state_is_distinct_from_nonmissing_io_and_partial_authority() {
+        let root = repo();
+        let store = Store::open(root.path()).unwrap();
+        assert!(matches!(store.status("missing"), Err(Error::NotFound(_))));
+        assert!(store.find_session("pi", "missing").unwrap().is_none());
+        let path = store.directory("bad-journal").unwrap();
+        fs::create_dir_all(path.join("journal.jsonl")).unwrap();
+        assert!(matches!(store.status("bad-journal"), Err(Error::Io(_))));
+        let path = store.directory("bad-legacy").unwrap();
+        fs::create_dir_all(path.join("task.json")).unwrap();
+        assert!(matches!(store.status("bad-legacy"), Err(Error::Io(_))));
+        let path = store.directory("partial").unwrap();
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("journal.jsonl"), b"{\"partial\":").unwrap();
+        assert!(
+            matches!(store.status("partial"), Err(Error::Corrupt(message)) if message == "no complete task journal record")
+        );
+        let root = repo();
+        fs::create_dir_all(root.path().join(".pixel")).unwrap();
+        fs::write(root.path().join(".pixel/tasks"), "not a directory").unwrap();
+        assert!(matches!(
+            Store::open(root.path())
+                .unwrap()
+                .find_session("pi", "session"),
+            Err(Error::Io(_))
+        ));
+    }
+
+    #[test]
+    fn legacy_schema_and_task_identity_are_checked_independently() {
+        let root = repo();
+        let store = Store::open(root.path()).unwrap();
+        let path = store.directory("legacy").unwrap();
+        fs::create_dir_all(&path).unwrap();
+        for (version, id) in [(2, "legacy"), (1, "other")] {
+            fs::write(path.join("task.json"), serde_json::to_vec(&json!({"version":version,"task_id":id,"spec":{"objective":"legacy objective"}})).unwrap()).unwrap();
+            assert!(matches!(store.status("legacy"), Err(Error::Corrupt(_))));
+        }
+        fs::write(path.join("task.json"), serde_json::to_vec(&json!({"version":1,"task_id":"legacy","spec":{"objective":"legacy objective"},"created_unix":12,"provider":"pi","session_id":"session","status":"worker","model_claims":[{"text":"done"}]})).unwrap()).unwrap();
+        let task = store.status("legacy").unwrap();
+        assert_eq!(task.contract.objective, "legacy objective");
+        assert_eq!(task.created_ms, 12_000);
+        assert_eq!(task.legacy_status.as_deref(), Some("worker"));
+        assert_eq!(task.claims, ["done"]);
+        assert_eq!(
+            store
+                .find_session("pi", "session")
+                .unwrap()
+                .unwrap()
+                .task_id,
+            "legacy"
+        );
+    }
+
+    #[test]
+    fn session_binding_chooses_latest_authority_and_refuses_timestamp_ties() {
+        let root = repo();
+        let store = Store::open(root.path()).unwrap();
+        let first = begin(&store, "first");
+        let second = begin(&store, "second");
+        rewrite_task(&store, &first.task_id, |task| task.updated_ms = 10);
+        rewrite_task(&store, &second.task_id, |task| task.updated_ms = 20);
+        fs::remove_file(store.directory(&second.task_id).unwrap().join("task.json")).unwrap();
+        fs::write(root.path().join(".pixel/tasks/ordinary-file"), "ignore").unwrap();
+        fs::create_dir(root.path().join(".pixel/tasks/empty-directory")).unwrap();
+        assert_eq!(
+            store
+                .find_session("pi", "session")
+                .unwrap()
+                .unwrap()
+                .task_id,
+            second.task_id
+        );
+        rewrite_task(&store, &first.task_id, |task| task.updated_ms = 30);
+        assert_eq!(
+            store
+                .find_session("pi", "session")
+                .unwrap()
+                .unwrap()
+                .task_id,
+            first.task_id
+        );
+        rewrite_task(&store, &second.task_id, |task| task.updated_ms = 30);
+        assert!(matches!(
+            store.find_session("pi", "session"),
+            Err(Error::Blocked(_))
+        ));
+    }
+
+    #[test]
+    fn claim_byte_and_count_limits_accept_exact_boundaries_without_partial_writes() {
+        let root = repo();
+        let store = Store::open(root.path()).unwrap();
+        let task = begin(&store, "begin");
+        let task = store
+            .update(
+                &task.task_id,
+                task.revision,
+                "max-length",
+                Action::Claim {
+                    text: "x".repeat(16_384),
+                },
+            )
+            .unwrap();
+        assert_eq!(task.claims[0].len(), 16_384);
+        assert!(matches!(
+            store.update(
+                &task.task_id,
+                task.revision,
+                "too-long",
+                Action::Claim {
+                    text: "x".repeat(16_385)
+                }
+            ),
+            Err(Error::Invalid(_))
+        ));
+        rewrite_task(&store, &task.task_id, |task| {
+            task.claims = vec!["existing".into(); 127]
+        });
+        let task = store
+            .update(
+                &task.task_id,
+                task.revision,
+                "max-count",
+                Action::Claim {
+                    text: "last".into(),
+                },
+            )
+            .unwrap();
+        assert_eq!(task.claims.len(), 128);
+        assert_eq!(task.claims.last().map(String::as_str), Some("last"));
+        assert!(matches!(
+            store.update(
+                &task.task_id,
+                task.revision,
+                "too-many",
+                Action::Claim {
+                    text: "extra".into()
+                }
+            ),
+            Err(Error::Invalid(_))
+        ));
+        assert_eq!(store.status(&task.task_id).unwrap(), task);
+    }
+
+    #[test]
+    fn manifest_id_validation_and_existing_manifest_collision_fail_closed() {
+        let root = repo();
+        let store = Store::open(root.path()).unwrap();
+        let task = begin(&store, "begin");
+        let task = store
+            .update(
+                &task.task_id,
+                task.revision,
+                "prepare",
+                Action::Prepare {
+                    observations: vec![],
+                },
+            )
+            .unwrap();
+        let original = fs::read(
+            store
+                .directory(&task.task_id)
+                .unwrap()
+                .join("journal.jsonl"),
+        )
+        .unwrap();
+        for id in ["a".repeat(63), "g".repeat(64)] {
+            fs::write(
+                store
+                    .directory(&task.task_id)
+                    .unwrap()
+                    .join("journal.jsonl"),
+                &original,
+            )
+            .unwrap();
+            rewrite_task(&store, &task.task_id, |task| {
+                task.source.as_mut().unwrap().content_id = id
+            });
+            assert!(
+                matches!(store.status(&task.task_id), Err(Error::Corrupt(message)) if message == "invalid source manifest identity")
+            );
+        }
+        fs::write(
+            store
+                .directory(&task.task_id)
+                .unwrap()
+                .join("journal.jsonl"),
+            &original,
+        )
+        .unwrap();
+        let mut changed = task.clone();
+        changed.source.as_mut().unwrap().files[0].sha256 = "changed".into();
+        assert!(matches!(
+            store.persist_source(&changed),
+            Err(Error::Corrupt(_))
+        ));
+        let manifest = root
+            .path()
+            .join(".pixel/tasks/source-manifests")
+            .join(format!("{}.json", task.source.as_ref().unwrap().content_id));
+        fs::write(manifest, "[]").unwrap();
+        assert!(
+            matches!(store.persist_source(&task), Err(Error::Corrupt(message)) if message == "immutable source manifest differs")
+        );
+    }
+
+    #[test]
+    fn recovery_distinguishes_live_exited_and_unrepresentable_owners() {
+        assert!(process_alive(std::process::id()));
+        assert!(process_alive(u32::MAX));
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let exited = child.id();
+        assert!(child.wait().unwrap().success());
+        assert!(!process_alive(exited));
+        let root = repo();
+        let store = Store::open(root.path()).unwrap();
+        let task = begin(&store, "begin");
+        rewrite_task(&store, &task.task_id, |task| {
+            task.running = Some(VerificationRun {
+                run_id: "recoverable".into(),
+                request_id: "verify".into(),
+                source_id: "source".into(),
+                owner_pid: std::process::id(),
+                started_ms: 1,
+            })
+        });
+        assert!(matches!(
+            store.update(&task.task_id, task.revision, "alive", Action::Recover),
+            Err(Error::Busy(_))
+        ));
+        rewrite_task(&store, &task.task_id, |task| {
+            task.running.as_mut().unwrap().owner_pid = exited
+        });
+        let recovered = store
+            .update(&task.task_id, task.revision, "exited", Action::Recover)
+            .unwrap();
+        assert_eq!(recovered.phase, Phase::Incomplete);
+        assert!(recovered.running.is_none());
+    }
 }

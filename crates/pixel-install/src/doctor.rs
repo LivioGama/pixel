@@ -96,6 +96,7 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("install.legacy-wrappers", FIX_INSTALL),
     entry("rule.parity", FIX_INSTALL),
     entry("rule.scenarios", FIX_INSTALL),
+    entry("repo.task-hook-observations", None),
     entry("repo.codex-config", FIX_REPO_INSTALL),
     entry("repo.codex-hooks", FIX_REPO_INSTALL),
     entry("repo.codex-hook-review", None),
@@ -104,7 +105,6 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("repo.pixel-first", FIX_REPO_INSTALL),
     entry("repo.claude-hooks", FIX_REPO_INSTALL),
     entry("repo.pi-guard", FIX_REPO_INSTALL),
-    entry("repo.task-hook-observations", None),
     entry("daemon.health", Some("pixel daemon start {root}")),
     entry(
         "daemon.epistemics",
@@ -2549,7 +2549,31 @@ mod tests {
         assert_eq!(detail["hosts"][1]["observed"], false);
         assert_eq!(detail["hosts"][2]["evidence"]["session_id"], "real-session");
         assert_eq!(detail["complete_tool_coverage"], false);
+        for (key, invalid) in [
+            ("schema_version", serde_json::json!(2)),
+            ("provider", serde_json::json!("claude")),
+            ("session_id", serde_json::json!("")),
+            ("event", serde_json::json!("")),
+            ("observed_unix", serde_json::json!("123")),
+        ] {
+            let mut malformed = event.clone();
+            malformed[key] = invalid;
+            std::fs::write(&path, serde_json::json!({"pi":malformed}).to_string()).unwrap();
+            let detail = super::task_hook_observations(temp.path())
+                .unwrap()
+                .detail
+                .unwrap();
+            assert_eq!(detail["hosts"][2]["observed"], false, "{key}");
+            assert_eq!(
+                detail["hosts"][2]["evidence"],
+                serde_json::Value::Null,
+                "{key}"
+            );
+        }
         std::fs::write(&path, "not json").unwrap();
+        assert!(super::task_hook_observations(temp.path()).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
         assert!(super::task_hook_observations(temp.path()).is_err());
     }
 

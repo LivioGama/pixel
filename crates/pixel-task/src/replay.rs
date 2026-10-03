@@ -598,7 +598,10 @@ mod tests {
                 retry_of: None,
             },
         );
-        for pair in [[unknown.clone(), known.clone()], [known.clone(), unknown]] {
+        for pair in [
+            [unknown.clone(), known.clone()],
+            [known.clone(), unknown.clone()],
+        ] {
             assert_eq!(
                 summarize_trajectory(&[pair[0].clone(), pair[1].clone(), coverage()])
                     .unwrap()
@@ -614,6 +617,10 @@ mod tests {
                 retry_of: None,
             },
         );
+        assert!(matches!(
+            summarize_trajectory(&[unknown, known.clone(), conflict.clone()]),
+            Err(ReplayError::Invalid(_))
+        ));
         assert!(matches!(
             summarize_trajectory(&[known.clone(), conflict]),
             Err(ReplayError::Invalid(_))
@@ -1020,5 +1027,72 @@ mod tests {
         assert!(
             matches!(summarize_trajectory(&[empty]), Err(ReplayError::Invalid(message)) if message == "empty logical identity")
         );
+    }
+
+    #[test]
+    fn summary_rejects_empty_and_self_parent_spans_independently() {
+        for parent in ["", "root"] {
+            let mut value = request("one");
+            value.parent_span_id = Some(parent.into());
+            assert!(
+                matches!(summarize_trajectory(&[value]), Err(ReplayError::Invalid(message)) if message == "invalid parent span")
+            );
+        }
+        let inconsistent = event(
+            "coverage",
+            Observation::Coverage {
+                complete: true,
+                child_spans: vec![],
+                missing: vec!["missing request".into()],
+            },
+        );
+        let summary = summarize_trajectory(&[inconsistent]).unwrap();
+        assert_eq!(summary.coverage, Coverage::Partial);
+        assert_eq!(
+            summary.missing,
+            vec![
+                "incomplete span root",
+                "missing request",
+                "uncovered span root"
+            ]
+        );
+    }
+
+    #[test]
+    fn regret_rejects_each_incomplete_subject_and_deduplicates_equal_comparators() {
+        let subject = attempt("subject", 8);
+        let comparator = attempt("other", 4);
+        let mut invalid = subject.clone();
+        invalid.attempt_id.clear();
+        assert_eq!(
+            empirical_regret(&invalid, std::slice::from_ref(&comparator)).reason,
+            "comparison identity is incomplete"
+        );
+        let mut invalid = subject.clone();
+        invalid.verified_success = false;
+        assert_eq!(
+            empirical_regret(&invalid, std::slice::from_ref(&comparator)).reason,
+            "subject did not pass the held-out verifier"
+        );
+        let mut invalid = subject.clone();
+        invalid.trajectory.coverage = Coverage::Partial;
+        assert_eq!(
+            empirical_regret(&invalid, std::slice::from_ref(&comparator)).reason,
+            "subject telemetry is incomplete"
+        );
+        let mut invalid = subject.clone();
+        invalid.trajectory.model_tool_requests = None;
+        assert_eq!(
+            empirical_regret(&invalid, std::slice::from_ref(&comparator)).reason,
+            "subject interaction count is unknown"
+        );
+        let report = empirical_regret(&subject, &[comparator.clone(), comparator]);
+        assert_eq!(report.matched_successful_attempts, vec!["other"]);
+        assert_eq!(report.extra_interactions, Some(4));
+        let mut unknown = attempt("unknown", 1);
+        unknown.trajectory.model_tool_requests = None;
+        let report = empirical_regret(&subject, &[unknown, attempt("known", 5)]);
+        assert_eq!(report.matched_successful_attempts, vec!["known"]);
+        assert_eq!(report.extra_interactions, Some(3));
     }
 }

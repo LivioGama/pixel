@@ -1402,9 +1402,11 @@ fn output_limit_accepts_exact_cap_and_rejects_each_overflowing_stream() {
         let task = store
             .begin(
                 contract(if stderr {
-                    "cat payload >&2"
+                    "cat payload >&2; sleep 5"
+                } else if bytes > CAP {
+                    "cat payload; sleep 5"
                 } else {
-                    "cat payload"
+                    "cat payload; sleep 0.05"
                 }),
                 "pi",
                 None,
@@ -1427,6 +1429,7 @@ fn output_limit_accepts_exact_cap_and_rejects_each_overflowing_stream() {
         assert_eq!(receipt.stdout_bytes, if stderr { 0 } else { bytes });
         assert_eq!(receipt.stderr_bytes, if stderr { bytes } else { 0 });
         if bytes > CAP {
+            assert!(receipt.duration_ms < 1_500);
             assert!(!store.decision(&task.task_id, Gate::Finish).unwrap().allowed);
         }
     }
@@ -1484,4 +1487,89 @@ fn timeout_terminates_descendants_as_well_as_the_shell() {
         }
     }
     assert!(terminated, "timed-out check left descendant {pid} running");
+}
+
+#[test]
+fn policy_routes_identify_configuration_preparation_and_each_verification_gap() {
+    use pixel_task::Route;
+    let directory = repo();
+    let store = Store::open(directory.path()).unwrap();
+    let mut configured = contract("true");
+    configured.require_review = false;
+    let task = store.begin(configured, "pi", None, "begin").unwrap();
+    let task = store
+        .update(
+            &task.task_id,
+            task.revision,
+            "prepare",
+            Action::Prepare {
+                observations: observations(),
+            },
+        )
+        .unwrap();
+    let ready = store.verify(&task.task_id, &[], "verify").unwrap();
+    let source = ready.source.as_ref().unwrap().content_id.as_str();
+    let mut missing = ready.clone();
+    missing.contract.checks.clear();
+    missing.contract.criteria.clear();
+    assert_eq!(
+        pixel_task::policy::decide(&missing, Gate::Edit, Some(source)).eligible_routes,
+        vec![Route::Investigate, Route::Recover, Route::Configure]
+    );
+    assert_eq!(
+        pixel_task::policy::decide(&ready, Gate::Edit, Some("stale")).eligible_routes,
+        vec![Route::Investigate, Route::Recover, Route::Prepare]
+    );
+    for gap in ["required-only", "criterion-only", "unmapped"] {
+        let mut task = ready.clone();
+        if gap == "unmapped" {
+            task.contract.criteria[0].checks.clear();
+        } else {
+            let mut additional = task.contract.checks[0].clone();
+            additional.id = "additional".into();
+            additional.required = gap == "required-only";
+            task.contract.checks.push(additional);
+            if gap == "criterion-only" {
+                task.contract.criteria[0].checks.push("additional".into());
+            }
+        }
+        task.receipts[0].contract_id = task.contract.id().unwrap();
+        let decision = pixel_task::policy::decide(&task, Gate::Finish, Some(source));
+        assert!(!decision.allowed, "{gap}");
+        assert_eq!(
+            decision.eligible_routes,
+            vec![Route::Investigate, Route::Recover, Route::Verify],
+            "{gap}"
+        );
+    }
+}
+
+#[test]
+fn finish_rehashes_source_instead_of_trusting_a_damaged_digest_cache() {
+    let directory = repo();
+    let store = Store::open(directory.path()).unwrap();
+    let mut configured = contract("true");
+    configured.require_review = false;
+    let task = store.begin(configured, "pi", None, "begin").unwrap();
+    let task = store
+        .update(
+            &task.task_id,
+            task.revision,
+            "prepare",
+            Action::Prepare {
+                observations: observations(),
+            },
+        )
+        .unwrap();
+    let task = store.verify(&task.task_id, &[], "verify").unwrap();
+    let cache_path = directory.path().join(".pixel/tasks/source-cache.json");
+    let mut cache: serde_json::Value =
+        serde_json::from_slice(&fs::read(&cache_path).unwrap()).unwrap();
+    cache["source.txt"]["file"]["sha256"] = json!("damaged-cached-digest");
+    fs::write(&cache_path, serde_json::to_vec(&cache).unwrap()).unwrap();
+    let (input, source_id) = store.decision_input(&task.task_id, Gate::Finish).unwrap();
+    assert_eq!(source_id, task.source.as_ref().unwrap().content_id);
+    assert_eq!(input.task_id, task.task_id);
+    assert_eq!(input.receipts[0].outcome, CheckOutcome::Passed);
+    assert!(pixel_task::policy::decide(&input, Gate::Finish, Some(&source_id)).allowed);
 }

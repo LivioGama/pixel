@@ -741,6 +741,7 @@ mod tests {
             ("SubagentStart", "subagent_start"),
             ("SubagentStop", "subagent_stop"),
             ("Stop", "stop"),
+            ("Interrupt", "interrupt"),
         ];
         for (event, label) in table {
             assert_eq!(hook_event_label(event), Some(label), "{event}");

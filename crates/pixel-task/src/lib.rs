@@ -52,3 +52,60 @@ pub fn digest<T: serde::Serialize + ?Sized>(value: &T) -> Result<String> {
     use sha2::{Digest, Sha256};
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(value)?)))
 }
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::Path;
+
+    pub fn git(root: &Path, args: &[&str]) -> Vec<u8> {
+        let mut configured = vec![
+            "-c",
+            "user.name=Task tests",
+            "-c",
+            "user.email=task@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ];
+        configured.extend(args);
+        pixel_git::GitRunner::new(root)
+            .run_isolated(&configured)
+            .unwrap()
+    }
+
+    pub fn repo() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        git(directory.path(), &["init", "-q"]);
+        std::fs::write(directory.path().join("source.txt"), "value").unwrap();
+        std::fs::write(
+            directory.path().join(".gitignore"),
+            ".pixel/\ntarget/\nignored/\n",
+        )
+        .unwrap();
+        git(directory.path(), &["add", "."]);
+        git(directory.path(), &["commit", "-qm", "fixture"]);
+        directory
+    }
+
+    pub fn contract() -> crate::TaskContract {
+        crate::TaskContract {
+            objective: "capture task source".into(),
+            ..crate::TaskContract::default()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn digest_is_exact_sha256_of_serialized_value() {
+        use sha2::{Digest, Sha256};
+        assert_eq!(
+            super::digest(&"value").unwrap(),
+            hex::encode(Sha256::digest(br#""value""#))
+        );
+        assert_ne!(
+            super::digest(&"value").unwrap(),
+            super::digest(&"other").unwrap()
+        );
+    }
+}

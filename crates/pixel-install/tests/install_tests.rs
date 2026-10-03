@@ -31,6 +31,55 @@ fn fake_pixel_exe(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
+fn task_hook_group(exe: &Path, provider: &str, event: &str) -> serde_json::Value {
+    let executable = exe
+        .canonicalize()
+        .unwrap()
+        .display()
+        .to_string()
+        .replace('\'', "'\\''");
+    serde_json::json!({"hooks":[{
+        "type":"command",
+        "command":format!("'{executable}' run-hook task-event --provider {provider} --event {event}"),
+        "timeout":if matches!(event, "session-end" | "interrupt") { 3 } else { 10 }
+    }]})
+}
+
+/// Check every synchronous task boundary exactly once before comparing the
+/// pre-existing lifecycle/foreign hooks independently of the new task hooks.
+fn without_task_hooks(value: &serde_json::Value, provider: &str, exe: &Path) -> serde_json::Value {
+    let mut remaining = value.clone();
+    let extra = if provider == "claude" {
+        ("PostToolUseFailure", "tool-failure")
+    } else {
+        ("Interrupt", "interrupt")
+    };
+    for (event, name) in [
+        ("SessionStart", "session-start"),
+        ("UserPromptSubmit", "prompt-submit"),
+        ("PreToolUse", "pre-tool-use"),
+        ("PostToolUse", "post-tool-use"),
+        ("Stop", "stop"),
+        ("SessionEnd", "session-end"),
+        ("SubagentStart", "subagent-start"),
+        ("SubagentStop", "subagent-stop"),
+        extra,
+    ] {
+        let expected = task_hook_group(exe, provider, name);
+        let groups = remaining["hooks"][event].as_array_mut().unwrap();
+        assert_eq!(
+            groups.iter().filter(|group| **group == expected).count(),
+            1,
+            "{event}: {groups:?}"
+        );
+        groups.retain(|group| group != &expected);
+        if groups.is_empty() {
+            remaining["hooks"].as_object_mut().unwrap().remove(event);
+        }
+    }
+    remaining
+}
+
 // The install wires the Claude lifecycle hooks into ~/.claude/settings.json
 // (the SessionStart hook injects the prompt into every Claude process) and
 // removes legacy `claude()` shell-wrapper blocks. Every test pins an explicit
@@ -411,7 +460,7 @@ fn install_leaves_codex_config_untouched() {
     };
     install(&options).expect("install");
 
-    // Install adds exactly one entry — the metrics PostToolUse relay — and
+    // Install adds the metrics relay and synchronous task lifecycle gates, and
     // leaves every foreign hook and unrelated key untouched. Stale pixel
     // guards are still `pixel uninstall`'s job, not install's.
     let after: serde_json::Value =
@@ -432,7 +481,8 @@ fn install_leaves_codex_config_untouched() {
         "the metrics relay must be registered: {after}"
     );
     assert_eq!(
-        after["hooks"]["PreToolUse"], original["hooks"]["PreToolUse"],
+        without_task_hooks(&after, "codex", options.executable_path.as_ref().unwrap())["hooks"]["PreToolUse"],
+        original["hooks"]["PreToolUse"],
         "foreign hooks must pass through untouched"
     );
     assert_eq!(after["unrelated"], true);
@@ -751,11 +801,11 @@ fn install_on_a_fresh_home_creates_claude_md_even_with_no_pre_existing_file() {
             "missing {event} → run-hook {verb}: {settings}"
         );
     }
-    // Enforcement stays repo-local: the global install must not wire
-    // PreToolUse into the user-level settings.
+    // Task gates are global; the retrieval rewriter stays repo-local.
+    let legacy = without_task_hooks(&settings, "claude", &std::env::current_exe().unwrap());
     assert!(
-        settings["hooks"].get("PreToolUse").is_none(),
-        "global install must not add PreToolUse: {settings}"
+        legacy["hooks"].get("PreToolUse").is_none(),
+        "global install must not add a retrieval rewriter: {settings}"
     );
     assert!(
         !shell_profile_path(home).exists(),
@@ -1722,8 +1772,7 @@ fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
     };
-    // The global install wires ONLY lifecycle hooks (SessionStart,
-    // UserPromptSubmit, PostToolUse, compaction) — no PreToolUse guard, and
+    // The global install wires lifecycle and task hooks, no retrieval guard, and
     // foreign entries (RTK + SessionStart) pass through untouched.
     install(&opts).unwrap();
     let once = fs::read(&settings).unwrap();
@@ -1736,9 +1785,9 @@ fn routing_full_install_rtk_round_trip_preserves_foreign_hooks() {
     let installed: serde_json::Value = serde_json::from_slice(&once).unwrap();
     // No pixel delegate is added; the RTK entry survives verbatim.
     assert_eq!(
-        installed["hooks"]["PreToolUse"],
+        without_task_hooks(&installed, "claude", &exe)["hooks"]["PreToolUse"],
         serde_json::json!([rtk]),
-        "PreToolUse must retain only the foreign RTK entry — enforcement is repo-local"
+        "the foreign RTK entry must survive verbatim beside the task gate"
     );
     // The foreign SessionStart group is kept, pixel lifecycle entries added.
     let session = installed["hooks"]["SessionStart"].as_array().unwrap();
@@ -1825,7 +1874,7 @@ fn routing_isolated_provider_child() {
     let opts = InstallOptions {
         repo: None,
         home: Some(home.clone()),
-        executable_path: Some(exe),
+        executable_path: Some(exe.clone()),
         claude_executable: Some(fake_claude_exe(&home, CLAUDE_WITH_SUBAGENT_FLAG)),
         dry_run: false,
         shell: Some(TEST_SHELL.into()),
@@ -1846,7 +1895,12 @@ fn routing_isolated_provider_child() {
         first,
         "repeat install must leave the provider config stable"
     );
-    let value: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    let installed: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    let value = if provider == "devin" {
+        installed
+    } else {
+        without_task_hooks(&installed, &provider, &exe)
+    };
     match provider.as_str() {
         "codex" => {
             let post = value["hooks"]["PostToolUse"]
@@ -1866,11 +1920,11 @@ fn routing_isolated_provider_child() {
             );
         }
         "claude" => {
-            // Lifecycle only — no PreToolUse guard in the global settings.
+            // Beyond the task gates, no retrieval guard belongs in global settings.
             let hooks = value["hooks"].as_object().unwrap();
             assert!(
                 hooks.get("PreToolUse").is_none(),
-                "global claude install must not wire PreToolUse: {value}"
+                "global claude install must not wire a retrieval guard: {value}"
             );
             for (event, verb) in [
                 ("SessionStart", "run-hook session-start"),
@@ -4927,7 +4981,8 @@ fn install_should_replace_legacy_script_hooks_instead_of_stacking_new_ones() {
     })
     .unwrap();
 
-    let settings = read_json(&home.join(".claude/settings.json"));
+    let installed = read_json(&home.join(".claude/settings.json"));
+    let settings = without_task_hooks(&installed, "claude", &home.join("pixel"));
     assert!(
         !settings.to_string().contains("/.claude/hooks/"),
         "legacy scripts left: {settings}"
@@ -5095,16 +5150,32 @@ fn one_install_should_collapse_stacked_dev_hooks_and_keep_foreign_ones_unchanged
     }
     let path = home.join(".claude/settings.json");
     fs::create_dir_all(home.join(".claude")).unwrap();
-    fs::write(
-        &path,
-        serde_json::to_string_pretty(&serde_json::json!({"hooks":{
-            "SessionStart": session,
-            "UserPromptSubmit": prompt,
-            "PostToolUse": edit,
-        }}))
-        .unwrap(),
-    )
-    .unwrap();
+    let mut stacked = serde_json::json!({"hooks":{
+        "SessionStart": session,
+        "UserPromptSubmit": prompt,
+        "PostToolUse": edit,
+    }});
+    for (event, name) in [
+        ("SessionStart", "session-start"),
+        ("UserPromptSubmit", "prompt-submit"),
+        ("PreToolUse", "pre-tool-use"),
+        ("PostToolUse", "post-tool-use"),
+        ("Stop", "stop"),
+        ("SessionEnd", "session-end"),
+        ("SubagentStart", "subagent-start"),
+        ("SubagentStop", "subagent-stop"),
+        ("PostToolUseFailure", "tool-failure"),
+    ] {
+        stacked["hooks"]
+            .as_object_mut()
+            .unwrap()
+            .entry(event)
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .unwrap()
+            .push(task_hook_group(&exe, "claude", name));
+    }
+    fs::write(&path, serde_json::to_string_pretty(&stacked).unwrap()).unwrap();
     let doctor_hooks = || {
         let report = doctor(&DoctorOptions {
             home: Some(home.to_path_buf()),
@@ -6509,7 +6580,7 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
     assert_eq!(
         unreviewed.summary,
         format!(
-            "Codex skips 1 of the 1 Pixel hook(s) in {} until you review them (PostToolUse #0.0): \
+            "Codex skips 10 of the 10 Pixel hook(s) in {} until you review them (Interrupt #0.0, PostToolUse #0.0, PostToolUse #1.0, PreToolUse #0.0, SessionEnd #0.0, SessionStart #0.0, Stop #0.0, SubagentStart #0.0, SubagentStop #0.0, UserPromptSubmit #0.0): \
              start `codex` in this directory, run `/hooks` and trust them",
             hooks.display()
         )
@@ -6564,12 +6635,37 @@ fn doctor_reports_codex_hooks_codex_has_not_reviewed() {
         &format!("{}:post_tool_use:0:0", hooks.display()),
         "trusted_hash = \"sha256:x\"",
     );
+    assert_eq!(
+        check(&report, "install.codex-hook-review").status,
+        CheckStatus::Yellow,
+        "reviewing metrics alone leaves task gates unreviewed"
+    );
+    let mut reviews = base.clone();
+    for (event, group) in [
+        ("interrupt", 0),
+        ("post_tool_use", 0),
+        ("post_tool_use", 1),
+        ("pre_tool_use", 0),
+        ("session_end", 0),
+        ("session_start", 0),
+        ("stop", 0),
+        ("subagent_start", 0),
+        ("subagent_stop", 0),
+        ("user_prompt_submit", 0),
+    ] {
+        reviews.push_str(&format!(
+            "\n[hooks.state.\"{}:{event}:{group}:0\"]\ntrusted_hash = \"sha256:fixture\"\n",
+            hooks.display()
+        ));
+    }
+    fs::write(&config, reviews).unwrap();
+    let report = doctor(&options).unwrap();
     let reviewed = check(&report, "install.codex-hook-review");
     assert_eq!(reviewed.status, CheckStatus::Green, "{reviewed:?}");
     assert_eq!(
         reviewed.summary,
         format!(
-            "Codex has reviewed the 1 Pixel hook(s) in {}",
+            "Codex has reviewed the 10 Pixel hook(s) in {}",
             hooks.display()
         )
     );
