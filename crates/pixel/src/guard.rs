@@ -642,12 +642,11 @@ fn opencode_tool_input(mut payload: Value) -> Value {
     let Some(input) = payload.get_mut("tool_input").and_then(Value::as_object_mut) else {
         return payload;
     };
-    for (from, to) in [("filePath", "file_path")] {
-        if !input.contains_key(to)
-            && let Some(value) = input.get(from)
-        {
-            input.insert(to.to_string(), value.clone());
-        }
+    let (from, to) = ("filePath", "file_path");
+    if !input.contains_key(to)
+        && let Some(value) = input.get(from)
+    {
+        input.insert(to.to_string(), value.clone());
     }
     payload
 }
