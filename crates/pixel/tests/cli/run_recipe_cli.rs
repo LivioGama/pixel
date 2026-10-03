@@ -111,14 +111,29 @@ fn locate_should_give_the_same_answer_through_the_daemon_and_in_process() {
         .output()
         .unwrap();
     assert!(start.status.success(), "{start:?}");
+    let daemon = StopDaemonOnDrop(&root);
     let through_daemon = locate(&root, "where is `flowDir`", "1500", &[]);
-    let stop = pixel_command()
-        .args(["daemon", "stop"])
-        .arg(&*root)
-        .output()
-        .unwrap();
-    assert!(stop.status.success(), "{stop:?}");
+    drop(daemon);
     assert_eq!(through_daemon["locate"], in_process["locate"]);
+}
+
+/// Stops the daemon serving a fixture even when the test panics before its
+/// last line, so a failed assertion never leaves a daemon behind.
+struct StopDaemonOnDrop<'a>(&'a Path);
+
+impl Drop for StopDaemonOnDrop<'_> {
+    fn drop(&mut self) {
+        let stop = pixel_command()
+            .args(["daemon", "stop"])
+            .arg(self.0)
+            .output();
+        // A test that already failed keeps its own panic message; a second
+        // panic inside drop would abort the whole test binary.
+        if !std::thread::panicking() {
+            let stop = stop.unwrap();
+            assert!(stop.status.success(), "{stop:?}");
+        }
+    }
 }
 
 #[test]
