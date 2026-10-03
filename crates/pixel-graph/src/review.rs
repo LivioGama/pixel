@@ -368,7 +368,7 @@ fn consumers_outside_change(
             }
             callers.push((caller, path));
         }
-        if callers.len() > CONSUMER_CAP {
+        if callers.get(CONSUMER_CAP).is_some() {
             capped = true;
         }
         for (caller, path) in callers.into_iter().take(CONSUMER_CAP) {
@@ -1297,6 +1297,64 @@ mod tests {
         let (findings, _) = added_secret_findings(root, &files).expect("scan runs");
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].severity, "MEDIUM", "{findings:?}");
+    }
+
+    /// A real AKIA+16 key flags; an all-uppercase blob that is not
+    /// `AKIA…` does not. `&&`/`||` mutants inside the window check flip
+    /// both directions.
+    #[test]
+    fn aws_access_keys_flag_but_uppercase_text_does_not() {
+        let dir = tmpdir("aws-key");
+        let root = dir.path();
+        std::fs::write(
+            root.join("f.rs"),
+            "const K: &str = \"AKIAIOSFODNN7EXAMPLE\";\nconst TABLE: &str = \"ABCDEFGHIJKLMNOPQRSTUV\";\n",
+        )
+        .unwrap();
+        let text = [
+            "diff --git a/f.rs b/f.rs",
+            "index 1111111..2222222 100644",
+            "--- a/f.rs",
+            "+++ b/f.rs",
+            "@@ -0,0 +1,2 @@",
+            "+a",
+            "+b",
+        ]
+        .join("\n");
+        let files = parse_diff(&text);
+        let (findings, _) = added_secret_findings(root, &files).expect("scan runs");
+        assert_eq!(
+            findings.iter().map(|f| f.line).collect::<Vec<_>>(),
+            vec![Some(1)],
+            "only the AKIA line: {findings:?}"
+        );
+        assert_eq!(findings[0].severity, "CRITICAL");
+    }
+
+    /// A changed file missing on disk is *unscanned*, not clean: its entry
+    /// lands in the caps list. `+=` mutants and `>` boundary mutants on
+    /// `files_unread` change whether the note appears at all.
+    #[test]
+    fn an_unreadable_changed_file_is_named_in_the_caps() {
+        let dir = tmpdir("unread");
+        let root = dir.path();
+        let text = [
+            "diff --git a/gone.rs b/gone.rs",
+            "index 1111111..2222222 100644",
+            "--- a/gone.rs",
+            "+++ b/gone.rs",
+            "@@ -1,1 +1,2 @@",
+            " ctx",
+            "+added",
+        ]
+        .join("\n");
+        let files = parse_diff(&text);
+        let (findings, caps) = added_secret_findings(root, &files).expect("scan runs");
+        assert!(findings.is_empty(), "{findings:?}");
+        assert!(
+            caps.iter().any(|c| c.contains("unreadable")),
+            "the unread file must surface: {caps:?}"
+        );
     }
 
     /// The file cap counts only files that were scanned. A deleted entry is
