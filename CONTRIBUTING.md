@@ -142,25 +142,23 @@ finding locally, scope the run to the function:
 git diff main...HEAD > target/pr.diff && cargo mutants --in-diff target/pr.diff -F '<function name>'
 ```
 
-The tracked pre-push hook runs `scripts/mutants-preflight.sh --check` before
-each Rust branch update. It makes the committed three-dot diff's prospective
-mutants visible without compiling or running them, then blocks once so each
-listing is reviewed. After naming the killing test for every line (or adding
-one), acknowledge that exact commit, base and listing with:
+The tracked pre-push hook runs `scripts/mutants-remote-gate.sh` before each
+Rust branch update. Nothing mutant-related compiles or runs locally: the hook
+bundles the committed three-dot diff to the gate host (`PIXEL_MUTANTS_GATE_HOST`,
+default the ssh alias `a2`), which checks it out and executes the same campaign
+CI's shards run — `scripts/mutants-preflight.sh --run` — against a warm
+`target/`, seeded with the traveling outcome cache (`target/mutants-preflight/`,
+carried to the host and back so a re-push after a fix re-tests only the
+survivors). The push is blocked on the remote verdict, with CI's exit codes.
+`PIXEL_MUTANTS_GATE=off` skips the remote run when the host is down (the CI
+gate still applies); `PIXEL_MUTANTS_BASE=<ref>` selects a stacked or
+maintenance base; `git push --no-verify` remains Git's explicit local bypass;
+`Mutants in diff` remains the required merge gate.
 
-```bash
-scripts/mutants-preflight.sh --ack
-```
-
-The receipt is invalidated by a commit, rebase, base advance or changed
-listing. `PIXEL_MUTANTS_BASE=<ref>` selects a stacked or maintenance base.
-`git push --no-verify` remains Git's explicit local bypass; `Mutants in diff`
-remains the required merge gate.
-
-To verify a fix against the diff's mutants before pushing — instead of
-waiting on the whole CI run — the same script executes them in a throwaway
-git worktree (your checkout stays untouched), optionally bounded to the
-functions the last run flagged:
+To verify a fix against the diff's mutants on the laptop — instead of waiting
+for another push round trip — the preflight script still executes them in a
+throwaway git worktree (your checkout stays untouched), optionally bounded to
+the functions the last run flagged:
 
 ```bash
 scripts/mutants-preflight.sh --run              # every listed mutant
@@ -494,8 +492,8 @@ Use `scripts/gates.sh` for the full local run. It skips Cargo when its path
 filter finds no Rust-affecting change; use `--force` when changed inputs
 read by tests (such as bundled prompts, rules or docs-drift inputs) require
 the compiled suite anyway. Do not add `--mutants` to an agent's normal loop:
-review `scripts/mutants-preflight.sh --check` and acknowledge the reviewed
-listing with `--ack`, then let CI execute the mutations.
+the pre-push hook runs the whole campaign on the gate host and blocks on its
+verdict; a local mutant run stays an explicit, bounded (`-F`) request.
 
 For a long local run, use the harness's background-task facility and keep
 the full log and exit status. Keep that checkout unchanged until the run
