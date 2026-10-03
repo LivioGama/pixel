@@ -5,7 +5,7 @@
 # assets/logos/<logo>.svg.
 #
 # Every fact here restates crates/pixel-install, the plugin manifests at the
-# repository root or the rule files under .cursor/ and .windsurf/. A pull
+# repository root or the rule files under .cursor/. A pull
 # request that changes what `pixel install` writes changes this file too:
 # crates/pixel/tests/cli/docs_drift.rs runs a real `pixel install` and
 # `pixel install --repo` into empty directories and fails when the files
@@ -99,15 +99,6 @@ lede = "`pixel install` does not touch Copilot CLI. Pixel reaches it as a plugin
 plugin = "`copilot plugin marketplace add Pixel-CLI/pixel`, then `copilot plugin install pixel@pixel`"
 
 [[agent]]
-slug = "gemini-cli"
-name = "Gemini CLI"
-logo = "gemini"
-wiring = "plugin"
-lede = "`pixel install` does not touch Gemini CLI. Pixel reaches it as an extension whose context file is the protocol, `PIXEL.md`."
-plugin = "`gemini extensions install https://github.com/Pixel-CLI/pixel`"
-note = "Antigravity also keeps its configuration under `~/.gemini/`, in `~/.gemini/config/`, but it is another agent, and `pixel install` wires it."
-
-[[agent]]
 slug = "opencode"
 name = "OpenCode"
 logo = "opencode"
@@ -131,14 +122,6 @@ wires = "`SessionStart` and `UserPromptSubmit` hooks with `--provider devin`, pl
 repo = [".devin/config.local.json"]
 plugin = "add `github.com/Pixel-CLI/pixel` as a Devin plugin"
 checks = ["install.devin-hooks", "repo.devin-hooks"]
-
-[[agent]]
-slug = "windsurf"
-name = "Windsurf"
-logo = "windsurf"
-wiring = "rules"
-lede = "`pixel install` does not touch Windsurf. The repository ships a Windsurf rule: copy it into your project."
-rules = ".windsurf/rules/pixel.md"
 
 [[agent]]
 slug = "antigravity"
