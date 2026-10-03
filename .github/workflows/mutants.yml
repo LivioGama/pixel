@@ -66,7 +66,7 @@ jobs:
       ref: ${{ steps.diff.outputs.ref }}
     steps:
       # Full history so the merge base with the target branch is available.
-      - uses: useblacksmith/checkout@v1 # v7
+      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
         with:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
@@ -351,7 +351,7 @@ jobs:
           echo "::error title=Mutation gate failed::the plan job did not list the diff's mutants (${{ needs.plan.result }})"
           exit 1
 
-      - uses: useblacksmith/checkout@v1 # v7
+      - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
         with:
           persist-credentials: false
 
