@@ -28,7 +28,7 @@ The binary install is one line, on macOS (Apple Silicon) and Linux (x86_64 and a
 curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
 ```
 
-On GitHub Actions the same script is the Linux install. `ubuntu-latest` receives `x86_64-unknown-linux-musl`; an arm64 runner receives `aarch64-unknown-linux-musl`. The second line puts the install directory on `PATH` for later steps. When `GITHUB_PATH` is set, the script appends that directory itself, which is what covers a custom `PIXEL_INSTALL_DIR`.
+On GitHub Actions the same script is the Linux install. `ubuntu-latest` receives `x86_64-unknown-linux-musl`; an arm64 runner receives `aarch64-unknown-linux-musl`. The second line is for the `install.sh` already published on the current release, which does not yet append to `GITHUB_PATH`; drop it after the next release (a duplicate line is harmless meanwhile).
 
 ```yaml
 - name: Install Pixel

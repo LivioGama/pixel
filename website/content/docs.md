@@ -31,7 +31,7 @@ sh install.sh
 
 ### GitHub Actions
 
-The same script. The second line puts `~/.local/bin` on `PATH` for the later steps of the job. The script also appends its install directory when `GITHUB_PATH` is set, which is what covers a custom `PIXEL_INSTALL_DIR`.
+The same script. The second line is for the `install.sh` already published on the current release, which does not yet append to `GITHUB_PATH`; this branch's script does, so drop the echo after the next release (a duplicate line is harmless meanwhile).
 
 ```yaml
 - name: Install Pixel
