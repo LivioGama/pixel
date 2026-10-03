@@ -115,14 +115,16 @@ cleanup() {
   git -C "$REPO" worktree remove --force "$RAW_DIR" >/dev/null 2>&1 || true
   git -C "$REPO" worktree remove --force "$PIXEL_DIR" >/dev/null 2>&1 || true
 }
-trap cleanup ERR INT TERM
+trap cleanup ERR INT TERM EXIT
 git -C "$REPO" worktree add --detach "$RAW_DIR" "$BASE_SHA" >/dev/null
 git -C "$REPO" worktree add --detach "$PIXEL_DIR" "$BASE_SHA" >/dev/null
 [ ! -e "$RAW_DIR/.codex" ] || die 'base contains .codex; cannot establish a clean raw control'
 
-"$PIXEL_BIN" install --repo "$PIXEL_DIR" >/dev/null
-if [ "$EFFECTIVE_PIXEL_POLICY" = enforce ]; then
-  "$PIXEL_BIN" build-index "$PIXEL_DIR" >/dev/null
+if [ "$EFFECTIVE_PIXEL_POLICY" != off ]; then
+  "$PIXEL_BIN" install --repo "$PIXEL_DIR" >/dev/null
+  if [ "$EFFECTIVE_PIXEL_POLICY" = enforce ]; then
+    "$PIXEL_BIN" build-index "$PIXEL_DIR" >/dev/null
+  fi
 fi
 
 write_runner() {
@@ -162,6 +164,8 @@ write_runner pixel "$PIXEL_DIR" "$PIXEL_COMMAND"
 tmux new-session -d -s "$SESSION" -n codex -c "$RAW_DIR" "bash $(q "$RUN_DIR/raw-runner.sh")"
 tmux split-window -h -t "$SESSION":0 -c "$PIXEL_DIR" "bash $(q "$RUN_DIR/pixel-runner.sh")"
 tmux select-layout -t "$SESSION":0 even-horizontal
+# The arms own the worktrees from here on; only signal exits still clean up.
+trap - EXIT
 
 report() {
   local now raw_exit pixel_exit raw_started raw_finished pixel_started pixel_finished raw_wall pixel_wall raw_calls pixel_calls
@@ -201,6 +205,18 @@ while [ ! -f "$RUN_DIR/raw.meta" ] || [ ! -f "$RUN_DIR/pixel.meta" ]; do
   [ "$(date +%s)" -lt "$deadline" ] || break
   sleep 1
 done
+# Deadline hit: interrupt each arm still running so no Codex keeps consuming
+# past the reported timeout, then give its runner a moment to record the
+# exit it ended with. Pane 0 is the raw arm, pane 1 the Pixel arm.
+if [ ! -f "$RUN_DIR/raw.meta" ] || [ ! -f "$RUN_DIR/pixel.meta" ]; then
+  [ -f "$RUN_DIR/raw.meta" ] || tmux send-keys -t "$SESSION":0.0 C-c || true
+  [ -f "$RUN_DIR/pixel.meta" ] || tmux send-keys -t "$SESSION":0.1 C-c || true
+  grace=$(( $(date +%s) + 5 ))
+  while [ ! -f "$RUN_DIR/raw.meta" ] || [ ! -f "$RUN_DIR/pixel.meta" ]; do
+    [ "$(date +%s)" -lt "$grace" ] || break
+    sleep 1
+  done
+fi
 report
 printf 'A/B report: %s\n' "$RUN_DIR/report.md"
 printf 'tmux session: %s\n' "$SESSION"
