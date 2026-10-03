@@ -207,9 +207,14 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
             ],
             "PostToolUse": [
                 {
-                    "type": "command",
-                    "command": metrics_cmd,
-                    "timeout": 10
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": metrics_cmd,
+                            "timeout": 10
+                        }
+                    ]
                 }
             ]
         }
@@ -338,9 +343,14 @@ pub fn install_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<In
         ],
         "PostToolUse": [
             {
-                "type": "command",
-                "command": metrics_cmd,
-                "timeout": 10
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": metrics_cmd,
+                        "timeout": 10
+                    }
+                ]
             }
         ]
     });
@@ -581,6 +591,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn antigravity_prompt_should_require_scoped_reads_after_pixel_hits() {
+        assert!(
+            AGENT_PROMPT_ASSET.contains(
+                "A hit is the retrieval. When Pixel serves `path:line`, read that region"
+            ),
+            "Antigravity guidance must treat a Pixel hit as the retrieval"
+        );
+        assert!(
+            AGENT_PROMPT_ASSET.contains("scoped read of the served window")
+                && AGENT_PROMPT_ASSET.contains("`sed -n '<line>,+40p' <path>`")
+                && AGENT_PROMPT_ASSET.contains("`read(path, offset=<line>, limit≈40)`"),
+            "Antigravity guidance must give bounded scoped-read examples"
+        );
+        assert!(
+            AGENT_PROMPT_ASSET.contains("reading the whole file after Pixel"),
+            "Antigravity guidance must reject whole-file reads after a Pixel hit"
+        );
+    }
+
+    #[test]
     fn test_antigravity_deploy_and_check() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
@@ -667,7 +697,7 @@ mod tests {
             );
             assert_eq!(
                 installed["pixel-guard"]["PostToolUse"],
-                json!([{"type": "command", "command": "'/usr/local/bin/pixel' run-hook metrics --provider antigravity", "timeout": 10}])
+                json!([{"matcher": "*", "hooks": [{"type": "command", "command": "'/usr/local/bin/pixel' run-hook metrics --provider antigravity", "timeout": 10}]}])
             );
             for defect in ["missing", "wrong-command", "wrong-type", "disabled"] {
                 let mut broken = installed.clone();

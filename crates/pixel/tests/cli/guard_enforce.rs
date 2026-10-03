@@ -574,20 +574,31 @@ fn devin_should_rewrite_exec_and_allow_native_retrieval_by_default() {
             "{command}"
         );
     }
+    let discovery_note = "Pixel suggestion: repository discovery: use pixel search-content, find-code, or list-areas. Original call proceeds.";
+    assert_eq!(
+        guard(
+            "devin",
+            &payload("read", json!({"path":"src/lib.rs","limit":50}), &dir),
+            &[]
+        ),
+        Value::Null,
+        "bounded native reads proceed without an advisory"
+    );
     for event in [
-        payload("read", json!({"path":"src/lib.rs","limit":50}), &dir),
         payload("grep", json!({"path":"src","pattern":"needle"}), &dir),
         payload("glob", json!({"path":"src","pattern":"*.rs"}), &dir),
     ] {
-        let response = guard("devin", &event, &[]);
-        assert!(
-            response.is_null(),
-            "native retrieval proceeds without a hook denial by default: {response}"
+        assert_eq!(
+            guard("devin", &event, &[]),
+            json!({"systemMessage":discovery_note,"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":discovery_note}}),
+            "native discovery proceeds with the Pixel advisory"
         );
     }
+    let inspection_note =
+        "Pixel suggestion: repository inspection: use pixel repo-state. Original call proceeds.";
     assert_eq!(
         guard("devin", &devin_exec("git status", &dir), &[]),
-        Value::Null
+        json!({"systemMessage":inspection_note,"hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":inspection_note}})
     );
     assert_eq!(
         guard(
@@ -597,17 +608,41 @@ fn devin_should_rewrite_exec_and_allow_native_retrieval_by_default() {
         ),
         json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","updatedInput":{"command":"pixel search-like-rg rg -- 'needle' 'src/lib.rs'"}}})
     );
-    for mode in ["advisory", "off"] {
-        for event in [
+    assert_eq!(
+        guard(
+            "devin",
+            &payload("read", json!({"path":"src/lib.rs"}), &dir),
+            &[("PIXEL_POLICY", "advisory")]
+        ),
+        json!({"systemMessage":"Pixel suggestion: repository read: use exec with pixel search-content or pixel pack-context <uid>. Original call proceeds.","hookSpecificOutput":{"hookEventName":"PreToolUse","additionalContext":"Pixel suggestion: repository read: use exec with pixel search-content or pixel pack-context <uid>. Original call proceeds."}})
+    );
+    for (event, reason) in [
+        (
             devin_exec("git status", &dir),
+            "Pixel suggestion: repository inspection: use pixel repo-state.",
+        ),
+        (
             payload("read", json!({"path":"src/lib.rs"}), &dir),
-        ] {
-            assert_eq!(
-                guard("devin", &event, &[("PIXEL_POLICY", mode)]),
-                Value::Null,
-                "{mode}"
-            );
-        }
+            "Pixel suggestion: repository read: use exec with pixel search-content or pixel pack-context <uid>.",
+        ),
+        (
+            payload("grep", json!({"path":"src","pattern":"needle"}), &dir),
+            "Pixel suggestion: repository discovery: use pixel search-content, find-code, or list-areas.",
+        ),
+    ] {
+        let advisory = guard("devin", &event, &[("PIXEL_POLICY", "advisory")]);
+        assert_eq!(
+            advisory["systemMessage"],
+            format!("{reason} Original call proceeds.")
+        );
+        assert!(
+            advisory["decision"].is_null(),
+            "advisory must not deny: {advisory}"
+        );
+        assert_eq!(
+            guard("devin", &event, &[("PIXEL_POLICY", "off")]),
+            Value::Null
+        );
     }
     let envs = [("PIXEL_POLICY", "enforce")];
     assert_eq!(
@@ -620,7 +655,8 @@ fn devin_should_rewrite_exec_and_allow_native_retrieval_by_default() {
             &payload("read", json!({"path":"src/lib.rs"}), &dir),
             &envs
         ),
-        json!({"decision":"block","reason":"pixel policy: repository read: use exec with pixel search-content or pixel pack-context <uid>"})
+        json!({"decision":"block","reason":"pixel policy: repository read: use exec with pixel search-content or pixel pack-context <uid>"}),
+        "unbounded native reads remain subject to enforce mode"
     );
     assert_eq!(
         guard(
@@ -628,7 +664,8 @@ fn devin_should_rewrite_exec_and_allow_native_retrieval_by_default() {
             &payload("read", json!({"path":"src/lib.rs","limit":50}), &dir),
             &envs
         ),
-        json!({"decision":"block","reason":"pixel policy: repository read: use exec with pixel search-content or pixel pack-context <uid>"})
+        Value::Null,
+        "bounded native reads remain allowed even in enforce mode"
     );
     assert_eq!(
         guard("devin", &devin_exec("cargo test", &dir), &envs),
@@ -790,10 +827,34 @@ fn devin_and_zcode_rewrite_rtk_read_head_tail_like_cat() {
             "read src/lib.rs",
             "head src/lib.rs | cat",
         ] {
-            assert!(
-                rewrites(command, provider).is_null(),
-                "{provider}: must stay native by default: {command}"
-            );
+            let response = rewrites(command, provider);
+            if provider == "devin"
+                && [
+                    "rtk read src/big.rs -l 1-201",
+                    "rtk read src/big.rs",
+                    "head src/big.rs",
+                    "rtk read .env",
+                    "awk '{print}' src/lib.rs",
+                    "head src/lib.rs | cat",
+                ]
+                .contains(&command)
+            {
+                assert!(
+                    response["systemMessage"].as_str().is_some_and(
+                        |message| message.contains("Pixel suggestion: repository read:")
+                    ),
+                    "Devin advises on unbounded repository reads: {command}: {response}"
+                );
+                assert!(
+                    response["decision"].is_null(),
+                    "advisory must not deny: {response}"
+                );
+            } else {
+                assert!(
+                    response.is_null(),
+                    "{provider}: must stay native without an advisory: {command}: {response}"
+                );
+            }
         }
     }
     // Codex has no reader rewrite: the call proceeds, with the same advisory
@@ -820,7 +881,7 @@ fn enforce_blocks_head_tail_awk_sed_and_rtk_read_like_cat() {
     let range = "repository read: `rtk read -l` takes a level (none, minimal, aggressive), not a line range; use sed -n 'START,ENDp' <file> (at most 200 lines) or pixel pack-context <uid>";
     let block =
         |reason: &str| json!({"decision":"block","reason":format!("pixel policy: {reason}")});
-    // Devin: flagged forms too. Unrewritable ones reach the block.
+    // Devin: flagged forms too. Bounded reads are allowed; unbounded reads block.
     for (command, reason) in [
         ("awk '{print}' src/lib.rs", read),
         ("awk -F, 'NR==1' src/lib.rs", read),

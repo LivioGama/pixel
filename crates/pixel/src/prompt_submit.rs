@@ -43,7 +43,7 @@ pub(crate) const DEVIN_PIXEL_GUIDANCE: &str = concat!(
     "Make that the first tool action: do not start with `ls`, `command -v`, `pixel status`, native grep/rg/glob/find, or a native file read. ",
     "Do not merely mention Pixel or answer from another retrieval tool before calling it. ",
     "Supported shell grep/rg/cat/ls/find retrieval is silently rewritten to Pixel; use its result. ",
-    "When Pixel serves a path with a line, read only that region (`sed -n '<line>,+40p' <path>`), not the whole file. ",
+    "When Pixel serves a path with a line, read only that region — read(path, offset=<line>, limit≈40) or exec sed -n '<line>,+40p' <path> — not the whole file. ",
     "Native retrieval remains available for bounded follow-up and unsupported or out-of-index files after the Pixel attempt. ",
     "If Pixel or the index is unavailable, continue normally with native tools; never block the task."
 );
