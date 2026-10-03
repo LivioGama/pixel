@@ -112,11 +112,11 @@ slug = "opencode"
 name = "OpenCode"
 logo = "opencode"
 wiring = "install"
-lede = "`pixel install` puts Pixel's protocol into OpenCode's global `AGENTS.md`, the one instruction file both OpenCode generations load."
-global = ["~/.config/opencode/AGENTS.md"]
+lede = "`pixel install` puts Pixel's protocol into OpenCode's global `AGENTS.md`, the one instruction file both OpenCode generations load, and drops a guard plugin into the plugins directory OpenCode auto-loads."
+global = ["~/.config/opencode/AGENTS.md", "~/.config/opencode/plugins/pixel.js"]
 when = "only when OpenCode's config directory exists: `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`"
-wires = "the prompt appended to `AGENTS.md`"
-note = "Your own instructions in that `AGENTS.md` stay: Pixel owns only the block between its `pixel:managed` markers. When the file does not exist yet and `~/.claude/CLAUDE.md` does, the new file starts with that content, since on OpenCode's first generation a global `AGENTS.md` takes the place of the `CLAUDE.md` fallback."
+wires = "the prompt appended to `AGENTS.md`, and the `tool.execute.before` plugin"
+note = "Your own instructions in that `AGENTS.md` stay: Pixel owns only the block between its `pixel:managed` markers. When the file does not exist yet and `~/.claude/CLAUDE.md` does, the new file starts with that content, since on OpenCode's first generation a global `AGENTS.md` takes the place of the `CLAUDE.md` fallback. The plugin is what makes the protocol binding rather than advisory: `AGENTS.md` asks, and OpenCode is the one supported agent whose hook can refuse the call, so `rg` becomes `pixel search-like-rg` and an off-manifest repository read is stopped. It carries the same managed markers, so `pixel uninstall` removes it and a `pixel.js` you wrote yourself is left alone. Nothing needs registering in `opencode.json` — OpenCode auto-loads that directory."
 checks = ["install.opencode-agents-md"]
 
 [[agent]]

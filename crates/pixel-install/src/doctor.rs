@@ -436,6 +436,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         || -> std::result::Result<DoctorCheckDetail, String> {
             let (summary, detail) = crate::opencode_config::check_opencode(
                 &crate::opencode_config::opencode_config_dir(&home, options.home.is_some()),
+                &exe,
             )?;
             Ok(DoctorCheckDetail {
                 summary,

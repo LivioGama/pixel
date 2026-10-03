@@ -174,6 +174,7 @@ pub fn install(options: &InstallOptions) -> Result<InstallReport> {
         steps.push(crate::opencode_config::install_opencode(
             &opencode_dir,
             &home,
+            &exe,
             dry_run,
         )?);
     }
