@@ -3918,6 +3918,16 @@ fn is_cargo_target_path(path: &Path) -> bool {
         || path.ancestors().skip(1).any(is_cargo_build_dir)
 }
 
+/// True when `exe` is a build a developer runs from a checkout rather than
+/// a release install: cargo build output ([`is_cargo_target_path`]) or the
+/// `pixel-dev` side build ([`pixel_install::config::is_side_build`]). Such a
+/// build carries its branch's prompts under the release's version, so
+/// whatever a release install owns (the deployed prompts, the upgrade
+/// notice) is not its to judge.
+pub(crate) fn is_developer_build(exe: &Path) -> bool {
+    is_cargo_target_path(exe) || pixel_install::config::is_side_build(exe)
+}
+
 /// `dir` holds the `CACHEDIR.TAG` cargo writes at the root of a target
 /// directory it creates, or one of the [`CARGO_PROFILE_LOCKS`] of a profile
 /// directory. The tag alone missed a build cache that creates `target/`
@@ -4399,13 +4409,14 @@ fn rename_note(argv: &[String], unprotected: bool) -> Option<String> {
 /// Whether this invocation checks the prompts `pixel install` deployed:
 /// every command but the protected streams, the three that already deal
 /// with them (`install` rewrites them, `doctor` reports them, `uninstall`
-/// removes them), and any command of the `pixel-dev` side build
-/// ([`pixel_install::config::is_side_build`]). The deployed prompts are the managed `pixel`'s: a
-/// `pixel-dev` built from another commit differs from them by construction,
-/// and the fix the note names, `pixel install`, would hand the whole
-/// machine's hooks and prompts to that build.
-fn checks_deployed_prompts(command_label: &str, protected: bool, side_build: bool) -> bool {
-    !protected && !side_build && !matches!(command_label, "install" | "doctor" | "uninstall")
+/// removes them), and any command of a developer build
+/// ([`is_developer_build`]: `pixel-dev`, or a binary run from `target/`).
+/// The deployed prompts are the managed `pixel`'s: a build from another
+/// commit differs from them by construction while printing the same
+/// version, and the fix the note names, `pixel install`, would hand the
+/// whole machine's hooks and prompts to that build (#549).
+fn checks_deployed_prompts(command_label: &str, protected: bool, developer_build: bool) -> bool {
+    !protected && !developer_build && !matches!(command_label, "install" | "doctor" | "uninstall")
 }
 
 /// The command labels the update close may relaunch. The relaunch executes
@@ -4610,9 +4621,8 @@ fn run() -> Result<(), String> {
     if let Some(note) = rename_note(&argv, !protected) {
         eprint!("{note}");
     }
-    let side_build =
-        std::env::current_exe().is_ok_and(|exe| pixel_install::config::is_side_build(&exe));
-    if checks_deployed_prompts(&command_label, protected, side_build)
+    let developer_build = std::env::current_exe().is_ok_and(|exe| is_developer_build(&exe));
+    if checks_deployed_prompts(&command_label, protected, developer_build)
         && let Some(home) = std::env::var_os("HOME")
         && let Some(note) =
             stale_prompt_note(&pixel_install::install::stale_prompts(Path::new(&home)))
@@ -8691,8 +8701,8 @@ mod prompt_asset_parity {
 #[cfg(test)]
 mod renamed_command_tests {
     use super::{
-        Cli, bounded_result_note, checks_deployed_prompts, logged_args, rename_note,
-        renamed_invocation, stale_prompt_note,
+        Cli, bounded_result_note, checks_deployed_prompts, is_developer_build, logged_args,
+        rename_note, renamed_invocation, stale_prompt_note,
     };
     use clap::CommandFactory;
     use std::collections::BTreeSet;
@@ -9013,6 +9023,24 @@ mod renamed_command_tests {
     fn deployed_prompts_are_never_checked_by_a_side_build() {
         assert!(!checks_deployed_prompts("search-content", false, true));
         assert!(!checks_deployed_prompts("self-update", false, true));
+    }
+
+    /// #549: a binary run from a checkout's `target/` prints the release's
+    /// version over its branch's prompts, so it is a developer build like
+    /// `pixel-dev`; a `pixel` anywhere else is an install and keeps the
+    /// stale-prompt note.
+    #[test]
+    fn a_cargo_build_is_a_developer_build_and_an_install_is_not() {
+        let dir = std::path::Path::new("/nonexistent-pixel-549");
+        assert!(is_developer_build(&dir.join("pixel/target/debug/pixel")));
+        assert!(is_developer_build(
+            &dir.join("pixel/target/dev-release/pixel")
+        ));
+        assert!(is_developer_build(&dir.join(".local/bin/pixel-dev")));
+        assert!(!is_developer_build(&dir.join(".local/bin/pixel")));
+        assert!(!is_developer_build(
+            &dir.join("mise/installs/pixel/0.6.1/bin/pixel")
+        ));
     }
 
     #[test]

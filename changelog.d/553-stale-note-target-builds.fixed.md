@@ -1,0 +1,1 @@
+**cli:** a `pixel` run from a checkout's `target/` no longer prints the stale-prompt note or its `pixel install` advice; installed binaries still warn. ([#553](https://github.com/LivioGama/pixel/pull/553))
