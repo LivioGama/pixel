@@ -108,7 +108,7 @@ class PrepareContract(unittest.TestCase):
     def prepare(self):
         shutil.copy(PREPARE, self.repo / "prepare.sh")
         self.git("add", "prepare.sh")
-        self.git("commit", "-qm", "script")
+        self.git("commit", "-qm", "script", "--allow-empty")
         return subprocess.run(
             ["sh", "prepare.sh", "0.2.0", "--date", "2026-02-01"],
             cwd=self.repo, env=self.env, capture_output=True, text=True, timeout=30,
@@ -208,6 +208,101 @@ class PrepareContract(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("\n- **thing:** first line\n  continued here\n", self.changelog())
+
+    def test_an_entry_without_a_reference_takes_the_link_of_its_squash_merge(self):
+        """#550: the fragment is written once, before the number exists.
+
+        Asking for the number in the fragment cost every pull request a second
+        push only to rename the file; the squash merge that adds it to main
+        ends with `(#<n>)`, so the cut appends the link there, at the end of
+        the entry's last line, where a written one sits.
+        """
+        self.write("changelog.d/thing.fixed.md", "**thing:** it no longer breaks.\n")
+        self.write("changelog.d/wrapped.added.md", "**thing:** a flag\nthat wraps.\n\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fix(thing): stop breaking (#42)")
+
+        result = self.prepare()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        changelog = self.changelog()
+        self.assertIn(
+            "\n- **thing:** it no longer breaks. "
+            "([#42](https://github.com/LivioGama/pixel/pull/42))\n", changelog)
+        self.assertIn(
+            "\n- **thing:** a flag\n  that wraps. "
+            "([#42](https://github.com/LivioGama/pixel/pull/42))\n", changelog)
+        self.assertEqual(self.fragments(), [])
+
+    def test_an_entry_merged_by_a_merge_commit_takes_that_pull_request(self):
+        """A merge commit adds the file on main's first-parent line, under
+        GitHub's `Merge pull request #<n>` subject, and a later pull request
+        that only edits the entry does not take its credit."""
+        self.git("switch", "-q", "-c", "topic")
+        self.write("changelog.d/thing.fixed.md", "**thing:** it no longer breaks.\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fix(thing): stop breaking (#99)")
+        self.git("switch", "-q", "main")
+        self.git("merge", "-q", "--no-ff", "-m", "Merge pull request #7 from someone/topic", "topic")
+        self.write("changelog.d/thing.fixed.md", "**thing:** it no longer breaks, at all.\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "docs(changelog): reword (#8)")
+
+        result = self.prepare()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn(
+            "\n- **thing:** it no longer breaks, at all. "
+            "([#7](https://github.com/LivioGama/pixel/pull/7))\n", self.changelog())
+
+    def test_a_written_reference_is_kept_as_written(self):
+        """A link in the text or a number in the slug is the entry's own: the
+        cut adds nothing to it, whatever the commit says."""
+        self.write("changelog.d/12-numbered.fixed.md", "**thing:** numbered.\n")
+        self.write("changelog.d/linked.fixed.md",
+                   "**thing:** linked. ([#13](https://github.com/LivioGama/pixel/pull/13))\n")
+        self.git("add", ".")
+        self.git("commit", "-qm", "fix(thing): both (#42)")
+
+        result = self.prepare()
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        changelog = self.changelog()
+        self.assertIn("\n- **thing:** numbered.\n", changelog)
+        self.assertIn(
+            "\n- **thing:** linked. ([#13](https://github.com/LivioGama/pixel/pull/13))\n",
+            changelog)
+        self.assertNotIn("/pull/42", changelog)
+
+    def test_an_entry_the_cut_cannot_link_is_refused_before_any_write(self):
+        """No entry ships without its reference: a commit that names no pull
+        request (a push straight to main) and a fragment no commit added
+        both stop the cut, with the tree as it was."""
+        for name, commit in [("pushed.fixed.md", "fix(thing): pushed straight to main"),
+                             ("loose.fixed.md", None)]:
+            with self.subTest(name):
+                self.write("changelog.d/" + name, "**thing:** it no longer breaks.\n")
+                if commit:
+                    self.git("add", ".")
+                    self.git("commit", "-qm", commit)
+                before = self.changelog()
+
+                result = self.prepare()
+
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(name + ": no pull request referenced", result.stderr)
+                self.assertIn(
+                    "the commit that added it" if commit else "no commit added it",
+                    result.stderr)
+                if commit:
+                    self.assertIn(commit, result.stderr)
+                self.assertIn("https://github.com/LivioGama/pixel/pull/<number>", result.stderr)
+                self.assertEqual(self.changelog(), before)
+                self.assertIn(name, self.fragments())
+                self.assertIn('version = "0.1.0"', (self.repo / "crates/a/Cargo.toml").read_text())
+                (self.repo / "changelog.d" / name).unlink()
+                self.git("add", "-A")
+                self.git("commit", "-qm", "drop " + name, "--allow-empty")
 
     def test_the_highlights_lead_the_released_section(self):
         """The release narrative, once per release instead of once per entry.
@@ -529,29 +624,35 @@ class FragmentContract(unittest.TestCase):
         self.assertIn("not a refusal", result.stderr)
         self.assertIn("well formed", result.stdout)
 
-    def test_an_entry_referencing_no_pull_request_is_refused(self):
-        """A short entry needs somewhere to send the reader for the rest.
+    def test_an_entry_referencing_no_pull_request_waits_for_its_merge(self):
+        """The pull request's own run cannot know a number the merge gives.
 
-        Cutting the reasoning out of the entry is only an improvement while the
-        reasoning is still reachable. It used to be a warning, and three
-        entries in a row (#253-#255) merged without their link because nothing
-        read it before the release; this refusal is what turns the
-        pull request's own run red while its number is known, and the message
-        is the fix.
+        It used to refuse here, which cost every pull request a second push
+        only to rename its fragment (#550). The cut appends the link from the
+        merge commit and refuses an entry it cannot link
+        (`PrepareContract`), so the reference is still never left out; the
+        check only says which entries will take it.
         """
-        root = self.make_repo({"thing.fixed.md": "**thing:** it no longer breaks.\n"})
+        root = self.make_repo({
+            "thing.fixed.md": "**thing:** it no longer breaks.\n",
+            "other.added.md": "**thing:** a flag.\n",
+            "12-numbered.fixed.md": "**thing:** numbered.\n",
+        })
         result = self.run_check(root)
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("thing.fixed.md: no pull request referenced", result.stderr)
-        self.assertIn("git mv changelog.d/thing.fixed.md changelog.d/<number>-thing.fixed.md", result.stderr)
-        self.assertIn("https://github.com/LivioGama/pixel/pull/<number>", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("no pull request referenced", result.stderr)
+        self.assertIn(
+            "2 entries take their pull request link from the commit that merges it at the cut",
+            result.stdout)
+        self.assertIn("3 fragment(s) under changelog.d/, all well formed", result.stdout)
 
     def test_an_issue_number_is_not_a_pull_request_reference(self):
-        """`#42` alone may be an issue: the text counts only with the URL."""
+        """`#42` alone may be an issue: the text counts only with the URL, so
+        the entry still waits for the link of its merge."""
         root = self.make_repo({"thing.fixed.md": "**thing:** it no longer breaks (fixes issue #42).\n"})
         result = self.run_check(root)
-        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("no pull request referenced", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("1 entry takes its pull request link", result.stdout)
 
     def test_a_link_in_the_entry_references_the_pull_request(self):
         """The link alone is enough, whatever the slug."""
@@ -560,14 +661,14 @@ class FragmentContract(unittest.TestCase):
         })
         result = self.run_check(root)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn("no pull request referenced", result.stderr)
+        self.assertNotIn("pull request link from the commit", result.stdout)
 
     def test_a_number_first_in_the_slug_references_the_pull_request(self):
         """The convention the directory already had counts as the reference."""
         root = self.make_repo({"12-thing.fixed.md": "**thing:** it no longer breaks.\n"})
         result = self.run_check(root)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertNotIn("no pull request referenced", result.stderr)
+        self.assertNotIn("pull request link from the commit", result.stdout)
 
     def test_check_reports_the_highlights_next_to_the_entries(self):
         root = self.make_repo({

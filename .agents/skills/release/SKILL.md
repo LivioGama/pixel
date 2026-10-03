@@ -187,7 +187,11 @@ carries a bullet of its own. Otherwise it:
 2. folds the fragments into a new `## [x.y.z] - DATE` under a kept, now empty
    `## [Unreleased]`, led by `_highlights.md` when there is one and then
    grouped by section in the order the headings have always used, and deletes
-   them all;
+   them all; an entry that names no pull request (no `/pull/<n>` in the text,
+   no number opening the slug) gets ` ([#<n>](…))` appended from the
+   first-parent commit that added it (`(#<n>)` or `Merge pull request #<n>`),
+   and one whose commit names none refuses the cut before any write: name the
+   pull request in that fragment's text, then re-run;
 3. runs `cargo update --workspace` so `Cargo.lock` follows;
 4. lists the pull requests merged into `main` since the last tag, then
    the commits since the tag that belong to no merged pull request (a push

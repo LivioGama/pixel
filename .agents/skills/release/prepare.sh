@@ -10,8 +10,9 @@
 #    `## [x.y.z]` heading yet;
 # 2. `changelog.d/` holds at least one fragment, every fragment is a
 #    `<slug>.<section>.md` with a section from SECTIONS and a first line that
-#    carries the entry, opens on its scope, names its pull request and fits
-#    HARD_LIMIT, an optional
+#    carries the entry, opens on its scope and fits HARD_LIMIT; an entry that
+#    names no pull request takes its link from the commit that merged it
+#    (the cut refuses one whose commit names none), an optional
 #    `_highlights.md` carries no `## ` heading and fits HIGHLIGHTS_LIMIT, and
 #    `## [Unreleased]` carries no `- ` entry;
 # 3. every workspace member's `[package] version` is set to x.y.z (the
@@ -78,6 +79,9 @@ HARD_LIMIT=900
 # exercise moved out of the entries.
 HIGHLIGHTS="changelog.d/_highlights.md"
 HIGHLIGHTS_LIMIT=2000
+
+# Where an entry's `([#<n>](...))` link points.
+PULL_URL="https://github.com/LivioGama/pixel/pull"
 
 VERSION=""
 DATE="$(date +%Y-%m-%d)"
@@ -146,11 +150,27 @@ fragment_section() {
     esac
 }
 
+# The pull request that brought `$1` into the release: the most recent
+# first-parent commit that added it, a squash merge (`subject (#<n>)`) or a
+# merge commit (`Merge pull request #<n> from …`). `--first-parent` makes a
+# merge commit's own diff the one judged, and `--no-renames` makes a file
+# moved by a later pull request count as added there. Empty when no commit
+# added the file or its subject names no pull request.
+merged_pull_request() {
+    git log -1 --first-parent --no-renames --diff-filter=A --format=%s -- "$1" |
+        sed -n -e 's/.*(#\([0-9][0-9]*\))$/\1/p' \
+            -e 's/^Merge pull request #\([0-9][0-9]*\) .*/\1/p'
+}
+
 # Fragments in filename order. An unmatched glob is the literal pattern, which
 # is why the existence test is what says whether a fragment is there at all.
 FRAGMENTS=""
 FRAGMENT_COUNT=0
 WARNINGS=""
+# `<fragment> <number>` per entry whose link the cut appends, and how many
+# such entries --check let through.
+LINKS=""
+UNLINKED_COUNT=0
 for fragment in changelog.d/*.md; do
     [ -e "$fragment" ] || continue
     # `_highlights.md` is the release's narrative, not an entry: no section, no
@@ -205,17 +225,32 @@ for fragment in changelog.d/*.md; do
 }  $fragment: $LENGTH bytes, over the $SOFT_LIMIT the style aims at"
     fi
     # The reader of a short entry needs somewhere to go for the rest. The link
-    # is in the text, or derivable by eye from a slug that opens on the number.
-    # A refusal, not a warning: the number only exists once the pull request
-    # is open, so the fragment is written without it and the rename is a step
-    # to remember afterwards. As a warning nothing surfaced it before the
-    # release (three entries merged without it in a row, #253-#255); refused,
-    # the pull request's own CI run goes red on it, when the number is known.
-    # In the text it is the pull request's URL, not any `#<n>`: `Fixes issue
-    # #42` names an issue and would otherwise pass for the reference.
+    # is in the text, derivable by eye from a slug that opens on the number,
+    # or appended by the cut from the commit that merged the fragment: the
+    # number only exists once the pull request is open, and asking for it in
+    # the fragment cost every pull request a second push only to rename the
+    # file (#550). The cut refuses an entry it cannot link, before any write,
+    # so no entry ships without its reference (three merged without one in a
+    # row, #253-#255, when it was only a warning). In the text it is the pull
+    # request's URL, not any `#<n>`: `Fixes issue #42` names an issue and
+    # would otherwise pass for the reference.
     if ! grep -Eq '/pull/[0-9]+' "$fragment" && ! printf '%s' "${fragment##*/}" | grep -Eq '^[0-9]+-'; then
-        echo "prepare.sh: $fragment: no pull request referenced; once the pull request is open, name the number first in the slug (git mv $fragment changelog.d/<number>-${fragment##*/}) and end the entry with its link: ([#<number>](https://github.com/LivioGama/pixel/pull/<number>))" >&2
-        exit 1
+        UNLINKED_COUNT=$((UNLINKED_COUNT + 1))
+        if [ "$CHECK" -eq 0 ]; then
+            pr="$(merged_pull_request "$fragment")"
+            if [ -z "$pr" ]; then
+                added="$(git log -1 --first-parent --no-renames --diff-filter=A --format='%h %s' -- "$fragment")"
+                if [ -n "$added" ]; then
+                    why="the commit that added it ($added) names none"
+                else
+                    why="no commit added it"
+                fi
+                echo "prepare.sh: $fragment: no pull request referenced, and $why; end the entry with its link: ([#<number>]($PULL_URL/<number>))" >&2
+                exit 1
+            fi
+            LINKS="${LINKS}${LINKS:+
+}$fragment $pr"
+        fi
     fi
 done
 if [ -n "$WARNINGS" ]; then
@@ -265,6 +300,9 @@ fi
 if [ "$CHECK" -eq 1 ]; then
     HIGHLIGHTS_NOTE=""
     if [ "$HAS_HIGHLIGHTS" -eq 1 ]; then HIGHLIGHTS_NOTE=" plus _highlights.md"; fi
+    if [ "$UNLINKED_COUNT" -gt 0 ]; then
+        echo "prepare.sh: $UNLINKED_COUNT entr$( [ "$UNLINKED_COUNT" -eq 1 ] && printf 'y takes its' || printf 'ies take their' ) pull request link from the commit that merges it at the cut"
+    fi
     if [ "$FRAGMENT_COUNT" -eq 0 ]; then
         echo "prepare.sh: changelog.d/ holds no entry$HIGHLIGHTS_NOTE, which is well formed between a release and the next entry; ## [Unreleased] empty"
     else
@@ -320,11 +358,22 @@ trap 'rm -f "$SECTION_FILE"' EXIT
                 printf '\n### %s\n' "$(section_title "$section")"
                 first=0
             fi
-            # The file is the entry's text; the bullet and the two-space
-            # continuation indent belong to CHANGELOG.md, not to the fragment.
-            awk 'NR == 1 { printf "- %s\n", $0; next }
-                 /^[[:space:]]*$/ { next }
-                 { printf "  %s\n", $0 }' "$fragment"
+            # The file is the entry's text; the bullet, the two-space
+            # continuation indent and a link the entry left out belong to
+            # CHANGELOG.md, not to the fragment. The link closes the entry's
+            # last line, where a written one would sit.
+            pr="$(printf '%s\n' "$LINKS" | awk -v f="$fragment" '$1 == f { print $2 }')"
+            awk -v pr="$pr" -v url="$PULL_URL" '
+                { line[++n] = $0 }
+                END {
+                    last = n
+                    while (last > 0 && line[last] ~ /^[[:space:]]*$/) last--
+                    if (pr != "") line[last] = line[last] " ([#" pr "](" url "/" pr "))"
+                    for (i = 1; i <= n; i++) {
+                        if (i == 1) printf "- %s\n", line[i]
+                        else if (line[i] !~ /^[[:space:]]*$/) printf "  %s\n", line[i]
+                    }
+                }' "$fragment"
         done
     done
 } > "$SECTION_FILE"

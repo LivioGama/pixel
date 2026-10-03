@@ -150,10 +150,11 @@ reviews:
       instructions: |
         One file per entry, named `<slug>.<section>.md` where the section is
         one of `added`, `changed`, `deprecated`, `removed`, `fixed`,
-        `security`; the slug should start with the pull request number when
-        known. The entry is `**<scope>:** <what changed and what it means for
-        a user>. ([#n](url))`, without a leading `-`: the scope first, then
-        the change, then the pull request link. Flag an entry with no scope
+        `security`; the slug is free. The entry is `**<scope>:** <what
+        changed and what it means for a user>.`, without a leading `-`: the
+        scope first, then the change. The pull request link is optional: the
+        release cut appends it from the merge commit's `(#n)`, so do not ask
+        for a rename or a second push to add it. Flag an entry with no scope
         prefix, over 500 bytes, or whose prose argues for a design choice
         instead of stating the change -- that argument belongs in the pull
         request description the entry links. `_highlights.md` is the
