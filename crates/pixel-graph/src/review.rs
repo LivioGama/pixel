@@ -1064,19 +1064,20 @@ mod tests {
         );
     }
 
-    /// The scan reads exactly the added range: secrets outside it — even one
-    /// line past the end — are not findings. Off-by-one mutants in
-    /// `skip(start - 1)` / `take(end - start + 1)` surface here.
+    /// The scan reads exactly the added ranges: secrets outside them — even
+    /// unchanged context lines inside the same hunk — are not findings. The
+    /// off-by-one mutants in `skip`/`take` and the line-number arithmetic
+    /// all shift which lines land here.
     #[test]
     fn secret_scan_reads_exactly_the_added_lines() {
         let dir = tmpdir("scan-range");
         let root = dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
-        // line 2 becomes the only added line; the secrets at 1 and 4 are
-        // unchanged context in the diff.
+        // Lines 1 and 6 carry credential-shaped strings but are unchanged
+        // context; the diff adds only lines 2 and 5.
         std::fs::write(
             root.join("src/f.rs"),
-            "const BEFORE: &str = \"ghp_before\";\nfn keep() {}\nconst OUTSIDE: &str = \"ghp_outside\";\n",
+            "const CTX1: &str = \"ghp_ctx1\";\nfn keep() {}\nfn mid() {}\nconst CTX2: &str = \"ghp_ctx2\";\n",
         )
         .unwrap();
         git(root, &["init", "-q"]);
@@ -1084,16 +1085,16 @@ mod tests {
         git(root, &["commit", "-qm", "base"]);
         std::fs::write(
             root.join("src/f.rs"),
-            "const BEFORE: &str = \"ghp_before\";\nconst LEAKED: &str = \"ghp_inside\";\nfn keep() {}\nconst OUTSIDE: &str = \"ghp_outside\";\n",
+            "const CTX1: &str = \"ghp_ctx1\";\nconst LEAKED1: &str = \"ghp_a\";\nfn keep() {}\nfn mid() {}\nconst LEAKED2: &str = \"ghp_b\";\nconst CTX2: &str = \"ghp_ctx2\";\n",
         )
         .unwrap();
         let diff = GitRunner::new(root).diff_unified0(None).unwrap();
         let files = parse_diff(&String::from_utf8_lossy(&diff));
-        assert_eq!(files[0].added_ranges, vec![(2, 2)], "{files:?}");
+        assert_eq!(files[0].added_ranges, vec![(2, 2), (5, 5)], "{files:?}");
         let (findings, capped) = added_secret_findings(root, &files).expect("scan runs");
         assert_eq!(
             findings.iter().map(|f| f.line).collect::<Vec<_>>(),
-            vec![Some(2)],
+            vec![Some(2), Some(5)],
             "{findings:?}"
         );
         assert!(!capped);
@@ -1107,9 +1108,13 @@ mod tests {
     fn a_token_in_plain_code_stays_critical() {
         let dir = tmpdir("bare-token");
         let root = dir.path();
+        // Line 2: token in code, no `=`, no literal opener -> CRITICAL.
+        // Line 3: an `=`-carrying line that still opens with a quote — the
+        // deleted `!` in `!trimmed.contains('=')` would call it a bare
+        // literal and downgrade it.
         std::fs::write(
             root.join("f.rs"),
-            "fn go() {\n    helper(ghp_abcdef1234567890);\n}\n",
+            "fn go() {\n    helper(ghp_abcdef1234567890);\n    \"k\" = \"ghp_zz\";\n}\n",
         )
         .unwrap();
         let text = [
@@ -1117,9 +1122,10 @@ mod tests {
             "index 1111111..2222222 100644",
             "--- a/f.rs",
             "+++ b/f.rs",
-            "@@ -1,1 +1,2 @@",
+            "@@ -1,1 +1,3 @@",
             " ctx",
             "+added",
+            "+added2",
         ]
         .join("\n");
         let files = parse_diff(&text);
@@ -1128,9 +1134,14 @@ mod tests {
             .iter()
             .filter(|f| f.rule == "possible-secret")
             .collect();
-        assert_eq!(leaked.len(), 1, "{findings:?}");
-        assert_eq!(leaked[0].severity, "CRITICAL", "{leaked:?}");
-        assert_eq!(leaked[0].line, Some(2));
+        assert_eq!(
+            leaked
+                .iter()
+                .map(|f| (f.line, f.severity.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(Some(2), "CRITICAL"), (Some(3), "CRITICAL")],
+            "{findings:?}"
+        );
     }
 
     /// A secret on the line immediately above `#[cfg(test)]` is production
@@ -1142,7 +1153,7 @@ mod tests {
         let root = dir.path();
         std::fs::write(
             root.join("f.rs"),
-            "const REAL: &str = \"ghp_live\";\n#[cfg(test)]\nmod tests {\n    const CASE: &str = \"ghp_fixture\";\n}\n",
+            "const REAL: &str = \"ghp_live\";\n#[cfg(test)] const EDGE: &str = \"ghp_edge\";\nmod tests {\n    const CASE: &str = \"ghp_fixture\";\n}\n",
         )
         .unwrap();
         let text = [
@@ -1167,6 +1178,11 @@ mod tests {
                 .unwrap_or_else(|| panic!("no finding at line {line}: {findings:?}"))
         };
         assert_eq!(at(1).severity, "CRITICAL", "above cfg(test): {findings:?}");
+        assert_eq!(
+            at(2).severity,
+            "MEDIUM",
+            "on the cfg(test) line: {findings:?}"
+        );
         assert_eq!(at(4).severity, "MEDIUM", "inside cfg(test): {findings:?}");
     }
 
