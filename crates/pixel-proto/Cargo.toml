@@ -13,3 +13,6 @@ serde = { version = "1", features = ["derive"] }
 # bits in the client, or the daemon route prints other digits than the
 # in-process one (envelope::tests::floats_survive_the_wire_bit_for_bit).
 serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[dev-dependencies]
+proptest = { workspace = true }

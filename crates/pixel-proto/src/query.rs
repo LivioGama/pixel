@@ -435,6 +435,8 @@ pub fn fit_locate_to_budget(
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     /// One token per character of context text plus `overhead`: a measure
@@ -524,6 +526,36 @@ mod tests {
         fit_locate_to_budget(&mut answer, 9, text_tokens(5));
         assert_eq!(texts_of(&answer), ["aaaa"]);
         assert_eq!(answer["limits"], serde_json::json!(["earlier limit"]));
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn fit_locate_to_budget_should_keep_a_ranked_prefix_and_drop_only_a_suffix(
+            texts in proptest::collection::vec("[a-z]{0,16}", 0..8),
+            overhead in 0usize..32,
+            budget in 0usize..160,
+        ) {
+            let original: Vec<&str> = texts.iter().map(String::as_str).collect();
+            let mut answer = locate_answer(&original);
+            fit_locate_to_budget(&mut answer, budget, text_tokens(overhead));
+            let kept = texts_of(&answer);
+
+            let mut dropped = false;
+            for (before, after) in original.iter().zip(kept) {
+                if before.is_empty() {
+                    prop_assert_eq!(after, *before);
+                } else if after.is_empty() {
+                    dropped = true;
+                } else {
+                    prop_assert!(!dropped, "a lower-ranked target survived after a context drop");
+                    prop_assert_eq!(after, *before);
+                }
+            }
+
+            if overhead <= budget {
+                prop_assert!(text_tokens(overhead)(&answer) <= budget);
+            }
+        }
     }
 
     #[test]

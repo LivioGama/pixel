@@ -2212,6 +2212,7 @@ dependencies = [
 name = "pixel-proto"
 version = "0.6.1"
 dependencies = [
+ "proptest",
  "serde",
  "serde_json",
 ]
