@@ -62,3 +62,23 @@ fn caps_are_listed_after_the_findings() {
          cap: findings truncated at 64; lower-severity tail not listed\n"
     );
 }
+
+#[test]
+fn fail_on_thresholds_rank_blocker_above_all() {
+    assert_eq!(ReviewFailOn::Blocker.threshold(), 4);
+    assert_eq!(ReviewFailOn::Concern.threshold(), 3);
+    assert_eq!(ReviewFailOn::Suggestion.threshold(), 2);
+    assert_eq!(ReviewFailOn::Nit.threshold(), 1);
+    assert!(ReviewFailOn::Blocker.threshold() > ReviewFailOn::Concern.threshold());
+    assert!(ReviewFailOn::Concern.threshold() > ReviewFailOn::Suggestion.threshold());
+    assert!(ReviewFailOn::Suggestion.threshold() > ReviewFailOn::Nit.threshold());
+}
+
+#[test]
+fn review_severity_rank_orders_critical_first() {
+    assert_eq!(review_severity_rank("CRITICAL"), 4);
+    assert_eq!(review_severity_rank("HIGH"), 3);
+    assert_eq!(review_severity_rank("MEDIUM"), 2);
+    assert_eq!(review_severity_rank("LOW"), 1);
+    assert_eq!(review_severity_rank("anything-else"), 1);
+}
