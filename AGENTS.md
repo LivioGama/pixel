@@ -114,9 +114,5 @@ Both commands target the account's login shell (from the user database, not `$SH
 - Pure read-only exploration (no edits to `crates/` or rules).
 - The turn only touched docs, prompts, bench scripts, or contributor instructions (`AGENTS.md`, `CONTRIBUTING.md`, `.agents/`) — nothing that changes binary behavior or installed rules.
 <!-- pixel:warp-retrieval:begin -->
-This repository has a Pixel index (`.pixel/`). Optional retrieval helpers:
-`pixel search-content -F '<identifier>'` for exact identifiers,
-`pixel find-code '<concept>'` for behavior-described code, and
-`pixel impact '<symbol>'` before renames. Use them when they fit; native
-tools stay available, and two fruitless pixel calls mean switch to grep.
+This repository has a Pixel index (`.pixel/`). Retrieval starts with Pixel: `pixel search-content -F '<identifier>'` for exact identifiers, `pixel find-code '<concept>'` for behavior-described code, and `pixel impact '<symbol>'` before renames — a native grep/rg over indexed code is a missed retrieval; native tools stay available for everything Pixel does not cover, and two fruitless pixel calls mean switch to grep.
 <!-- pixel:warp-retrieval:end -->

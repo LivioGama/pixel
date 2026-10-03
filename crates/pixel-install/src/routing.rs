@@ -785,6 +785,14 @@ fn configure_scoped(
         if provider == Provider::Devin && verb == "post-tool-use" {
             continue;
         }
+        // Codex's prompt-submit guidance is the global install's
+        // (`install_metrics_hook` owns every `$CODEX_HOME/hooks.json` entry):
+        // Codex merges the project file over the global one, so a repo-local
+        // copy would deliver the same guidance twice per prompt in every
+        // installed repository — the same doubled-relay shape Devin avoids.
+        if provider == Provider::Codex && verb == "prompt-submit" {
+            continue;
+        }
         let groups = hooks
             .entry(event)
             .or_insert_with(|| json!([]))
@@ -2074,19 +2082,24 @@ mod tests {
                 provider.shell_matcher()
             );
             assert!(value["hooks"][provider.compact()].is_array());
-            let prompt = value["hooks"]["UserPromptSubmit"].as_array().unwrap();
-            let prompt_command = prompt.first().unwrap()["hooks"][0]["command"]
-                .as_str()
-                .unwrap();
-            if provider == Provider::Claude {
-                assert!(prompt_command.ends_with("hook prompt-submit --provider claude"));
-            } else if provider == Provider::Devin {
-                // Without its provider a Devin prompt-submit renders the
-                // provider-neutral context instead of the Pixel-first
-                // guidance.
-                assert!(prompt_command.ends_with("hook prompt-submit --provider devin"));
+            if provider == Provider::Codex {
+                // The global install owns Codex's prompt-submit
+                // (`install_metrics_hook`); the project file never carries a
+                // second copy Codex would merge over it.
+                assert!(value["hooks"].get("UserPromptSubmit").is_none(), "{value}");
             } else {
-                assert!(prompt_command.ends_with("hook prompt-submit --provider codex"));
+                let prompt = value["hooks"]["UserPromptSubmit"].as_array().unwrap();
+                let prompt_command = prompt.first().unwrap()["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap();
+                if provider == Provider::Claude {
+                    assert!(prompt_command.ends_with("hook prompt-submit --provider claude"));
+                } else {
+                    // Without its provider a Devin prompt-submit renders the
+                    // provider-neutral context instead of the Pixel-first
+                    // guidance.
+                    assert!(prompt_command.ends_with("hook prompt-submit --provider devin"));
+                }
             }
             if provider != Provider::Devin {
                 assert_eq!(value["hooks"]["SessionStart"][2]["matcher"], "compact");
