@@ -1,7 +1,7 @@
 //! Real CLI routing against a bounded fake classifier; no global environment mutation.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -16,6 +16,7 @@ use super::support::{Scratch, git, pixel_command};
 
 struct Classifier {
     base: String,
+    address: SocketAddr,
     count: Arc<AtomicUsize>,
     requests: mpsc::Receiver<Value>,
     stopped: Arc<AtomicBool>,
@@ -25,20 +26,23 @@ struct Classifier {
 impl Classifier {
     fn start(delay: Duration, illegal: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
+        let address = listener.local_addr().unwrap();
+        let base = format!("http://{address}");
         let count = Arc::new(AtomicUsize::new(0));
         let stopped = Arc::new(AtomicBool::new(false));
         let server_count = count.clone();
         let server_stopped = stopped.clone();
         let (sender, requests) = mpsc::channel();
+        let (ready, started) = mpsc::sync_channel(0);
         let thread = std::thread::spawn(move || {
+            ready.send(()).unwrap();
             while !server_stopped.load(Ordering::SeqCst) {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    std::thread::sleep(Duration::from_millis(5));
-                    continue;
-                };
-                stream.set_nonblocking(false).unwrap();
+                // Classification has a production wall-clock budget: let the
+                // kernel wake this fixture instead of adding polling latency.
+                let (mut stream, _) = listener.accept().unwrap();
+                if server_stopped.load(Ordering::SeqCst) {
+                    break;
+                }
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -90,8 +94,10 @@ impl Classifier {
                 let _ = stream.write_all(response.as_bytes());
             }
         });
+        started.recv().unwrap();
         Self {
             base,
+            address,
             count,
             requests,
             stopped,
@@ -109,6 +115,8 @@ impl Classifier {
 impl Drop for Classifier {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::SeqCst);
+        // Release a blocking accept without imposing a polling interval on requests.
+        let _ = TcpStream::connect(self.address);
         self.thread.take().unwrap().join().unwrap();
     }
 }
@@ -199,6 +207,11 @@ fn task_route_should_cache_the_prediction_and_reclassify_changed_source() {
         command(&root, &home, &task, "gates_classifier")
             .output()
             .unwrap(),
+    );
+    assert!(
+        !first["classifier"].is_null(),
+        "warm classifier fixture must produce a prediction before awaiting its request; route={first}; attempts={:?}",
+        events(&root, &task, "route_attempt")
     );
     let request = server.next_request();
     assert_eq!(request["state"], "fix source");

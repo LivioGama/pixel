@@ -690,6 +690,31 @@ mod tests {
         }
     }
 
+    // Telemetry tests must not append to an export sink inherited from the host.
+    fn isolated_telemetry_test(name: &str, test: impl FnOnce()) {
+        if std::env::var("PIXEL_BRIDGE_TELEMETRY_TEST").as_deref() == Ok(name) {
+            test();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("PIXEL_BRIDGE_TELEMETRY_TEST", name)
+            .env_remove("PIXEL_TASK_TELEMETRY_PATH")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{name}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(&format!("test {name} ... ok")),
+            "the isolated child must run the named test: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
     #[test]
     fn missing_session_should_block_stop_independently_of_mutation() {
         let root = Scratch::new();
@@ -870,68 +895,92 @@ mod tests {
 
     #[test]
     fn record_host_should_keep_tool_names_and_finalize_coverage() {
-        let root = Scratch::new();
-        let store = Store::open(&root.0).unwrap();
-        let contract = serde_json::from_value(json!({
-            "version":1,"objective":"fix source","checks":[],"criteria":[]
-        }))
-        .unwrap();
-        let task = store.begin(contract, "pi", Some("s"), "begin").unwrap();
+        isolated_telemetry_test(
+            "task_bridge::tests::record_host_should_keep_tool_names_and_finalize_coverage",
+            || {
+                let root = Scratch::new();
+                let store = Store::open(&root.0).unwrap();
+                let contract = serde_json::from_value(json!({
+                    "version":1,"objective":"fix source","checks":[],"criteria":[]
+                }))
+                .unwrap();
+                let task = store.begin(contract, "pi", Some("s"), "begin").unwrap();
 
-        for (name, expected) in [("Bash", "Bash"), ("", "unknown")] {
-            record_host(
-                &store,
-                &task,
-                "pre-tool-use",
-                &json!({"tool_use_id":format!("call-{expected}"),"tool_name":name}),
-                &format!("requested-{expected}"),
-            )
-            .unwrap();
-        }
-        for event in ["stop", "session-end", "subagent-stop"] {
-            record_host(
-                &store,
-                &task,
-                event,
-                &json!({"child_spans":["child-1"]}),
-                event,
-            )
-            .unwrap();
-        }
-
-        let events = store.events(&task.task_id).unwrap();
-        let telemetry: Vec<TelemetryEvent> = telemetry(&events).unwrap();
-        let mut tools: Vec<&str> = telemetry
-            .iter()
-            .filter_map(|event| match &event.observation {
-                Observation::ToolRequested { tool, .. } => Some(tool.as_str()),
-                _ => None,
-            })
-            .collect();
-        tools.sort_unstable();
-        assert_eq!(tools, ["Bash", "unknown"]);
-
-        let coverage: Vec<&TelemetryEvent> = telemetry
-            .iter()
-            .filter(|event| matches!(event.observation, Observation::Coverage { .. }))
-            .collect();
-        assert_eq!(coverage.len(), 3);
-        for event in coverage {
-            let Observation::Coverage {
-                complete,
-                child_spans,
-                missing,
-            } = &event.observation
-            else {
-                unreachable!()
-            };
-            assert!(!complete);
-            assert_eq!(child_spans, &["child-1".to_string()]);
-            assert_eq!(
-                missing,
-                &["native hooks do not establish full model and child request coverage"
-                    .to_string()]
-            );
-        }
+                for (index, (label, expected)) in [
+                    (Some("Bash"), "Bash"),
+                    (Some("Read"), "Read"),
+                    (Some(""), "unknown"),
+                    (None, "unknown"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let call = format!("call-{index}");
+                    let mut payload = json!({"tool_use_id":call,"retry_of":"earlier-call"});
+                    if let Some(label) = label {
+                        payload["tool_name"] = json!(label);
+                    }
+                    record_host(&store, &task, "pre-tool-use", &payload, &call).unwrap();
+                    let recorded = telemetry(&store.events(&task.task_id).unwrap()).unwrap();
+                    assert_eq!(recorded.len(), index + 1);
+                    assert_eq!(recorded[index].host_call_id.as_deref(), Some(call.as_str()));
+                    assert_eq!(
+                        recorded[index].observation,
+                        Observation::ToolRequested {
+                            request_id: call,
+                            tool: expected.into(),
+                            retry_of: Some("earlier-call".into()),
+                        }
+                    );
+                }
+                for (index, event) in ["stop", "session-end", "subagent-stop"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    record_host(
+                        &store,
+                        &task,
+                        event,
+                        &json!({"child_spans":["child-1", 7, null]}),
+                        event,
+                    )
+                    .unwrap();
+                    let recorded = telemetry(&store.events(&task.task_id).unwrap()).unwrap();
+                    assert_eq!(recorded.len(), 5 + index, "{event}");
+                    let ending = recorded.last().unwrap();
+                    assert_eq!(ending.event_id, format!("coverage-{event}"));
+                    assert_eq!(
+                        ending.observation,
+                        Observation::Coverage {
+                            complete: false,
+                            child_spans: vec!["child-1".into()],
+                            missing: vec!["native hooks do not establish full model and child request coverage".into()],
+                        },
+                        "{event}"
+                    );
+                    let summary =
+                        pixel_task::replay::summarize_trajectory(std::slice::from_ref(ending))
+                            .unwrap();
+                    assert_eq!(summary.coverage, pixel_task::replay::Coverage::Partial);
+                    assert_eq!(summary.model_tool_requests, None);
+                    assert_eq!(summary.observed_model_tool_requests, 0);
+                    assert_eq!(
+                        summary.missing,
+                        vec![
+                            "incomplete span root",
+                            "native hooks do not establish full model and child request coverage",
+                            "uncovered span child-1",
+                            "uncovered span root",
+                        ],
+                        "{event}"
+                    );
+                }
+                let recorded = telemetry(&store.events(&task.task_id).unwrap()).unwrap();
+                let summary = pixel_task::replay::summarize_trajectory(&recorded).unwrap();
+                assert_eq!(summary.coverage, pixel_task::replay::Coverage::Partial);
+                assert_eq!(summary.model_tool_requests, None);
+                assert_eq!(summary.observed_model_tool_requests, 4);
+            },
+        );
     }
 }
