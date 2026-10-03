@@ -119,7 +119,7 @@ Looking for something specific? [`llms.txt`](https://pixel-cli.dev/llms.txt) map
 If you are an LLM reading this to set Pixel up for a user, do this, in order:
 
 1. **Check first.** `command -v pixel && pixel --version`. If it prints a version, skip to step 3.
-2. **Install the binary** (macOS or Linux, including a GitHub Actions runner). Run `curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh`. It installs into `~/.local/bin` (override with `PIXEL_INSTALL_DIR`); make sure that directory is on `PATH`. On GitHub Actions, also run `echo "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}" >> "$GITHUB_PATH"`.
+2. **Install the binary** (macOS or Linux, including a GitHub Actions runner). Run `curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh`. It installs into `~/.local/bin` (override with `PIXEL_INSTALL_DIR`); make sure that directory is on `PATH`. On GitHub Actions, also run `echo "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}" >> "$GITHUB_PATH"` — needed for the `install.sh` already published on the current release; this branch's script appends itself, so drop the echo after the next release.
 3. **Wire the agents.** Tell the user it writes to their home configuration (`~/.local/share/pixel/`, `~/.claude/settings.json`, `~/.codex/config.toml`, `~/.pi/agent/APPEND_SYSTEM.md`), then run `pixel install`. It is idempotent: running it again only refreshes what it wrote.
 4. **Index the current repository** (optional, speeds up the first queries): `pixel prepare-repo .`
 5. **Verify:** `pixel doctor . --json`. Report every check that is not green, with its message; do not claim success otherwise.
