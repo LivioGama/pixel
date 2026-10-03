@@ -1,1 +1,0 @@
-**cli:** a `pixel` run from a checkout's `target/` no longer prints the stale-prompt note on every command: it carries `main`'s prompts under the release's version, so the note was always wrong there, and the `pixel install` it advised would hand the machine's hooks and prompts to a branch build. Installed binaries still warn; `pixel-dev` already stayed quiet.
