@@ -14,7 +14,6 @@ pub(crate) fn settings(root: &Path) -> Result<Value, String> {
 /// Whether the task gates may deny a tool call or a stop. Off by default:
 /// tasks still bind, observe and record — the verdicts are advisory unless
 /// the repository asks for enforcement (`task.enforcement: enforce`).
-#[cfg_attr(test, mutants::skip)] // advisory and off are aliases: `Ok(false)` is an equivalent mutant
 pub(crate) fn enabled(root: &Path) -> Result<bool, String> {
     let config = settings(root)?;
     match config.get("enforcement").and_then(Value::as_str) {
@@ -174,6 +173,81 @@ fn equivalent_requirement(key: &str, existing: &Value, required: &Value) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct Scratch(std::path::PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let root = std::env::temp_dir().join(format!(
+                "pixel-task-config-{}-{}",
+                crate::task_commands::request(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(root.join(".pixel")).unwrap();
+            Self(root)
+        }
+
+        fn write(&self, task: &Value) {
+            std::fs::write(
+                self.0.join(".pixel/config.yaml"),
+                serde_json::to_vec(&json!({"task":task})).unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn initial_should_add_acceptance_beside_other_criteria_and_preserve_existing_acceptance() {
+        let root = Scratch::new();
+        let repository = json!({
+            "id":"repository", "description":"repository requirement", "checks":[]
+        });
+        root.write(&json!({"criteria":[repository.clone()]}));
+        let contract = initial(&root.0, "fix observed behavior").unwrap();
+        assert_eq!(contract.objective, "fix observed behavior");
+        assert_eq!(
+            serde_json::to_value(&contract.criteria).unwrap(),
+            json!([
+                repository,
+                {"id":"task-acceptance", "description":"fix observed behavior", "checks":[]}
+            ])
+        );
+
+        let acceptance = json!({
+            "id":"task-acceptance", "description":"configured acceptance", "checks":[]
+        });
+        root.write(&json!({"criteria":[acceptance.clone()]}));
+        let contract = initial(&root.0, "another objective").unwrap();
+        assert_eq!(contract.objective, "another objective");
+        assert_eq!(
+            serde_json::to_value(&contract.criteria).unwrap(),
+            json!([acceptance])
+        );
+    }
+
+    #[test]
+    fn enabled_should_require_explicit_enforcement_and_reject_invalid_settings() {
+        let root = Scratch::new();
+        assert!(!enabled(&root.0).unwrap());
+        root.write(&json!({"enforcement":"advisory"}));
+        assert!(!enabled(&root.0).unwrap());
+        root.write(&json!({"enforcement":"off"}));
+        assert!(!enabled(&root.0).unwrap());
+        root.write(&json!({"enforcement":"enforce"}));
+        assert!(enabled(&root.0).unwrap());
+        root.write(&json!({"enforcement":"invalid"}));
+        assert_eq!(
+            enabled(&root.0).unwrap_err(),
+            "task.enforcement must be enforce, advisory or off"
+        );
+    }
 
     #[test]
     fn merging_should_preserve_repository_checks_and_unrelated_task_criteria() {

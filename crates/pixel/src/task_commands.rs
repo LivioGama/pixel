@@ -429,3 +429,55 @@ pub(crate) fn action_correlation(root: &Path) -> Option<pixel_actionlog::TaskCor
     bind_invocation(&task);
     ACTIVE_CORRELATION.with_borrow(Clone::clone)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Scratch(PathBuf);
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn observations_should_reject_changed_kind_or_data_independently() {
+        let root = Scratch(std::env::temp_dir().join(format!("pixel-task-observe-{}", request())));
+        std::fs::create_dir(&root.0).unwrap();
+        let store = Store::open(&root.0).unwrap();
+        let contract = serde_json::from_value(json!({"objective":"observe a task"})).unwrap();
+        let task = store.begin(contract, "pi", None, "begin").unwrap();
+        observe(
+            &store,
+            &task,
+            "observation",
+            "original-kind",
+            json!({"value":1}),
+        )
+        .unwrap();
+        let events = store.events(&task.task_id).unwrap();
+        let current = store.status(&task.task_id).unwrap();
+        observe(
+            &store,
+            &task,
+            "observation",
+            "original-kind",
+            json!({"value":1}),
+        )
+        .unwrap();
+        assert_eq!(store.events(&task.task_id).unwrap(), events);
+        for (kind, data) in [
+            ("different-kind", json!({"value":1})),
+            ("original-kind", json!({"value":2})),
+        ] {
+            assert_eq!(
+                observe(&store, &task, "observation", kind, data),
+                Err("conflicting duplicate task observation".into())
+            );
+            assert_eq!(store.events(&task.task_id).unwrap(), events);
+            assert_eq!(store.status(&task.task_id).unwrap(), current);
+        }
+    }
+}

@@ -674,9 +674,11 @@ mod tests {
     struct Scratch(std::path::PathBuf);
     impl Scratch {
         fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
-                "pixel-task-bridge-{}",
-                crate::task_commands::request()
+                "pixel-task-bridge-{}-{}",
+                crate::task_commands::request(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             std::fs::create_dir(&root).unwrap();
             Self(root)
@@ -686,6 +688,85 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    // Telemetry tests must not append to an export sink inherited from the host.
+    fn isolated_telemetry_test(name: &str, test: impl FnOnce()) {
+        if std::env::var("PIXEL_BRIDGE_TELEMETRY_TEST").as_deref() == Ok(name) {
+            test();
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("PIXEL_BRIDGE_TELEMETRY_TEST", name)
+            .env_remove("PIXEL_TASK_TELEMETRY_PATH")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{name}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains(&format!("test {name} ... ok")),
+            "the isolated child must run the named test: {}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+    }
+
+    #[test]
+    fn missing_session_should_block_stop_independently_of_mutation() {
+        let root = Scratch::new();
+        for (event, mutation) in [("stop", false), ("pre-tool-use", true)] {
+            assert_eq!(
+                handle_hook(&root.0, "pi", event, &json!({"mutation":mutation})).unwrap_err(),
+                "host session identity is missing; task edits and completion require a stable session"
+            );
+        }
+        assert_eq!(
+            handle_hook(&root.0, "pi", "session-start", &json!({"mutation":false})).unwrap(),
+            json!({"decision":"observe","coverage":"unavailable"})
+        );
+    }
+
+    #[test]
+    fn retained_enforcement_requires_a_host_policy_with_true_enforcement() {
+        let root = Scratch::new();
+        let store = Store::open(&root.0).unwrap();
+        let contract = serde_json::from_value(json!({
+            "version":1,"objective":"fix source","checks":[],"criteria":[]
+        }))
+        .unwrap();
+        let task = store.begin(contract, "pi", Some("s"), "begin").unwrap();
+        assert!(!task_enforced(&store, &task).unwrap());
+        observe(
+            &store,
+            &task,
+            "unrelated",
+            "diagnostic",
+            json!({"enforce":true}),
+        )
+        .unwrap();
+        assert!(!task_enforced(&store, &task).unwrap());
+        observe(
+            &store,
+            &task,
+            "disabled",
+            "host_policy",
+            json!({"enforce":false}),
+        )
+        .unwrap();
+        assert!(!task_enforced(&store, &task).unwrap());
+        observe(
+            &store,
+            &task,
+            "enabled",
+            "host_policy",
+            json!({"enforce":true}),
+        )
+        .unwrap();
+        assert!(task_enforced(&store, &task).unwrap());
     }
 
     #[test]
@@ -760,6 +841,30 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn observed_marker_read_errors_must_not_replace_existing_state() {
+        let root = Scratch::new();
+        std::fs::create_dir(root.0.join(".pixel")).unwrap();
+        let path = root.0.join(".pixel/task-hook-observations.json");
+        let target = Path::new("task-hook-observations.json");
+        std::os::unix::fs::symlink(target, &path).unwrap();
+        let read_error = std::fs::read(&path).unwrap_err();
+        assert_eq!(read_error.raw_os_error(), Some(libc::ELOOP));
+        assert_eq!(
+            observed(&root.0, "codex", "stop", "session", &json!({})).unwrap_err(),
+            read_error.to_string()
+        );
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+
+        std::fs::remove_file(&path).unwrap();
+        observed(&root.0, "codex", "stop", "session", &json!({})).unwrap();
+        let marker: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(marker.as_object().unwrap().len(), 1);
+        assert_eq!(marker["codex"]["session_id"], "session");
+        assert_eq!(marker["codex"]["event"], "stop");
+    }
+
+    #[test]
     fn identity_should_separate_sessions_and_event_kinds_without_content_deduplication() {
         assert_ne!(session_key("one").unwrap(), session_key("two").unwrap());
         let payload = json!({"event_id":"host-1"});
@@ -785,6 +890,97 @@ mod tests {
             session_key("invalid session/path")
                 .unwrap()
                 .starts_with("session-")
+        );
+    }
+
+    #[test]
+    fn record_host_should_keep_tool_names_and_finalize_coverage() {
+        isolated_telemetry_test(
+            "task_bridge::tests::record_host_should_keep_tool_names_and_finalize_coverage",
+            || {
+                let root = Scratch::new();
+                let store = Store::open(&root.0).unwrap();
+                let contract = serde_json::from_value(json!({
+                    "version":1,"objective":"fix source","checks":[],"criteria":[]
+                }))
+                .unwrap();
+                let task = store.begin(contract, "pi", Some("s"), "begin").unwrap();
+
+                for (index, (label, expected)) in [
+                    (Some("Bash"), "Bash"),
+                    (Some("Read"), "Read"),
+                    (Some(""), "unknown"),
+                    (None, "unknown"),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    let call = format!("call-{index}");
+                    let mut payload = json!({"tool_use_id":call,"retry_of":"earlier-call"});
+                    if let Some(label) = label {
+                        payload["tool_name"] = json!(label);
+                    }
+                    record_host(&store, &task, "pre-tool-use", &payload, &call).unwrap();
+                    let recorded = telemetry(&store.events(&task.task_id).unwrap()).unwrap();
+                    assert_eq!(recorded.len(), index + 1);
+                    assert_eq!(recorded[index].host_call_id.as_deref(), Some(call.as_str()));
+                    assert_eq!(
+                        recorded[index].observation,
+                        Observation::ToolRequested {
+                            request_id: call,
+                            tool: expected.into(),
+                            retry_of: Some("earlier-call".into()),
+                        }
+                    );
+                }
+                for (index, event) in ["stop", "session-end", "subagent-stop"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    record_host(
+                        &store,
+                        &task,
+                        event,
+                        &json!({"child_spans":["child-1", 7, null]}),
+                        event,
+                    )
+                    .unwrap();
+                    let recorded = telemetry(&store.events(&task.task_id).unwrap()).unwrap();
+                    assert_eq!(recorded.len(), 5 + index, "{event}");
+                    let ending = recorded.last().unwrap();
+                    assert_eq!(ending.event_id, format!("coverage-{event}"));
+                    assert_eq!(
+                        ending.observation,
+                        Observation::Coverage {
+                            complete: false,
+                            child_spans: vec!["child-1".into()],
+                            missing: vec!["native hooks do not establish full model and child request coverage".into()],
+                        },
+                        "{event}"
+                    );
+                    let summary =
+                        pixel_task::replay::summarize_trajectory(std::slice::from_ref(ending))
+                            .unwrap();
+                    assert_eq!(summary.coverage, pixel_task::replay::Coverage::Partial);
+                    assert_eq!(summary.model_tool_requests, None);
+                    assert_eq!(summary.observed_model_tool_requests, 0);
+                    assert_eq!(
+                        summary.missing,
+                        vec![
+                            "incomplete span root",
+                            "native hooks do not establish full model and child request coverage",
+                            "uncovered span child-1",
+                            "uncovered span root",
+                        ],
+                        "{event}"
+                    );
+                }
+                let recorded = telemetry(&store.events(&task.task_id).unwrap()).unwrap();
+                let summary = pixel_task::replay::summarize_trajectory(&recorded).unwrap();
+                assert_eq!(summary.coverage, pixel_task::replay::Coverage::Partial);
+                assert_eq!(summary.model_tool_requests, None);
+                assert_eq!(summary.observed_model_tool_requests, 4);
+            },
         );
     }
 }

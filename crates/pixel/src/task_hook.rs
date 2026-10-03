@@ -521,7 +521,8 @@ fn mutation(tool: &str, input: &Value) -> bool {
             )
         ),
         "Read" | "read" | "Glob" | "glob" | "Grep" | "grep" | "WebSearch" | "web_search"
-        | "WebFetch" | "web_fetch" | "AskUserQuestion" => false,
+        | "WebFetch" | "web_fetch" | "AskUserQuestion" | "ls" | "find" | "list_dir"
+        | "grep_search" | "file_search" | "view_file" => false,
         _ => true,
     }
 }
@@ -1030,6 +1031,30 @@ mod tests {
             unavailable(TaskHookEvent::Stop, Some(&json!({})))["decision"],
             "deny"
         );
+    }
+
+    #[test]
+    fn discovery_aliases_should_remain_reads_when_task_state_is_unavailable() {
+        for tool in [
+            "ls",
+            "find",
+            "list_dir",
+            "grep_search",
+            "file_search",
+            "view_file",
+        ] {
+            let payload = json!({"tool_name":tool,"tool_input":{"path":"src/lib.rs"}});
+            assert_eq!(
+                normalize(TaskHookEvent::PreToolUse, &payload)["mutation"],
+                false,
+                "{tool}"
+            );
+            assert_eq!(
+                unavailable(TaskHookEvent::PreToolUse, Some(&payload))["decision"],
+                "observe",
+                "{tool}"
+            );
+        }
     }
 
     #[test]

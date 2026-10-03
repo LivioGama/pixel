@@ -320,6 +320,63 @@ class OneProgramForEveryLane(unittest.TestCase):
             pins |= set(re.findall(r"tool: cargo-mutants@(\S+)", (REPO / workflow).read_text()))
         self.assertEqual(len(pins), 1, pins)
 
+    def test_ci_mutants_inherit_created_runner_temp_and_preserve_failure_status(self):
+        workflow = (REPO / ".github/workflows/mutants.yml").read_text()
+
+        def step_shell(name):
+            step = workflow.split(f"      - name: {name}\n", 1)[1].split("\n      - ", 1)[0]
+            blocks = yaml_run_blocks(step)
+            self.assertEqual(len(blocks), 1)
+            return blocks[0]
+
+        prepare = step_shell("Use disk-backed mutation temporary storage")
+        run = step_shell("Run this shard's mutants")
+        self.assertLess(
+            workflow.index("name: Use disk-backed mutation temporary storage"),
+            workflow.index("name: Run this shard's mutants"),
+        )
+        with tempfile.TemporaryDirectory(prefix="pixel-mutants-temp-") as tmp:
+            root = Path(tmp)
+            runner_temp = root / "runner temp"
+            expected = runner_temp / "pixel-mutants-tmp"
+            github_env = root / "github-env"
+            probe = root / "inherited-temp"
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            # Exercise the workflow shell without building or executing mutants.
+            cargo = bin_dir / "cargo"
+            cargo.write_text(
+                '#!/bin/sh\n'
+                'test -d "$TMPDIR" || exit 91\n'
+                'printf "%s\\n" "$TMPDIR" > "$PROBE_FILE"\n'
+                'printf "temporary output\\n" > "$TMPDIR/linker-probe"\n'
+                'exit "$STUB_CARGO_EXIT"\n'
+            )
+            cargo.chmod(0o755)
+            env = dict(os.environ)
+            env.pop("TMPDIR", None)
+            env.update(RUNNER_TEMP=str(runner_temp), GITHUB_ENV=str(github_env))
+            result = subprocess.run(
+                ["bash", "-e", "-o", "pipefail", "-c", prepare],
+                cwd=root, env=env, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(expected.is_dir())
+            updates = dict(line.split("=", 1) for line in github_env.read_text().splitlines())
+            self.assertEqual(updates, {"TMPDIR": str(expected)})
+            env.update(updates)
+            env.update(PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", PROBE_FILE=str(probe), SHARD="0/10")
+            for status in (0, 7):
+                with self.subTest(cargo_exit=status):
+                    env["STUB_CARGO_EXIT"] = str(status)
+                    result = subprocess.run(
+                        ["bash", "-e", "-o", "pipefail", "-c", run],
+                        cwd=root, env=env, capture_output=True, text=True,
+                    )
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertEqual(probe.read_text(), f"{expected}\n")
+                    self.assertEqual((expected / "linker-probe").read_text(), "temporary output\n")
+
 
 class MutantsGateReport(unittest.TestCase):
     """Contract of scripts/mutants-gate.py.

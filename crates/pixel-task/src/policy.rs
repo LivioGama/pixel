@@ -124,3 +124,73 @@ pub fn decide(task: &Task, gate: Gate, current_source_id: Option<&str>) -> Decis
         phase: task.phase,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::Observation;
+    use serde_json::json;
+
+    #[test]
+    fn edit_requires_each_named_preparation_kind_not_other_complete_evidence() {
+        let mut task: Task = serde_json::from_value(json!({
+            "version": crate::model::SCHEMA_VERSION,
+            "task_id": "task",
+            "provider": "pi",
+            "attempt_id": "attempt",
+            "revision": 1,
+            "phase": "contracted",
+            "created_ms": 1,
+            "updated_ms": 1,
+            "contract": {
+                "objective": "fix source",
+                "checks": [{"id":"check", "argv":["true"]}],
+                "criteria": [{"id":"acceptance", "description":"source fixed", "checks":["check"]}]
+            },
+            "source": {"content_id":"source", "root":"fixture", "index_id":"index", "captured_ms":1, "files":[]},
+            "observations": [],
+            "receipts": [],
+            "claims": [],
+            "budget": {"continuations":0, "same_state_repeats":0}
+        }))
+        .unwrap();
+        let observation = |kind| Observation {
+            kind,
+            source_id: "source".into(),
+            complete: true,
+            data: json!({}),
+        };
+        task.observations
+            .push(observation(ObservationKind::TestSuggestions));
+        let absent = decide(&task, Gate::Edit, Some("source"));
+        assert!(!absent.allowed);
+        assert_eq!(
+            absent.reasons,
+            vec![
+                "fresh complete Scope evidence required",
+                "fresh complete Impact evidence required"
+            ]
+        );
+        assert_eq!(
+            absent.eligible_routes,
+            vec![Route::Investigate, Route::Recover, Route::Prepare]
+        );
+
+        task.observations.push(observation(ObservationKind::Scope));
+        let missing_impact = decide(&task, Gate::Edit, Some("source"));
+        assert!(!missing_impact.allowed);
+        assert_eq!(
+            missing_impact.reasons,
+            vec!["fresh complete Impact evidence required"]
+        );
+
+        task.observations.push(observation(ObservationKind::Impact));
+        let complete = decide(&task, Gate::Edit, Some("source"));
+        assert!(complete.allowed);
+        assert!(complete.reasons.is_empty());
+        assert_eq!(
+            complete.eligible_routes,
+            vec![Route::Investigate, Route::Recover, Route::Edit]
+        );
+    }
+}

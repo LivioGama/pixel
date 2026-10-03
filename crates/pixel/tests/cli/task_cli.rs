@@ -128,6 +128,278 @@ fn hook_with_policy(
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
+fn prepared_session(root: &Path, provider: &str, session: &str) -> pixel_task::Task {
+    let store = pixel_task::Store::open(root).unwrap();
+    let task = store
+        .begin(
+            serde_json::from_value(contract()).unwrap(),
+            provider,
+            Some(session),
+            "begin-prepared-session",
+        )
+        .unwrap();
+    good(root, &["task", "prepare", &task.task_id, "--json"]);
+    store.status(&task.task_id).unwrap()
+}
+
+#[test]
+fn fresh_task_enforcement_requires_both_repository_enablement_and_a_gated_policy() {
+    for (enabled, policy) in [
+        (true, "gates"),
+        (false, "gates"),
+        (true, "retrieval"),
+        (false, "retrieval"),
+    ] {
+        let root = repo(&format!("enforcement-{enabled}-{policy}"));
+        if !enabled {
+            std::fs::write(
+                root.join(".pixel/config.json"),
+                json!({"task":{"enforcement":"off"}}).to_string(),
+            )
+            .unwrap();
+        }
+        let result = hook_with_policy(
+            &root,
+            "pi",
+            "pre-tool-use",
+            json!({"session_id":"s","tool_name":"Write","tool_use_id":"write"}),
+            policy,
+        );
+        let enforced = enabled && policy == "gates";
+        assert_eq!(
+            result["decision"],
+            if enforced { "deny" } else { "observe" }
+        );
+        let store = pixel_task::Store::open(&root).unwrap();
+        let task = store.find_session("pi", "s").unwrap().unwrap();
+        let policies: Vec<_> = store
+            .events(&task.task_id)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.data["kind"] == "host_policy")
+            .map(|event| event.data["data"]["enforce"].clone())
+            .collect();
+        assert_eq!(policies, if enforced { vec![json!(true)] } else { vec![] });
+    }
+}
+
+#[test]
+fn explicit_binding_requires_provider_and_session_independently() {
+    for (bound_provider, requested_session) in [("codex", "owner"), ("pi", "other")] {
+        let root = repo(&format!("binding-{bound_provider}"));
+        let task = prepared_session(&root, bound_provider, "owner");
+        let store = pixel_task::Store::open(&root).unwrap();
+        let before = store.events(&task.task_id).unwrap();
+        let result = hook(
+            &root,
+            "pi",
+            "pre-tool-use",
+            json!({"session_id":requested_session,"task_id":task.task_id,
+                "attempt_id":task.attempt_id,"tool_name":"Write","tool_use_id":"foreign"}),
+        );
+        assert_eq!(result["decision"], "deny");
+        assert_eq!(store.events(&task.task_id).unwrap(), before);
+        assert_eq!(store.status(&task.task_id).unwrap(), task);
+    }
+}
+
+#[test]
+fn unbound_pi_branch_must_not_reuse_an_otherwise_editable_session_task() {
+    let root = repo("unbound-editable");
+    let task = prepared_session(&root, "pi", "s");
+    let store = pixel_task::Store::open(&root).unwrap();
+    let before = store.events(&task.task_id).unwrap();
+    let result = hook(
+        &root,
+        "pi",
+        "pre-tool-use",
+        json!({"session_id":"s","branch_unbound":true,"tool_name":"Write","tool_use_id":"unbound"}),
+    );
+    assert_eq!(result["decision"], "deny");
+    assert_eq!(store.events(&task.task_id).unwrap(), before);
+    assert_eq!(store.status(&task.task_id).unwrap(), task);
+    let bound = hook(
+        &root,
+        "pi",
+        "pre-tool-use",
+        json!({"session_id":"s","task_id":task.task_id,"attempt_id":task.attempt_id,
+            "tool_name":"Write","tool_use_id":"bound"}),
+    );
+    assert_eq!(bound["decision"], "allow");
+}
+
+#[test]
+fn coding_prompt_reuses_active_tasks_but_replaces_terminal_tasks() {
+    let root = repo("prompt-after-terminal");
+    let first = hook(
+        &root,
+        "pi",
+        "prompt-submit",
+        json!({"session_id":"s","event_id":"first","prompt":"fix source"}),
+    );
+    let id = first["task_id"].as_str().unwrap();
+    let active = hook(
+        &root,
+        "pi",
+        "prompt-submit",
+        json!({"session_id":"s","event_id":"active","prompt":"fix another file"}),
+    );
+    assert_eq!(active["task_id"], id);
+    good(&root, &["task", "cancel", id, "--json"]);
+    let question = hook(
+        &root,
+        "pi",
+        "prompt-submit",
+        json!({"session_id":"s","event_id":"question","prompt":"How does this work?"}),
+    );
+    assert_eq!(question["task_id"], id);
+    assert_eq!(question["phase"], "cancelled");
+    let next = hook(
+        &root,
+        "pi",
+        "prompt-submit",
+        json!({"session_id":"s","event_id":"next","prompt":"fix another file"}),
+    );
+    let next_id = next["task_id"].as_str().unwrap();
+    assert_ne!(next_id, id);
+    let store = pixel_task::Store::open(&root).unwrap();
+    assert_eq!(
+        store.status(id).unwrap().phase,
+        pixel_task::Phase::Cancelled
+    );
+    assert_eq!(
+        store.status(next_id).unwrap().contract.objective,
+        "fix another file"
+    );
+    assert_eq!(
+        store.find_session("pi", "s").unwrap().unwrap().task_id,
+        next_id
+    );
+}
+
+#[test]
+fn only_mutating_tool_outcomes_invalidate_live_preparation() {
+    for (event, tool, terminal) in [
+        ("post-tool-use", "Read", false),
+        ("session-start", "Read", false),
+        ("post-tool-use", "Write", true),
+    ] {
+        let root = repo(&format!("preserve-preparation-{event}-{tool}-{terminal}"));
+        let mut task = prepared_session(&root, "pi", "s");
+        let store = pixel_task::Store::open(&root).unwrap();
+        if terminal {
+            good(&root, &["task", "cancel", &task.task_id, "--json"]);
+            task = store.status(&task.task_id).unwrap();
+        }
+        std::fs::write(root.join("source.txt"), "external edit\n").unwrap();
+        let result = hook(
+            &root,
+            "pi",
+            event,
+            json!({"session_id":"s","event_id":"outcome","tool_name":tool,"tool_use_id":"tool"}),
+        );
+        assert_eq!(result["task_id"], task.task_id);
+        assert_eq!(result["phase"], serde_json::to_value(task.phase).unwrap());
+        let after = store.status(&task.task_id).unwrap();
+        assert_eq!(after.phase, task.phase);
+        assert_eq!(after.source, task.source);
+        assert_eq!(after.observations, task.observations);
+    }
+}
+
+#[test]
+fn explicit_cancellation_on_stop_prevents_automatic_continuation() {
+    let root = repo("stop-cancelled");
+    let started = hook(
+        &root,
+        "pi",
+        "prompt-submit",
+        json!({"session_id":"s","event_id":"prompt","prompt":"fix source"}),
+    );
+    let result = hook(
+        &root,
+        "pi",
+        "stop",
+        json!({"session_id":"s","event_id":"stop","cancelled":true}),
+    );
+    assert_eq!(result["decision"], "allow");
+    assert_eq!(result["phase"], "cancelled");
+    assert_eq!(
+        result["reason"],
+        "cancelled; automatic continuation stopped"
+    );
+    let store = pixel_task::Store::open(&root).unwrap();
+    let task = store.status(started["task_id"].as_str().unwrap()).unwrap();
+    assert_eq!(task.phase, pixel_task::Phase::Cancelled);
+    assert_eq!(task.budget.continuations, 0);
+}
+
+#[test]
+fn mutation_without_repository_checks_returns_the_existing_contract_gate() {
+    let root = repo("unconfigured-preparation");
+    let task = hook(
+        &root,
+        "pi",
+        "prompt-submit",
+        json!({"session_id":"s","event_id":"prompt","prompt":"fix source"}),
+    );
+    let result = hook(
+        &root,
+        "pi",
+        "pre-tool-use",
+        json!({"session_id":"s","tool_name":"Write","tool_use_id":"edit"}),
+    );
+    assert_eq!(result["decision"], "deny");
+    assert_eq!(result["task_id"], task["task_id"]);
+    assert!(
+        result["reason"]
+            .as_str()
+            .unwrap()
+            .contains("repository verification checks are not configured")
+    );
+    let store = pixel_task::Store::open(&root).unwrap();
+    let task = store.status(task["task_id"].as_str().unwrap()).unwrap();
+    assert!(task.contract.checks.is_empty());
+    assert_eq!(task.source, None);
+    assert!(task.observations.is_empty());
+}
+
+#[test]
+fn task_mutation_should_require_the_exact_expected_revision() {
+    let root = repo("expected-revision");
+    let id = begin(&root);
+    let store = pixel_task::Store::open(&root).unwrap();
+    let before = store.status(&id).unwrap();
+    let wrong = (before.revision + 1).to_string();
+    let rejected = command(
+        &root,
+        &[
+            "task",
+            "cancel",
+            &id,
+            "--expected-revision",
+            &wrong,
+            "--json",
+        ],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("task revision conflict"));
+    assert_eq!(store.status(&id).unwrap(), before);
+    let accepted = good(
+        &root,
+        &[
+            "task",
+            "cancel",
+            &id,
+            "--expected-revision",
+            &before.revision.to_string(),
+            "--json",
+        ],
+    );
+    assert_eq!(accepted["phase"], "cancelled");
+    assert_eq!(accepted["revision"], before.revision + 1);
+}
+
 #[test]
 fn task_should_verify_and_finish_an_unborn_repository() {
     let root = Scratch::for_test("task-cli", "unborn");
@@ -152,6 +424,31 @@ fn task_should_verify_and_finish_an_unborn_repository() {
             .head
             .is_none()
     );
+}
+
+#[test]
+fn review_should_reject_staged_and_unstaged_whitespace_errors_independently() {
+    for staged in [false, true] {
+        let root = repo(if staged {
+            "staged-whitespace"
+        } else {
+            "unstaged-whitespace"
+        });
+        git(&root, &["config", "core.whitespace", "blank-at-eol"]);
+        std::fs::write(root.join("source.txt"), "correct \n").unwrap();
+        if staged {
+            git(&root, &["add", "source.txt"]);
+        }
+        let id = begin(&root);
+        good(&root, &["task", "prepare", &id, "--json"]);
+        let reviewed = good(&root, &["task", "review", &id, "--json"]);
+        assert_eq!(reviewed["review"]["passed"], false, "staged={staged}");
+        assert_eq!(
+            reviewed["review"]["findings"],
+            json!(["git diff --check failed"]),
+            "staged={staged}"
+        );
+    }
 }
 
 #[test]
@@ -406,6 +703,27 @@ fn native_stop_should_publish_only_verified_completion_and_preserve_live_observa
         good(&root, &["task", "events", id, "--json"])["trajectory"]["coordinator_calls"],
         1
     );
+    let store = pixel_task::Store::open(&root).unwrap();
+    let complete = store.status(id).unwrap();
+    std::fs::write(root.join("source.txt"), "external edit after completion\n").unwrap();
+    let edit = hook(
+        &root,
+        "pi",
+        "pre-tool-use",
+        json!({"session_id":"s","tool_name":"Write","tool_use_id":"after-completion"}),
+    );
+    assert_eq!(edit["decision"], "deny");
+    assert_eq!(edit["task_id"], id);
+    assert_eq!(edit["phase"], "complete");
+    assert!(
+        edit["reason"]
+            .as_str()
+            .unwrap()
+            .contains("completed task needs a new task binding")
+    );
+    let after = store.status(id).unwrap();
+    assert_eq!(after.source, complete.source);
+    assert_eq!(after.observations, complete.observations);
 }
 
 #[test]

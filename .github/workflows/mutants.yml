@@ -193,10 +193,10 @@ jobs:
       # more than the shard's mutants. ubuntu-26.04 starts with 92 GB free
       # and a shard used at most 9 GB (cache, baseline, 20 mutants; runs
       # 36182035966, 36195319520, 36200090079), so the toolchains go only
-      # when an image leaves less than MIN_FREE_GB: about 5 GB of cache and
-      # baseline plus 0.2 GB a mutant puts the largest shard the plan allows
-      # (66 mutants, see MAX_SHARDS) near 25 GB, doubled here. A shard that
-      # still fills the disk fails the gate as `disk-full`, never passes.
+      # when an image leaves less than MIN_FREE_GB. This checks the root
+      # filesystem only: /tmp can have a separate, smaller capacity (see
+      # "Use disk-backed mutation temporary storage" below). A shard that
+      # still fills either filesystem fails as `disk-full`, never passes.
       - name: Free the runner's disk
         env:
           MIN_FREE_GB: 50
@@ -254,6 +254,16 @@ jobs:
         with:
           name: mutants-plan
 
+      # Ubuntu 26.04 mounts /tmp as tmpfs. Run 37098135319 lost ten mutants
+      # when cc could not create /tmp files, although / still had 88 GB free;
+      # /tmp held 4.5-4.6 GB after the affected shards. GCC and Rust respect
+      # TMPDIR, so put compiler and test scratch files on the runner's disk.
+      # RUNNER_TEMP is isolated per job and cleaned by the runner afterward.
+      - name: Use disk-backed mutation temporary storage
+        run: |
+          mkdir -p "$RUNNER_TEMP/pixel-mutants-tmp"
+          echo "TMPDIR=$RUNNER_TEMP/pixel-mutants-tmp" >> "$GITHUB_ENV"
+
       # --in-place: mutate the checkout itself instead of copying it (CI
       # discards the tree). --no-shuffle: mutants run in source order, so
       # two runs of the same diff produce the same log and annotations, and
@@ -275,7 +285,10 @@ jobs:
       # What the shard starts from and what it ends with, in the log: the
       # first thing to read when mutants turn `unviable` in a block.
       - name: Disk before the mutants
-        run: df -h / && sudo du -sh target ~/.cache/pixel "$RUNNER_TEMP" /tmp 2>&1 || true
+        run: |
+          df -h / /tmp "$TMPDIR"
+          df -i / /tmp "$TMPDIR"
+          sudo du -sh target ~/.cache/pixel "$RUNNER_TEMP" /tmp 2>&1 || true
 
       # --config: the plan's copy of this workflow's configuration, the one
       # the listing was made with (see "List the mutants the diff produces").
@@ -291,7 +304,10 @@ jobs:
 
       - name: Disk after the mutants
         if: always()
-        run: df -h / && sudo du -sh target ~/.cache/pixel "$RUNNER_TEMP" /tmp 2>&1 || true
+        run: |
+          df -h / /tmp "${TMPDIR:-$RUNNER_TEMP}"
+          df -i / /tmp "${TMPDIR:-$RUNNER_TEMP}"
+          sudo du -sh target ~/.cache/pixel "$RUNNER_TEMP" /tmp 2>&1 || true
 
       - name: Post job summary
         if: always()

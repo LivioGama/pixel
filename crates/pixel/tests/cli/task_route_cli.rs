@@ -32,11 +32,20 @@ impl Classifier {
         let server_count = count.clone();
         let server_stopped = stopped.clone();
         let (sender, requests) = mpsc::channel();
+        let (ready, started) = mpsc::sync_channel(0);
         let thread = std::thread::spawn(move || {
+            ready.send(()).unwrap();
             while !server_stopped.load(Ordering::SeqCst) {
-                let Ok((mut stream, _)) = listener.accept() else {
-                    std::thread::sleep(Duration::from_millis(5));
-                    continue;
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        // Park for far less than the 15ms warm-probe budget,
+                        // without busy-spinning or relying on TCP for shutdown.
+                        // Scheduling can still delay a wall-clock-bounded client.
+                        std::thread::park_timeout(Duration::from_micros(100));
+                        continue;
+                    }
+                    Err(error) => panic!("classifier fixture accept failed: {error}"),
                 };
                 stream.set_nonblocking(false).unwrap();
                 stream
@@ -51,7 +60,11 @@ impl Classifier {
                 let mut length = None;
                 loop {
                     let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
+                    assert_ne!(
+                        reader.read_line(&mut line).unwrap(),
+                        0,
+                        "classifier request ended before the headers were complete"
+                    );
                     if line == "\r\n" {
                         break;
                     }
@@ -90,6 +103,9 @@ impl Classifier {
                 let _ = stream.write_all(response.as_bytes());
             }
         });
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("classifier fixture must become ready");
         Self {
             base,
             count,
@@ -109,7 +125,10 @@ impl Classifier {
 impl Drop for Classifier {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::SeqCst);
-        self.thread.take().unwrap().join().unwrap();
+        let thread = self.thread.take().unwrap();
+        // Unpark cannot fail, and its token survives a race before park_timeout.
+        thread.thread().unpark();
+        thread.join().unwrap();
     }
 }
 
@@ -199,6 +218,11 @@ fn task_route_should_cache_the_prediction_and_reclassify_changed_source() {
         command(&root, &home, &task, "gates_classifier")
             .output()
             .unwrap(),
+    );
+    assert!(
+        !first["classifier"].is_null(),
+        "warm classifier fixture must produce a prediction before awaiting its request; route={first}; attempts={:?}",
+        events(&root, &task, "route_attempt")
     );
     let request = server.next_request();
     assert_eq!(request["state"], "fix source");

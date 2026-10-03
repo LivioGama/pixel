@@ -330,9 +330,9 @@ three policy arms, timeout/request-budget failures and actual gateway-network
 isolation:
 
 ```bash
-rtk proxy docker pull alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
-rtk proxy docker pull oven/bun@sha256:8956c7667fa17beb6e3c664115e66bdacfe502da5d99603626e74c197bdef160
-rtk proxy env PIXEL_EVAL_DOCKER_TEST_IMAGE=alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 PIXEL_EVAL_GATEWAY_TEST_IMAGE=oven/bun@sha256:8956c7667fa17beb6e3c664115e66bdacfe502da5d99603626e74c197bdef160 bun test eval/controlled.test.ts
+docker pull alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+docker pull oven/bun@sha256:8956c7667fa17beb6e3c664115e66bdacfe502da5d99603626e74c197bdef160
+PIXEL_EVAL_DOCKER_TEST_IMAGE=alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 PIXEL_EVAL_GATEWAY_TEST_IMAGE=oven/bun@sha256:8956c7667fa17beb6e3c664115e66bdacfe502da5d99603626e74c197bdef160 bun test eval/controlled.test.ts
 ```
 
 Without those two optional test-image variables, the unit fixtures run and

@@ -5666,6 +5666,94 @@ fn repo_install_should_hold_back_the_guard_beside_a_global_rtk_hook() {
     }
 }
 
+#[test]
+#[cfg(unix)]
+fn renamed_executable_task_gates_should_agree_between_repo_install_and_doctor() {
+    for shared in [false, true] {
+        for foreign in [false, true] {
+            let dir = TempDir::new().unwrap();
+            let home = dir.path().join("home");
+            let repo = dir.path().join("repo");
+            fs::create_dir_all(home.join(".claude")).unwrap();
+            fs::create_dir_all(repo.join(".claude")).unwrap();
+            git(&repo, &["init", "-q"]);
+            let mut options = repo_install_options(&repo, &home);
+            let exe = home.join("our-agent");
+            fs::rename(options.executable_path.as_ref().unwrap(), &exe).unwrap();
+            options.executable_path = Some(exe.clone());
+            let task = task_hook_group(&exe, "claude", "pre-tool-use");
+            let mut groups = vec![task];
+            if foreign {
+                groups.push(serde_json::json!({"matcher":"Bash","hooks":[{
+                    "type":"command","command":"keep-security-check"
+                }]}));
+            }
+            let inherited = if shared {
+                repo.join(".claude/settings.json")
+            } else {
+                home.join(".claude/settings.json")
+            };
+            let settings = serde_json::json!({"model":"keep-model","hooks":{"PreToolUse":groups}});
+            fs::write(&inherited, serde_json::to_vec(&settings).unwrap()).unwrap();
+            let report = install(&options).unwrap();
+            let step = report
+                .steps
+                .iter()
+                .find(|step| step.id == "hooks.claude")
+                .unwrap();
+            let expected = if foreign {
+                CheckStatus::Yellow
+            } else {
+                CheckStatus::Green
+            };
+            assert_eq!(
+                step.status,
+                if foreign {
+                    StepStatus::Yellow
+                } else {
+                    StepStatus::Green
+                },
+                "shared={shared}, foreign={foreign}: {step:?}"
+            );
+            assert_eq!(read_json(&inherited), settings);
+            let local = read_json(&repo.join(".claude/settings.local.json"));
+            let pre = local["hooks"]["PreToolUse"].as_array().unwrap();
+            if foreign {
+                assert!(pre.is_empty(), "{local}");
+            } else {
+                assert_eq!(pre.len(), 1);
+                assert_eq!(
+                    pre[0]["hooks"][0]["command"],
+                    format!(
+                        "'{}' run-hook guard --provider claude",
+                        exe.canonicalize().unwrap().display()
+                    )
+                );
+            }
+            let report = doctor(&DoctorOptions {
+                home: Some(home),
+                repo_root: Some(repo),
+                executable_path: Some(exe),
+                only: vec!["repo.claude-hooks".into()],
+                ..Default::default()
+            })
+            .unwrap();
+            let checked = check(&report, "repo.claude-hooks");
+            assert_eq!(
+                checked.status, expected,
+                "shared={shared}, foreign={foreign}: {checked:?}"
+            );
+            if foreign {
+                assert!(
+                    checked.summary.contains("keep-security-check"),
+                    "{checked:?}"
+                );
+                assert!(!checked.summary.contains("task-event"), "{checked:?}");
+            }
+        }
+    }
+}
+
 /// A personal Bash hook (`/usr/local/bin/my-guard`) keeps the Claude guard
 /// out, on purpose: two rewriters on one shell call race. The user must still
 /// learn what to do about it, from install and afterwards from doctor, which
