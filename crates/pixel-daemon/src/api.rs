@@ -6640,6 +6640,58 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// `op_targets_mode`의 rerank 블록(`if !fact_mode`)과 그 안의
+    /// `mentions_tests` 토큰화 게이트를 데몬 응답 수준에서 고정한다.
+    /// 내용이 동일하고 파일명에 같은 키워드("login")를 포함한 두 파일은
+    /// 기저 점수가 같으므로, 페널티가 적용되는가("tests"를 언급하지 않은
+    /// 과제 → test 파일 강등), 언급 시 게이트가 꺼지는가(경로 오름차순
+    /// 동순위 → 알파벳상 앞선 test 파일이 1위)만 순서를 바꾼다.
+    #[test]
+    fn targets_rerank_demotes_test_path_only_when_task_is_not_about_tests() {
+        let root = tmpdir("targets-test-penalty");
+        std::fs::write(root.join("a_login_test.rs"), "pub fn login() {}\n").unwrap();
+        std::fs::write(root.join("z_login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut svc = Service::open(&root).unwrap();
+        let mut top_path = |task: &str| {
+            let resp = svc.handle(Request::Targets {
+                task: task.into(),
+                limit: Some(5),
+                max_tier: None,
+                precision: false,
+            });
+            assert!(resp.ok, "targets({task}): {:?}", resp.error);
+            resp.data()
+                .get("targets")
+                .and_then(Value::as_array)
+                .and_then(|t| t.first())
+                .and_then(|t| t["path"].as_str())
+                .map(String::from)
+                .expect("at least one target")
+        };
+
+        // 과제가 tests/specs를 언급하지 않으면: test 파일은 0.7로 강등되어
+        // 동점이던 prod 파일 아래로 내려간다.
+        assert_eq!(
+            top_path("change login"),
+            "z_login.rs",
+            "non-test task must demote the test file below the tied production file"
+        );
+
+        // 과제가 tests를 언급하면: 페널티가 게이트 OFF되어 동순위가 경로
+        // 오름차순으로 결정된다(a_login_test.rs < z_login.rs).
+        assert_eq!(
+            top_path("change login tests"),
+            "a_login_test.rs",
+            "test-naming task must gate the penalty off, leaving the path-ascending tie order"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn targets_facts_refuse_missing_graph_without_building_it() {
         let root = tmpdir("targets-facts-missing-graph");
@@ -8152,10 +8204,18 @@ mod tests {
         let test_path = "tests/login_test.rs";
         let prod_path = "login.rs";
         // Task not about tests: the test path is demoted, production untouched.
-        assert_eq!(test_penalty(test_path, false), 0.7, "non-test task demotes test file");
+        assert_eq!(
+            test_penalty(test_path, false),
+            0.7,
+            "non-test task demotes test file"
+        );
         assert_eq!(test_penalty(prod_path, false), 1.0);
         // Task that names tests: the test path is the better target, no demotion.
-        assert_eq!(test_penalty(test_path, true), 1.0, "test-naming task keeps test file");
+        assert_eq!(
+            test_penalty(test_path, true),
+            1.0,
+            "test-naming task keeps test file"
+        );
         assert_eq!(test_penalty(prod_path, true), 1.0);
     }
 

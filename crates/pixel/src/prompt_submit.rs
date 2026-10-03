@@ -1185,9 +1185,11 @@ mod tests {
         // A 512-byte path is exactly at the skip cap and is still emitted;
         // a 513-byte path is dropped, leaving no rows.
         let at_cap = serde_json::json!({"targets":[{"path":"a".repeat(512)}]});
-        assert!(render_task_context(&at_cap, TASK_CONTEXT_BYTES)
-            .unwrap()
-            .contains(&"a".repeat(512)));
+        assert!(
+            render_task_context(&at_cap, TASK_CONTEXT_BYTES)
+                .unwrap()
+                .contains(&"a".repeat(512))
+        );
         let over_cap = serde_json::json!({"targets":[{"path":"a".repeat(513)}]});
         assert!(render_task_context(&over_cap, TASK_CONTEXT_BYTES).is_none());
     }

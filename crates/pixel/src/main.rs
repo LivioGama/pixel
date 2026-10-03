@@ -7977,10 +7977,8 @@ mod tests {
         let owned_exit = std::cell::Cell::new(None);
         // Isolated git repo: no pre-existing `.pixel/targets.json`, and the
         // read-only pass-through path (no tuning flags) must not create one.
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-read-only-tunings-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pixel-read-only-tunings-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let root = dir.as_path();
@@ -7993,17 +7991,19 @@ mod tests {
                 .success()
         );
 
-        let base = || Command::ScopeTask(ScopeTask {
-            task: Some("a task".into()),
-            path: root.to_path_buf(),
-            json: false,
-            limit: None,
-            no_manifest: false,
-            read_only: true,
-            clear: false,
-            max_tier: None,
-            precision: false,
-        });
+        let base = || {
+            Command::ScopeTask(ScopeTask {
+                task: Some("a task".into()),
+                path: root.to_path_buf(),
+                json: false,
+                limit: None,
+                no_manifest: false,
+                read_only: true,
+                clear: false,
+                max_tier: None,
+                precision: false,
+            })
+        };
 
         let reject = |read_only: bool, max_tier: Option<&str>, precision: bool| {
             let mut cmd = base();
@@ -8031,7 +8031,10 @@ mod tests {
         // `no_manifest || read_only`).
         assert!(reject(true, None, false).is_none());
         assert!(
-            !root.join(pixel_index::index::SHARD_DIR).join("targets.json").exists(),
+            !root
+                .join(pixel_index::index::SHARD_DIR)
+                .join("targets.json")
+                .exists(),
             "a read-only scope-task must never write a targets manifest"
         );
         let _ = std::fs::remove_dir_all(&dir);
