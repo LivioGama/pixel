@@ -26,7 +26,10 @@ request exists.
 - Before pushing Rust, the tracked hook fetches the base, requires
   `cargo check --all-targets`, then runs the remote mutation campaign against
   that exact base and candidate. Do not bypass it to discover ordinary compile
-  failures in CI. CI remains the independent merge verdict.
+  failures in CI. CI remains the independent merge verdict. The baseline rung is
+  required before the remote verdict is trusted: a push blocked on a compile
+  failure carries no remote verdict, and a remote verdict counts only for a
+  candidate whose baseline passed.
 - Classify red results before editing: a mutation **baseline failure** means
   compilation or tests failed before mutants were judged; `MISSED` needs a
   contract test or justified skip; `TIMEOUT`, unviable and infrastructure

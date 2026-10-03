@@ -45,9 +45,10 @@ run remains an explicit request only.
 
 Fetch, rebase and run `pixel review-gate` as required by `review-gate.md`.
 Push the same candidate once. For Rust changes, the hook performs the
-all-target baseline compile before the remote mutation campaign. A green push
-has already received the remote mutation verdict; CI independently validates
-the current PR head.
+all-target baseline compile before the remote mutation campaign; that baseline
+is a required rung, and the remote verdict is trusted only for a candidate
+that passed it. A green push has already received the remote mutation verdict;
+CI independently validates the current PR head.
 
 ## 4. Triage instead of retrying blindly
 
