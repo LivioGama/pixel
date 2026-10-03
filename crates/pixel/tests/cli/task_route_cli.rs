@@ -1,7 +1,7 @@
 //! Real CLI routing against a bounded fake classifier; no global environment mutation.
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -16,7 +16,6 @@ use super::support::{Scratch, git, pixel_command};
 
 struct Classifier {
     base: String,
-    address: SocketAddr,
     count: Arc<AtomicUsize>,
     requests: mpsc::Receiver<Value>,
     stopped: Arc<AtomicBool>,
@@ -26,8 +25,8 @@ struct Classifier {
 impl Classifier {
     fn start(delay: Duration, illegal: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let base = format!("http://{address}");
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
         let count = Arc::new(AtomicUsize::new(0));
         let stopped = Arc::new(AtomicBool::new(false));
         let server_count = count.clone();
@@ -37,12 +36,18 @@ impl Classifier {
         let thread = std::thread::spawn(move || {
             ready.send(()).unwrap();
             while !server_stopped.load(Ordering::SeqCst) {
-                // Classification has a production wall-clock budget: let the
-                // kernel wake this fixture instead of adding polling latency.
-                let (mut stream, _) = listener.accept().unwrap();
-                if server_stopped.load(Ordering::SeqCst) {
-                    break;
-                }
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        // Park for far less than the 15ms warm-probe budget,
+                        // without busy-spinning or relying on TCP for shutdown.
+                        // Scheduling can still delay a wall-clock-bounded client.
+                        std::thread::park_timeout(Duration::from_micros(100));
+                        continue;
+                    }
+                    Err(error) => panic!("classifier fixture accept failed: {error}"),
+                };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -55,7 +60,11 @@ impl Classifier {
                 let mut length = None;
                 loop {
                     let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
+                    assert_ne!(
+                        reader.read_line(&mut line).unwrap(),
+                        0,
+                        "classifier request ended before the headers were complete"
+                    );
                     if line == "\r\n" {
                         break;
                     }
@@ -94,10 +103,11 @@ impl Classifier {
                 let _ = stream.write_all(response.as_bytes());
             }
         });
-        started.recv().unwrap();
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("classifier fixture must become ready");
         Self {
             base,
-            address,
             count,
             requests,
             stopped,
@@ -115,9 +125,10 @@ impl Classifier {
 impl Drop for Classifier {
     fn drop(&mut self) {
         self.stopped.store(true, Ordering::SeqCst);
-        // Release a blocking accept without imposing a polling interval on requests.
-        let _ = TcpStream::connect(self.address);
-        self.thread.take().unwrap().join().unwrap();
+        let thread = self.thread.take().unwrap();
+        // Unpark cannot fail, and its token survives a race before park_timeout.
+        thread.thread().unpark();
+        thread.join().unwrap();
     }
 }
 
