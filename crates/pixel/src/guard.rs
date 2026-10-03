@@ -3164,7 +3164,7 @@ fn pixel_invocation_in_tokens(tokens: &[&str], env: Option<String>) -> Option<Pi
     for (j, tok) in tokens.iter().enumerate() {
         let prefix = (tok.contains('=') && !tok.starts_with('-'))
             || tok.starts_with('-')
-            || matches!(*tok, "env" | "sudo" | "command" | "time" | "xargs");
+            || matches!(*tok, "env" | "sudo" | "command" | "time" | "xargs" | "rtk");
         if !prefix {
             break;
         }
@@ -6526,6 +6526,15 @@ mod tests {
             ("bash -lc pixel repo-state .", "repo-state ."),
             ("bash -lc 'cd /r && pixel impact f'", "impact f"),
             ("xargs -0 pixel context", "context"),
+            // `rtk` is the global shell wrapper every command in this
+            // environment runs through; the relay must reach the pixel call
+            // past it, or it goes silent on the one form agents actually use.
+            ("rtk pixel status .", "status ."),
+            ("cd /r && rtk pixel impact f", "impact f"),
+            (
+                "rtk pixel find-code composed guard foreign denial",
+                "find-code composed guard foreign denial",
+            ),
         ] {
             assert_eq!(
                 pixel_invocation(command).map(|i| i.args).as_deref(),
