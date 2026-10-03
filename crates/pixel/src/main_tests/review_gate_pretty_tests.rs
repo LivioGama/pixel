@@ -82,3 +82,41 @@ fn review_severity_rank_orders_critical_first() {
     assert_eq!(review_severity_rank("LOW"), 1);
     assert_eq!(review_severity_rank("anything-else"), 1);
 }
+
+/// A finding anchored to a file but no line prints the path bare — deleting
+/// the (Some(file), None) arm would let it fall through to "repo-wide".
+#[test]
+fn a_finding_with_a_file_but_no_line_renders_the_path() {
+    let out = pretty_review_gate(&report(serde_json::json!([{
+        "rule": "changed-symbol-without-test",
+        "severity": "MEDIUM",
+        "file": "src/lib.rs",
+        "evidence": "produce changed with no suggested test",
+        "fix_hint": "add a test",
+    }])))
+    .unwrap();
+    assert!(
+        out.starts_with("SUGGESTION src/lib.rs  changed-symbol-without-test\n"),
+        "{out:?}"
+    );
+}
+
+/// The gate trips exactly at the threshold: one rank below passes.
+#[test]
+fn review_gate_blocked_trips_at_the_threshold() {
+    let below = report(serde_json::json!([{"severity": "MEDIUM"}]));
+    let at = report(serde_json::json!([{"severity": "HIGH"}]));
+    let over = report(serde_json::json!([{"severity": "LOW"}, {"severity": "CRITICAL"}]));
+    let concern = ReviewFailOn::Concern.threshold();
+    assert!(!review_gate_blocked(&below, concern));
+    assert!(review_gate_blocked(&at, concern));
+    assert!(review_gate_blocked(&over, concern));
+    assert!(!review_gate_blocked(
+        &over,
+        ReviewFailOn::Blocker.threshold() + 1
+    ));
+    assert!(review_gate_blocked(
+        &over,
+        ReviewFailOn::Blocker.threshold()
+    ));
+}

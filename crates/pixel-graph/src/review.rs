@@ -117,8 +117,12 @@ fn branch_merge_base(runner: &GitRunner) -> Option<String> {
     let remote_default = runner
         .run_opt(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
         .map(|o| String::from_utf8_lossy(&o).trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "origin/main".to_string());
+        .unwrap_or_default();
+    let remote_default = if remote_default.is_empty() {
+        "origin/main".to_string()
+    } else {
+        remote_default
+    };
     if branch == remote_default || Some(branch.as_str()) == remote_default.strip_prefix("origin/") {
         return None;
     }
@@ -142,13 +146,14 @@ pub fn review(
     // tree on a feature branch reviews the whole branch diff.
     let mut base = base_ref.map(str::to_string);
     let mut diff_bytes = runner.diff_unified0(base.as_deref()).unwrap_or_default();
-    if base_ref.is_none() && diff_bytes.is_empty() {
-        if let Some(merge_base) = branch_merge_base(&runner) {
-            let branch_diff = runner.diff_unified0(Some(&merge_base)).unwrap_or_default();
-            if !branch_diff.is_empty() {
-                base = Some(merge_base);
-                diff_bytes = branch_diff;
-            }
+    if base_ref.is_none()
+        && diff_bytes.is_empty()
+        && let Some(merge_base) = branch_merge_base(&runner)
+    {
+        let branch_diff = runner.diff_unified0(Some(&merge_base)).unwrap_or_default();
+        if !branch_diff.is_empty() {
+            base = Some(merge_base);
+            diff_bytes = branch_diff;
         }
     }
     let diff = String::from_utf8_lossy(&diff_bytes).into_owned();
@@ -185,7 +190,7 @@ pub fn review(
             .then_with(|| a.line.cmp(&b.line))
             .then_with(|| a.rule.cmp(&b.rule))
     });
-    if findings.len() > MAX_FINDINGS {
+    if findings.get(MAX_FINDINGS).is_some() {
         caps.push(format!(
             "findings truncated at {MAX_FINDINGS}; lower-severity tail not listed"
         ));
@@ -347,7 +352,7 @@ fn consumers_outside_change(
             continue;
         };
         let edges = store.edges_to(sym.id, Some(EdgeKind::Calls))?;
-        if edges.len() > CONSUMER_CAP {
+        if edges.get(CONSUMER_CAP).is_some() {
             capped = true;
         }
         for edge in edges.into_iter().take(CONSUMER_CAP) {
@@ -932,5 +937,279 @@ mod tests {
         ] {
             assert!(!test_fixture_path(no), "{no}");
         }
+    }
+
+    /// The default branch never takes the merge-base path: on `main` with
+    /// `origin/main` behind, a clean tree reviews the (empty) working diff,
+    /// not the branch. A `||`→`&&` mutant at the default-branch check would
+    /// diff HEAD against origin/main and report the committed change.
+    #[test]
+    fn review_on_the_default_branch_never_diffs_the_remote() {
+        let dir = tmpdir("default-branch");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod a;\n").unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn produce() -> i32 { 1 }\n").unwrap();
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        git(root, &["branch", "-M", "main"]);
+        let base_oid = {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(root, &["update-ref", "refs/remotes/origin/main", &base_oid]);
+        // main carries a new commit the remote has not seen.
+        std::fs::write(root.join("src/a.rs"), "pub fn produce() -> i32 { 2 }\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "ahead"]);
+        let store = store_for(root);
+
+        let report = review(&store, root, None).expect("review runs");
+        assert_eq!(report.base, None, "{report:?}");
+        assert!(
+            report.findings.is_empty(),
+            "a clean tree on main has nothing uncommitted to review: {report:?}"
+        );
+    }
+
+    /// A dirty feature branch reviews the uncommitted diff: the committed
+    /// part of the branch is out of scope until the tree is clean. A
+    /// `&&`→`||` mutant at the empty-diff check would substitute the
+    /// merge-base diff and lose the uncommitted secret.
+    #[test]
+    fn a_dirty_feature_branch_reviews_the_uncommitted_diff() {
+        let dir = tmpdir("dirty-branch");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod a;\n").unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn produce() -> i32 { 1 }\n").unwrap();
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        git(root, &["checkout", "-qb", "feat/x"]);
+        std::fs::write(
+            root.join("src/a.rs"),
+            "pub fn produce() -> i32 { 2 }\nconst KEY: &str = \"ghp_committed\";\n",
+        )
+        .unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "branch"]);
+        let store = store_for(root);
+        std::fs::write(
+            root.join("src/a.rs"),
+            "pub fn produce() -> i32 { 2 }\nconst KEY: &str = \"ghp_committed\";\nconst LEAKED: &str = \"ghp_uncommitted\";\n",
+        )
+        .unwrap();
+
+        let report = review(&store, root, None).expect("review runs");
+        let secrets: Vec<u32> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule == "possible-secret")
+            .filter_map(|f| f.line)
+            .collect();
+        assert_eq!(
+            secrets,
+            vec![3],
+            "only the uncommitted line is in the working diff: {report:?}"
+        );
+        assert_eq!(report.base, None, "{report:?}");
+    }
+
+    /// A changed symbol exercised by a suggested test is not flagged as
+    /// untested. The `||`→`&&` mutant would require it to be *both* a test
+    /// path and covered, so `produce` would surface.
+    #[test]
+    fn a_changed_symbol_with_a_suggested_test_is_not_flagged() {
+        let report = ChangesReport {
+            base: "abc".into(),
+            changed_files: 1,
+            symbols: vec![ChangedSymbol {
+                uid: "u1".into(),
+                name: "produce".into(),
+                path: "src/a.rs".into(),
+                change: "modified".into(),
+                change_basis: "symbol".into(),
+                signature_changed: None,
+                processes: vec![],
+            }],
+            affected_processes: vec![],
+            consumers: vec![],
+            risk: "LOW".into(),
+            envelope_note: String::new(),
+            suggested_tests: vec![crate::changes::SuggestedTest {
+                file: "tests/produce_test.rs".into(),
+                matched_symbols: vec!["produce".into()],
+                via: "direct-caller".into(),
+                depth: 1,
+            }],
+            suggested_tests_lower_bound: false,
+            suggested_tests_note: String::new(),
+            uncovered_changes: vec![],
+            unanchored: vec![],
+            uncovered_lower_bound: false,
+            uncovered_note: String::new(),
+        };
+        let mut caps = Vec::new();
+        let findings = graph_findings(&report, &mut caps);
+        assert!(
+            findings.is_empty(),
+            "a suggested test covers the change: {findings:?}"
+        );
+    }
+
+    /// The scan reads exactly the added range: secrets outside it — even one
+    /// line past the end — are not findings. Off-by-one mutants in
+    /// `skip(start - 1)` / `take(end - start + 1)` surface here.
+    #[test]
+    fn secret_scan_reads_exactly_the_added_lines() {
+        let dir = tmpdir("scan-range");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        // line 2 becomes the only added line; the secrets at 1 and 4 are
+        // unchanged context in the diff.
+        std::fs::write(
+            root.join("src/f.rs"),
+            "const BEFORE: &str = \"ghp_before\";\nfn keep() {}\nconst OUTSIDE: &str = \"ghp_outside\";\n",
+        )
+        .unwrap();
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        std::fs::write(
+            root.join("src/f.rs"),
+            "const BEFORE: &str = \"ghp_before\";\nconst LEAKED: &str = \"ghp_inside\";\nfn keep() {}\nconst OUTSIDE: &str = \"ghp_outside\";\n",
+        )
+        .unwrap();
+        let diff = GitRunner::new(root).diff_unified0(None).unwrap();
+        let files = parse_diff(&String::from_utf8_lossy(&diff));
+        assert_eq!(files[0].added_ranges, vec![(2, 2)], "{files:?}");
+        let (findings, capped) = added_secret_findings(root, &files).expect("scan runs");
+        assert_eq!(
+            findings.iter().map(|f| f.line).collect::<Vec<_>>(),
+            vec![Some(2)],
+            "{findings:?}"
+        );
+        assert!(!capped);
+    }
+
+    /// A non-assigned, non-literal line that matches a token pattern is a
+    /// real leak candidate: the bare-literal downgrade needs BOTH no `=` and
+    /// a quote/paren/reference opener, so `helper(ghp_x)` stays CRITICAL. The
+    /// `&&`→`||` mutant would downgrade any `=`-free match.
+    #[test]
+    fn a_token_in_plain_code_stays_critical() {
+        let dir = tmpdir("bare-token");
+        let root = dir.path();
+        std::fs::write(
+            root.join("f.rs"),
+            "fn go() {\n    helper(ghp_abcdef1234567890);\n}\n",
+        )
+        .unwrap();
+        let text = [
+            "diff --git a/f.rs b/f.rs",
+            "index 1111111..2222222 100644",
+            "--- a/f.rs",
+            "+++ b/f.rs",
+            "@@ -1,1 +1,2 @@",
+            " ctx",
+            "+added",
+        ]
+        .join("\n");
+        let files = parse_diff(&text);
+        let (findings, _) = added_secret_findings(root, &files).expect("scan runs");
+        let leaked: Vec<&ReviewFinding> = findings
+            .iter()
+            .filter(|f| f.rule == "possible-secret")
+            .collect();
+        assert_eq!(leaked.len(), 1, "{findings:?}");
+        assert_eq!(leaked[0].severity, "CRITICAL", "{leaked:?}");
+        assert_eq!(leaked[0].line, Some(2));
+    }
+
+    /// A secret on the line immediately above `#[cfg(test)]` is production
+    /// code, not fixture data: the region boundary is the attribute's
+    /// position plus one, so the line before it stays CRITICAL.
+    #[test]
+    fn a_secret_above_the_test_region_stays_critical() {
+        let dir = tmpdir("region-edge");
+        let root = dir.path();
+        std::fs::write(
+            root.join("f.rs"),
+            "const REAL: &str = \"ghp_live\";\n#[cfg(test)]\nmod tests {\n    const CASE: &str = \"ghp_fixture\";\n}\n",
+        )
+        .unwrap();
+        let text = [
+            "diff --git a/f.rs b/f.rs",
+            "index 1111111..2222222 100644",
+            "--- a/f.rs",
+            "+++ b/f.rs",
+            "@@ -0,0 +1,5 @@",
+            "+a",
+            "+b",
+            "+c",
+            "+d",
+            "+e",
+        ]
+        .join("\n");
+        let files = parse_diff(&text);
+        let (findings, _) = added_secret_findings(root, &files).expect("scan runs");
+        let at = |line: u32| {
+            findings
+                .iter()
+                .find(|f| f.line == Some(line))
+                .unwrap_or_else(|| panic!("no finding at line {line}: {findings:?}"))
+        };
+        assert_eq!(at(1).severity, "CRITICAL", "above cfg(test): {findings:?}");
+        assert_eq!(at(4).severity, "MEDIUM", "inside cfg(test): {findings:?}");
+    }
+
+    /// The file cap counts only files that were scanned. A deleted entry is
+    /// skipped before the counter moves; a `||`→`&&` mutant lets it consume
+    /// budget, and `+=`→`*=` makes the cap unreachable.
+    #[test]
+    fn the_secret_scan_file_cap_counts_only_scanned_files() {
+        let dir = tmpdir("secret-cap");
+        let root = dir.path();
+        let mut diff_lines = vec![
+            "diff --git a/gone.rs b/gone.rs".to_string(),
+            "deleted file mode 100644".to_string(),
+            "--- a/gone.rs".to_string(),
+            "+++ /dev/null".to_string(),
+            "@@ -1,1 +0,0 @@".to_string(),
+            "-x".to_string(),
+            String::new(),
+        ];
+        // CAP+1 modified files; only the last *scanned* one carries a secret.
+        // Normal: the deleted entry is skipped, files f0..f{CAP-1} are read,
+        // f{CAP} hits the cap -> 1 finding, capped. `||`→`&&` counts the
+        // deleted file, so f{CAP-1} (the secret) breaks on the cap instead.
+        for i in 0..=SECRET_FILES_CAP {
+            let name = format!("f{i}.rs");
+            let body = if i == SECRET_FILES_CAP - 1 {
+                "const K: &str = \"ghp_zz\";\n"
+            } else {
+                "fn keep() {}\n"
+            };
+            std::fs::write(root.join(&name), body).unwrap();
+            diff_lines.extend([
+                format!("diff --git a/{name} b/{name}"),
+                "index 1111111..2222222 100644".to_string(),
+                format!("--- a/{name}"),
+                format!("+++ b/{name}"),
+                "@@ -0,0 +1,1 @@".to_string(),
+                "+added".to_string(),
+            ]);
+        }
+        let files = parse_diff(&diff_lines.join("\n"));
+        let (findings, capped) = added_secret_findings(root, &files).expect("scan runs");
+        assert_eq!(findings.len(), 1, "f199 was scanned: {findings:?}");
+        assert!(capped, "the file past the cap is reported as capped");
     }
 }

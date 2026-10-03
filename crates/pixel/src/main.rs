@@ -2647,6 +2647,21 @@ fn symbol_line(s: &Value) -> String {
     )
 }
 
+/// Whether the worst finding in the report meets the `--fail-on` threshold.
+/// Separated from the match arm so the boundary is unit-testable.
+fn review_gate_blocked(data: &Value, threshold: u8) -> bool {
+    let worst = data
+        .get("findings")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|f| f.get("severity").and_then(Value::as_str))
+        .map(review_severity_rank)
+        .max()
+        .unwrap_or(0);
+    worst >= threshold
+}
+
 /// Findings list for `review-gate`: severity, anchor, rule, witness, fix —
 /// the code review's problems and where they are, nothing else.
 fn pretty_review_gate(d: &Value) -> Option<String> {
@@ -5636,19 +5651,10 @@ fn run_command(
             json,
         } => {
             let data = execute(&path, Request::ReviewGate { base }, false)?;
-            if let Some(fail_on) = fail_on {
-                let worst = data
-                    .get("findings")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|f| f.get("severity").and_then(Value::as_str))
-                    .map(review_severity_rank)
-                    .max()
-                    .unwrap_or(0);
-                if worst >= fail_on.threshold() {
-                    owned_exit.set(Some(1));
-                }
+            if let Some(fail_on) = fail_on
+                && review_gate_blocked(&data, fail_on.threshold())
+            {
+                owned_exit.set(Some(1));
             }
             finish_graph_cmd(data, json, pretty_review_gate)?;
             Ok(())

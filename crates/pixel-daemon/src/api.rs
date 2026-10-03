@@ -3326,7 +3326,7 @@ pub const RETRIEVAL_OPS: &[&str] = &[
     "uses",
     "trace",
     "changes",
-    "review-gate",
+    "review_gate",
     "context",
     "symbol",
     "processes",
@@ -3437,7 +3437,7 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
     let source = match op_name {
         "search" => "text index",
         "targets" | "resolve" => "text index + code graph",
-        "changes" | "review-gate" => "code graph + working-tree diff",
+        "changes" | "review_gate" => "code graph + working-tree diff",
         _ => "code graph",
     };
     let mut basis = String::from(source);
@@ -5273,6 +5273,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// `review_gate` answers with the finding list, not an empty default:
+    /// the daemon-side mutants (`op_review_gate` / `bridge::review` →
+    /// `Ok(Default::default())`) both collapse to a missing/empty report.
+    #[test]
+    fn review_gate_reports_the_uncommitted_secret() {
+        let root = tmpdir("review-gate-op");
+        std::fs::write(root.join("a.rs"), "pub fn idle() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        std::fs::write(
+            root.join("a.rs"),
+            "pub fn idle() {}\nconst K: &str = \"ghp_abcdef1234567890\";\n",
+        )
+        .unwrap();
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(Request::ReviewGate { base: None });
+        assert!(resp.ok, "{resp:?}");
+        let findings = resp.data()["findings"].as_array().unwrap();
+        assert!(
+            findings.iter().any(|f| f["rule"] == "possible-secret"),
+            "{:?}",
+            resp.data()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn ping_reports_daemon_protocol_version() {
         let root = tmpdir("protocol-version");
@@ -6646,7 +6673,7 @@ mod tests {
                     include_tests: false,
                 },
             ),
-            ("review-gate", Request::ReviewGate { base: None }),
+            ("review_gate", Request::ReviewGate { base: None }),
             (
                 "context",
                 Request::Context {
