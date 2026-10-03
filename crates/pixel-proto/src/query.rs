@@ -484,13 +484,17 @@ mod tests {
             LocateStatus::Located
         );
         assert_eq!(locate_status(Some("t0"), &one, true), LocateStatus::Located);
+        let partial = [LocateCandidate {
+            reasons: vec!["word overlap: thing".into()],
+            ..candidate("a.rs", Some("alpha"), 0.4)
+        }];
         assert_eq!(
-            locate_status(Some("t2"), &one, true),
+            locate_status(Some("t2"), &partial, true),
             LocateStatus::NeedsSearch,
             "a partial word overlap is no lead"
         );
         let whole_phrase = [LocateCandidate {
-            reasons: vec!["word overlap: a, b".into(), "substring match".into()],
+            reasons: vec!["substring match".into()],
             ..candidate("a.rs", Some("alpha"), 0.8)
         }];
         assert_eq!(
