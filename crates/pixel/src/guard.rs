@@ -296,6 +296,11 @@ pub enum Provider {
     Zcode,
     /// Uses toolCall input and decision/reason output; no input rewrites.
     Antigravity,
+    /// OpenCode's `tool.execute.before` plugin hook. The host applies
+    /// `hookSpecificOutput.updatedInput` by mutating the call's arguments and
+    /// blocks on `permissionDecision: "deny"` by catching the plugin's throw,
+    /// so this provider both rewrites and denies like Claude and Codex.
+    Opencode,
 }
 
 const MANIFEST_MAX_AGE_SECS: u64 = 24 * 3600;
@@ -561,6 +566,8 @@ fn provider_rewrite_with(
         ),
         Provider::Devin => tool == "exec" || tool == "Bash",
         Provider::Zcode => tool == "Bash" || tool == "exec",
+        // OpenCode names the same tools as Claude but lowercases them.
+        Provider::Opencode => matches!(tool, "bash" | "Bash"),
         // Antigravity has no documented input rewrite contract.
         Provider::Antigravity => return None,
     };
@@ -623,6 +630,31 @@ fn policy_mode(payload: &Value) -> crate::config_cmd::PolicyMode {
     crate::config_cmd::policy(policy_root(payload).as_deref())
 }
 
+/// OpenCode's plugin hook hands over the tool call as it names it internally:
+/// a lowercase tool id (`bash`, `read`, `grep`) and camelCase arguments
+/// (`filePath`). Every arm in [`enforce_reason`] is written against the Claude
+/// spelling, so the two are aliased here — once — instead of doubling each
+/// pattern. `file_path` is only written when absent, so an argument the host
+/// already sent under a name this function also knows is never overwritten.
+fn opencode_tool_input(mut payload: Value) -> Value {
+    if let Some(Value::String(tool)) = payload.get("tool_name")
+        && tool.chars().next().is_some_and(char::is_lowercase)
+    {
+        payload["tool_name"] = Value::String(tool.to_lowercase());
+    }
+    let Some(input) = payload.get_mut("tool_input").and_then(Value::as_object_mut) else {
+        return payload;
+    };
+    for (from, to) in [("filePath", "file_path")] {
+        if !input.contains_key(to)
+            && let Some(value) = input.get(from)
+        {
+            input.insert(to.to_string(), value.clone());
+        }
+    }
+    payload
+}
+
 /// Normalize Antigravity's documented toolCall payload at the provider boundary.
 fn provider_payload(provider: Provider, mut payload: Value) -> Value {
     if provider == Provider::Antigravity
@@ -667,6 +699,11 @@ fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
     if provider == Provider::Claude {
         return None;
     }
+    let payload = &if provider == Provider::Opencode {
+        opencode_tool_input(payload.clone())
+    } else {
+        payload.clone()
+    };
     let event = payload
         .get("hook_event_name")
         .and_then(Value::as_str)
@@ -7556,6 +7593,97 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// OpenCode names the tool lowercase and the path camelCase, because that
+    /// is what its `tool.execute.before` hook receives. Measured against
+    /// opencode 1.18.34, not assumed: `input.tool` was `"bash"` and the
+    /// arguments carried `filePath`. Both aliases have to reach the arms
+    /// written for the Claude spelling, or the policy silently declines every
+    /// call and the host is left with advice it can ignore.
+    #[test]
+    fn opencode_lowercase_tool_and_camel_path_reach_the_same_arms() {
+        let repo = scratch_repo("opencode-alias");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".pixel")).unwrap();
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "read",
+            "tool_input": {"filePath": repo.join("secret.ts")},
+            "cwd": repo,
+        });
+        let aliased = opencode_tool_input(payload);
+        assert_eq!(aliased["tool_name"], "read");
+        assert_eq!(
+            aliased["tool_input"]["file_path"],
+            repo.join("secret.ts").to_string_lossy().as_ref()
+        );
+        // An argument already spelled the way the arms read is left alone.
+        let pinned = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {"file_path": "keep.ts", "filePath": "ignore.ts"},
+        });
+        assert_eq!(
+            opencode_tool_input(pinned)["tool_input"]["file_path"],
+            "keep.ts"
+        );
+        // A tool name that is already Claude-spelled is untouched: the
+        // lowercase rule is what decides, not the provider being OpenCode.
+        let untouched = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {"filePath": "x.ts"},
+        });
+        assert_eq!(opencode_tool_input(untouched)["tool_name"], "Read");
+    }
+
+    /// The reason OpenCode exists as a provider: its plugin hook can throw, so
+    /// unlike Claude (which keeps its own permission flow and never denies
+    /// here) it gets the rewrite *and* the deny path. Both envelopes are
+    /// asserted because the plugin reads a rewrite from `updatedInput` and a
+    /// denial from `permissionDecision` — a deny carrying no reason would
+    /// surface to the model as a bare failure.
+    #[test]
+    fn opencode_gets_both_the_rewrite_and_the_deny_claude_never_gets() {
+        let repo = scratch_repo("opencode-policy");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".pixel")).unwrap();
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "bash",
+            "tool_input": {"command": "rg needle src"},
+            "cwd": repo,
+        });
+        // The rewrite an OpenCode plugin applies by mutating the arguments.
+        let rewritten = provider_rewrite_with(Provider::Opencode, &payload, |_| false)
+            .expect("a rewritable search is rewritten for OpenCode");
+        let specific = &rewritten["hookSpecificOutput"];
+        assert_eq!(specific["hookEventName"], "PreToolUse");
+        assert!(
+            specific["updatedInput"]["command"]
+                .as_str()
+                .is_some_and(|c| c.starts_with("pixel "))
+        );
+        // Codex and zcode additionally require `allow` to accompany the
+        // rewrite; OpenCode's host owns its own permission answer.
+        assert!(specific.get("permissionDecision").is_none());
+        // The denial envelope, with the reason the model is shown.
+        let denied = enforce_deny(Provider::Opencode, "repository discovery");
+        assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert!(
+            denied["hookSpecificOutput"]["permissionDecisionReason"]
+                .as_str()
+                .is_some_and(|r| r.contains("repository discovery"))
+        );
+        // Claude still never denies from this path.
+        let claude = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": {"file_path": repo.join("secret.ts")},
+            "cwd": repo,
+        });
+        assert_eq!(enforce_reason(Provider::Claude, &claude), None);
     }
 
     /// Every reader of a repository file is judged like `cat`, with or
