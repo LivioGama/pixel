@@ -4,14 +4,14 @@
 
 ## Mutation Testing Loop
 
-- Mutation testing runs in CI only: the `Mutants` workflow runs `cargo mutants --in-diff` against the PR's base and fails the pull request on any surviving mutant.
-- Do not run `cargo mutants` locally on your own initiative; it holds the tree (`--in-place`) and a laptop for up to hours, which is what the workflow's runners are for.
-- The local loop is: write the code in the shapes `.agents/rules/mutation-gate.md` describes, pass the fast gates (`cargo fmt`, `cargo test`, `cargo clippy`), push, open the PR, then read the `MISSED`/`TIMEOUT` lines: the `Mutants in diff` job summary lists every shard's survivors, and `gh run view --log` on a `Mutants shard k/n` job or the annotations give the detail.
+- Mutation testing runs twice, both off the laptop: the pre-push gate (`scripts/mutants-remote-gate.sh`) bundles the committed diff to the gate host (default the ssh alias `a2`) and blocks the push on the campaign's verdict against a warm `target/`; the `Mutants` workflow then re-runs the same diff's shards on the same host and fails the pull request on any surviving mutant.
+- Do not run `cargo mutants` locally on your own initiative; it holds the tree (`--in-place`) and a laptop for up to hours, which is what the gate host and the workflow's runners are for.
+- The loop is: write the code in the shapes `.agents/rules/mutation-gate.md` describes, pass the fast gates (`cargo fmt`, `cargo test`, `cargo clippy`), push. A blocked push already lists the `MISSED`/`TIMEOUT` lines from the gate host — fix them and push again; the traveling outcome cache (`target/mutants-preflight/`) makes the retry re-test only the survivors. A PR opened after a green push has `Mutants in diff` necessarily green.
 - A local `cargo mutants … -F '<fn>'` on one or two functions, bounded to a few minutes, is acceptable only when explicitly asked for.
+- When the gate host is down: `PIXEL_MUTANTS_GATE=off git push` skips the remote run and leaves the verdict to CI. Do not make that the habit — CI then waits 5 to 10 minutes to say what the gate would have said in one.
 
-Two habits keep that loop from being the bottleneck (from 2026-09-21 to 2026-09-26, 42 of 121 `Mutants` runs failed, each one a push-and-wait round trip of 5 to 10 minutes):
+One habit keeps the CI side from being the bottleneck:
 
-- **Review the list before the push.** `git diff <base>...HEAD > target/pr.diff && cargo mutants --list --in-diff target/pr.diff`, on a committed tree (a file rather than `<(…)`, which fish lacks), prints every mutant CI will run as `file:line: replace f -> T with …` in a second or two, building nothing. For each line, name the test that fails under it; a line without one gets its test, or its reasoned skip, before the push. The CI run then confirms instead of discovering.
 - **Do not wait on the job.** Start `gh pr checks <pr> --watch` as a background task and work on the next unit (the next pull request of the stack, another worktree) until it returns; then read the `MISSED` lines. Never a foreground `sleep` loop.
 
 For each `MISSED` line either:
