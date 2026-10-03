@@ -602,6 +602,8 @@ enum Command {
     WhatChanged {
         #[arg(default_value = ".")]
         path: PathBuf,
+        /// Compare the working tree against this ref. Without it the base is
+        /// the index (`base: "index"`): staged edits are not part of the diff.
         #[arg(long)]
         base: Option<String>,
         #[arg(long, default_value_t = 0)]

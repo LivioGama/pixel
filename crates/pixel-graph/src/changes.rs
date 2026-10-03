@@ -1,7 +1,10 @@
 //! Change detection — `git diff --unified=0` hunk ranges mapped onto indexed
-//! symbols, with affected processes and depth-1 upstream callers feeding risk.
+//! symbols, each judged against its file's base symbols, with affected
+//! processes, the call sites that may be affected, and depth-1 upstream
+//! callers feeding risk.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::path::Path;
 
 use serde::Serialize;
@@ -10,7 +13,7 @@ use crate::build::{Indexability, graph_file_cap, indexability};
 use crate::concept::is_test_path;
 use crate::extract::{extract_file, lang_of};
 use crate::impact::{file_path_by_id, processes_for_symbol, symbol_by_id};
-use crate::store::{EdgeKind, GraphStore};
+use crate::store::{EdgeKind, GraphStore, SymbolRow};
 use pixel_git::GitRunner;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -40,7 +43,40 @@ pub struct ChangedSymbol {
     pub path: String,
     /// "modified" | "added" | "deleted"
     pub change: String,
+    /// What `change` was judged from: "symbol" when the file's base side was
+    /// re-extracted and this symbol looked up in it, "file" when only the
+    /// file's status is known (an added or deleted file, or a base side past
+    /// the read cap, unreadable or without a grammar).
+    pub change_basis: String,
+    /// Whether the signature differs from the base symbol's, whitespace
+    /// aside. Absent when there is no base symbol to compare with.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signature_changed: Option<bool>,
     pub processes: Vec<String>,
+}
+
+/// A call site that may be affected by a changed or deleted symbol. A
+/// consumer is potentially affected, never proven broken: a body change can
+/// leave every caller's contract intact, and a same-name site may call
+/// something else.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct Consumer {
+    /// uid of the changed or deleted symbol the site depends on.
+    pub of: String,
+    /// Repo-relative path of the site.
+    pub path: String,
+    /// Line of the call site.
+    pub line: u32,
+    /// uid of the symbol enclosing the site; absent when none does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller: Option<String>,
+    /// "calls" for a resolved call edge to a symbol the graph holds,
+    /// "unresolved_name" for an unresolved site whose name matches a symbol
+    /// the change deleted.
+    pub basis: String,
+    /// Resolution tier of a "calls" edge; absent for an unresolved site.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
 }
 
 /// A test file suggested for the current working-tree change set, found by
@@ -121,6 +157,10 @@ pub struct ChangesReport {
     pub changed_files: u64,
     pub symbols: Vec<ChangedSymbol>,
     pub affected_processes: Vec<String>,
+    /// Call sites that may be affected by the change, sorted by
+    /// (`of`, `path`, `line`): the resolved callers of every changed symbol,
+    /// and the unresolved same-name sites of every deleted one.
+    pub consumers: Vec<Consumer>,
     pub risk: String,
     pub envelope_note: String,
     /// Test files that exercise the changed symbols (empty unless
@@ -562,6 +602,59 @@ fn overlaps(ranges: &[(u32, u32)], start: u32, end: u32) -> bool {
     ranges.iter().any(|&(a, b)| a <= end && start <= b)
 }
 
+/// `qualified#kind`: a symbol's identity within its file, which a rename
+/// of the file keeps (the uid's path part does not).
+fn symbol_key(qualified: &str, kind: &str) -> String {
+    format!("{qualified}#{kind}")
+}
+
+/// The base side's symbols of `old_path`, keyed by [`symbol_key`] to their
+/// signature; `None` when the blob cannot be read or parsed.
+fn base_signatures(
+    runner: &GitRunner,
+    base_ref: Option<&str>,
+    old_path: &str,
+) -> Option<HashMap<String, String>> {
+    let content = base_blob(runner, base_ref, old_path)?;
+    let extraction = extract_file(old_path, &content)?;
+    Some(
+        extraction
+            .symbols
+            .into_iter()
+            .map(|s| (symbol_key(&s.qualified, s.kind.as_str()), s.sig))
+            .collect(),
+    )
+}
+
+/// How a symbol the diff touched changed: `(change, change_basis,
+/// signature_changed)`. A modified file's symbols are judged against its
+/// base symbols when they are known; otherwise the file status stands in.
+fn classify(
+    status: &FileStatus,
+    base: Option<&HashMap<String, String>>,
+    key: &str,
+    sig: &str,
+) -> (&'static str, &'static str, Option<bool>) {
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match (status, base) {
+        (FileStatus::Added, _) => ("added", "file", None),
+        (FileStatus::Deleted, _) => ("deleted", "file", None),
+        (FileStatus::Modified, None) => ("modified", "file", None),
+        (FileStatus::Modified, Some(base)) => match base.get(key) {
+            None => ("added", "symbol", None),
+            Some(old) => ("modified", "symbol", Some(words(old) != words(sig))),
+        },
+    }
+}
+
+/// The innermost symbol whose span holds `line`, the first on a tie.
+fn innermost(symbols: &[SymbolRow], line: u32) -> Option<&SymbolRow> {
+    symbols
+        .iter()
+        .filter(|s| s.start_line <= line && line <= s.end_line)
+        .min_by_key(|s| s.end_line - s.start_line)
+}
+
 /// Validate a user-supplied git ref for `changes --base`. A ref may be a
 /// commit oid, branch/tag name, or a rev expression (`HEAD~1`, `main@{1}`),
 /// but it must never be parsed by git as an option: anything starting with
@@ -586,7 +679,9 @@ pub fn detect(
     base_ref: Option<&str>,
     include_tests: bool,
 ) -> Result<ChangesReport, BoxError> {
-    let base = base_ref.unwrap_or("HEAD").to_string();
+    // Without `--base` the diff is `git diff`: the working tree against the
+    // index, so staged edits are not part of it.
+    let base = base_ref.unwrap_or("index").to_string();
     let runner = GitRunner::new(root);
     let diff_bytes = match runner.diff_unified0(base_ref) {
         Ok(bytes) => bytes,
@@ -596,6 +691,7 @@ pub fn detect(
                 changed_files: 0,
                 symbols: Vec::new(),
                 affected_processes: Vec::new(),
+                consumers: Vec::new(),
                 risk: "LOW".to_string(),
                 envelope_note: "clean or non-git tree; no changes detected".to_string(),
                 suggested_tests: Vec::new(),
@@ -618,6 +714,8 @@ pub fn detect(
     // (symbol rowid, name, path) of every affected symbol — the seeds for
     // the upstream test-file walk when `include_tests` is set.
     let mut changed_seeds: Vec<(i64, String, String)> = Vec::new();
+    let mut consumers: BTreeSet<Consumer> = BTreeSet::new();
+    let mut base_reads = 0usize;
 
     for fd in &file_diffs {
         let file = match store.file_by_path(&fd.path)? {
@@ -625,6 +723,14 @@ pub fn detect(
             None => continue, // not indexed (e.g. new file before re-index)
         };
         let in_file = store.symbols_in_file(file.id)?;
+        // Same cap as the uncovered scan: past it a symbol is judged by its
+        // file status, which `change_basis: "file"` says.
+        let base = if fd.status == FileStatus::Modified && base_reads < BASE_EXTRACTION_CAP {
+            base_reads += 1;
+            base_signatures(&runner, base_ref, &fd.old_path)
+        } else {
+            None
+        };
         for sym in in_file {
             let hit = match fd.status {
                 FileStatus::Deleted => true,
@@ -633,12 +739,12 @@ pub fn detect(
             if !hit {
                 continue;
             }
-            let change = match fd.status {
-                FileStatus::Added => "added",
-                FileStatus::Deleted => "deleted",
-                FileStatus::Modified => "modified",
-            }
-            .to_string();
+            let (change, change_basis, signature_changed) = classify(
+                &fd.status,
+                base.as_ref(),
+                &symbol_key(&sym.qualified, sym.kind.as_str()),
+                &sym.sig,
+            );
             let procs = processes_for_symbol(store, sym.id)?;
             for p in &procs {
                 proc_set.insert(p.clone());
@@ -648,6 +754,16 @@ pub fn detect(
                 caller_ids.insert(e.src_id);
                 for p in processes_for_symbol(store, e.src_id)? {
                     proc_set.insert(p);
+                }
+                if let Some(caller) = symbol_by_id(store, e.src_id)? {
+                    consumers.insert(Consumer {
+                        of: sym.uid.clone(),
+                        path: file_path_by_id(store, caller.file_id)?,
+                        line: e.site_line,
+                        caller: Some(caller.uid),
+                        basis: "calls".to_string(),
+                        tier: Some(e.tier.as_str().to_string()),
+                    });
                 }
             }
             let env = store.envelope_for_name(&sym.name)?;
@@ -661,7 +777,9 @@ pub fn detect(
                 uid: sym.uid,
                 name: sym.name,
                 path: fd.path.clone(),
-                change,
+                change: change.to_string(),
+                change_basis: change_basis.to_string(),
+                signature_changed,
                 processes: procs,
             });
         }
@@ -706,12 +824,33 @@ pub fn detect(
     };
 
     let uncovered = scan_uncovered(store, root, &runner, base_ref, &file_diffs)?;
+    // A deleted symbol has no edges left; its former callers are the
+    // unresolved sites that still write its name.
+    let mut file_symbols: HashMap<i64, Vec<SymbolRow>> = HashMap::new();
+    for gone in &uncovered.unanchored {
+        for site in store.unresolved_named(&gone.name)? {
+            let symbols = match file_symbols.entry(site.file_id) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => entry.insert(store.symbols_in_file(site.file_id)?),
+            };
+            let caller = innermost(symbols, site.site_line);
+            consumers.insert(Consumer {
+                of: gone.uid.clone(),
+                path: file_path_by_id(store, site.file_id)?,
+                line: site.site_line,
+                caller: caller.map(|s| s.uid.clone()),
+                basis: "unresolved_name".to_string(),
+                tier: None,
+            });
+        }
+    }
 
     Ok(ChangesReport {
         base,
         changed_files: file_diffs.len() as u64,
         symbols,
         affected_processes,
+        consumers: consumers.into_iter().collect(),
         risk,
         envelope_note,
         suggested_tests,
@@ -1207,6 +1346,71 @@ mod tests {
         assert_eq!(v["motif"], "outside_symbol");
         assert_eq!(v["new_lines"], serde_json::json!([4, 9]));
         assert!(v.get("old_lines").is_none(), "{v}");
+    }
+
+    #[test]
+    fn classify_should_judge_a_modified_file_symbol_against_its_base() {
+        let base: HashMap<String, String> = HashMap::from([(
+            "keep#function".to_string(),
+            "export function keep(n: number):  number {".to_string(),
+        )]);
+        let same_sig = "export function keep(n: number): number {";
+        let new_sig = "export function keep(n: number, m: number): number {";
+        let modified = FileStatus::Modified;
+        assert_eq!(
+            classify(&modified, Some(&base), "keep#function", same_sig),
+            ("modified", "symbol", Some(false)),
+            "whitespace alone is no signature change"
+        );
+        assert_eq!(
+            classify(&modified, Some(&base), "keep#function", new_sig),
+            ("modified", "symbol", Some(true))
+        );
+        assert_eq!(
+            classify(&modified, Some(&base), "fresh#function", same_sig),
+            ("added", "symbol", None)
+        );
+        assert_eq!(
+            classify(&modified, None, "keep#function", same_sig),
+            ("modified", "file", None)
+        );
+        assert_eq!(
+            classify(&FileStatus::Added, Some(&base), "keep#function", same_sig),
+            ("added", "file", None)
+        );
+        assert_eq!(
+            classify(&FileStatus::Deleted, Some(&base), "keep#function", same_sig),
+            ("deleted", "file", None)
+        );
+    }
+
+    #[test]
+    fn innermost_should_pick_the_narrowest_span_holding_the_line() {
+        let row = |id: i64, start_line: u32, end_line: u32| SymbolRow {
+            id,
+            uid: format!("f.rs#s{id}#function"),
+            file_id: 1,
+            name: format!("s{id}"),
+            qualified: format!("s{id}"),
+            kind: crate::store::SymbolKind::Function,
+            start_line,
+            end_line,
+            sig: String::new(),
+        };
+        let symbols = vec![row(1, 1, 10), row(2, 3, 5), row(3, 3, 5)];
+        let at = |line| innermost(&symbols, line).map(|s| s.id);
+        assert_eq!(at(4), Some(2), "narrowest wins, first on a tie");
+        assert_eq!(at(3), Some(2));
+        assert_eq!(at(5), Some(2));
+        assert_eq!(at(6), Some(1));
+        assert_eq!(at(1), Some(1));
+        assert_eq!(at(10), Some(1));
+        assert_eq!(at(11), None);
+        // Narrowest by line count, not by any other ordering of the bounds.
+        let overlapping = vec![row(5, 2, 5), row(6, 1, 3)];
+        assert_eq!(innermost(&overlapping, 2).map(|s| s.id), Some(6));
+        let inner_late = vec![row(7, 1, 10), row(8, 8, 9)];
+        assert_eq!(innermost(&inner_late, 8).map(|s| s.id), Some(8));
     }
 
     #[test]

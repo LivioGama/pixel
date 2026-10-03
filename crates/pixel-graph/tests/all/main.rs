@@ -1,6 +1,7 @@
 //! Single integration-test binary for `pixel-graph`: each former `tests/<name>.rs`
 //! is a module here, so cargo links one executable instead of one per file.
 
+mod changes_consumers;
 mod changes_suggested_tests;
 mod changes_uncovered;
 mod concept_engine1_audit;
