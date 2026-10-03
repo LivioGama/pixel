@@ -109,12 +109,15 @@ jobs:
   # Which files a pull request touched, so a commit that cannot affect a
   # step does not pay for it. `cargo` covers the compiled suite AND every
   # file its tests read (the docs-drift, install and plugin-surface inputs
-  # re-included in the paths filter above); `scripts` covers the Python
-  # and Bun contract tests' inputs; `deps` covers the graph cargo-deny
-  # resolves. A push to main reports all three so every merge keeps the
-  # complete run the concurrency comment promises. Both lists err toward
-  # inclusion: a false negative skips a needed check, a false positive
-  # only costs a minute.
+  # re-included in the paths filter above); `rust-source` narrows `cargo`
+  # to what the compile-only lanes (Clippy, MSRV, Ranking) actually compile,
+  # so a docs-drift or prompt edit runs Test + Format without paying for
+  # the three lanes whose result cannot change (#597); `scripts` covers the
+  # Python and Bun contract tests' inputs; `deps` covers the graph
+  # cargo-deny resolves. A push to main reports all four so every merge
+  # keeps the complete run the concurrency comment promises. Both lists err
+  # toward inclusion: a false negative skips a needed check, a false
+  # positive only costs a minute.
   changes:
     outputs:
       # On a duplicate (below) every flag is forced false: an identical tree
@@ -123,6 +126,7 @@ jobs:
       # GitHub expressions -- the short form would pass 'false' through as
       # truthy and defeat the override.
       cargo: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.cargo || 'false' }}
+      rust-source: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.rust-source || 'false' }}
       scripts: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.scripts || 'false' }}
       deps: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.deps || 'false' }}
       # The skip guard's finding for this tree, and the key it is stored
@@ -191,7 +195,7 @@ jobs:
           BASE_REF: ${{ github.base_ref }}
         run: |
           if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
-            printf 'cargo=true\nscripts=true\ndeps=true\n' >> "$GITHUB_OUTPUT"
+            printf 'cargo=true\nrust-source=true\nscripts=true\ndeps=true\n' >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git diff --name-only "origin/$BASE_REF...HEAD" > changed.txt
@@ -217,6 +221,23 @@ jobs:
           ^skills/
           ^\.(openclaw|clinerules|kiro|qoder|windsurf)/
           ^scripts/gen-plugin-assets\.sh$
+          ^\.github/workflows/ci\.yml$
+          EOF
+
+          # What the compile-only lanes (Clippy, MSRV, Ranking) compile:
+          # Rust source, the manifests and lock that resolve it, cargo's
+          # build config, the toolchain, and this workflow's own build
+          # invocation (#371's lesson). Deliberately narrower than `cargo`:
+          # a docs-drift or prompt edit must run Test + Format but cannot
+          # change a clippy, cargo check or bench result, so those three
+          # lanes skip it (#597). deny.toml is the deny job's input (via
+          # `deps`); .config/ shapes the nextest run the Test lane owns.
+          cat > rust-source.re <<'EOF'
+          ^crates/.*\.rs$
+          ^crates/.*/Cargo\.(toml|lock)$
+          ^Cargo\.(toml|lock)$
+          ^\.cargo/
+          ^rust-toolchain
           ^\.github/workflows/ci\.yml$
           EOF
 
@@ -246,6 +267,7 @@ jobs:
           flag() { grep -Eqf "$1" changed.txt && echo true || echo false; }
           {
             echo "cargo=$(flag cargo.re)"
+            echo "rust-source=$(flag rust-source.re)"
             echo "scripts=$(flag scripts.re)"
             echo "deps=$(flag deps.re)"
           } >> "$GITHUB_OUTPUT"
@@ -483,7 +505,7 @@ jobs:
   lint:
     name: Lint (Clippy + feature lanes)
     needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true' && needs.changes.outputs.duplicate != 'true'
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.rust-source == 'true' && needs.changes.outputs.duplicate != 'true'
     runs-on: ubuntu-26.04
     steps:
       - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
@@ -527,7 +549,7 @@ jobs:
   msrv:
     name: MSRV (rust-version in Cargo.toml)
     needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true' && needs.changes.outputs.duplicate != 'true'
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.rust-source == 'true' && needs.changes.outputs.duplicate != 'true'
     # Compiles Rust, so it follows the test job's self-hosted switch (pull
     # requests stay on GitHub's image, as there).
     runs-on: ${{ github.event_name != 'pull_request' && vars.PIXEL_RUNNER_LABELS && fromJSON(vars.PIXEL_RUNNER_LABELS) || 'ubuntu-26.04' }}
@@ -586,7 +608,7 @@ jobs:
   ranking:
     name: Ranking gates (NDCG@10)
     needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true' && needs.changes.outputs.duplicate != 'true'
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.rust-source == 'true' && needs.changes.outputs.duplicate != 'true'
     # Compiles Rust, so it follows the test job's self-hosted switch (pull
     # requests stay on GitHub's image, as there).
     runs-on: ${{ github.event_name != 'pull_request' && vars.PIXEL_RUNNER_LABELS && fromJSON(vars.PIXEL_RUNNER_LABELS) || 'ubuntu-26.04' }}
