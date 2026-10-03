@@ -4,7 +4,7 @@
     python3 scripts/homebrew-core-formula.py <tag> <source-tarball> <out-file>
 
 `<source-tarball>` is the archive GitHub serves for the tag
-(`https://github.com/LivioGama/pixel/archive/refs/tags/<tag>.tar.gz`); its
+(`https://github.com/Pixel-CLI/pixel/archive/refs/tags/<tag>.tar.gz`); its
 sha256 goes into the formula. `PIXEL_SOURCE_URL` replaces that URL, so CI can
 build the formula from a `git archive` of the tree under test.
 
@@ -34,7 +34,7 @@ import os
 import sys
 from pathlib import Path
 
-DEFAULT_SOURCE_URL = "https://github.com/LivioGama/pixel/archive/refs/tags/{tag}.tar.gz"
+DEFAULT_SOURCE_URL = "https://github.com/Pixel-CLI/pixel/archive/refs/tags/{tag}.tar.gz"
 
 
 def formula(url: str, sha256: str) -> str:
@@ -44,7 +44,7 @@ def formula(url: str, sha256: str) -> str:
   url "{url}"
   sha256 "{sha256}"
   license "MIT"
-  head "https://github.com/LivioGama/pixel.git", branch: "main"
+  head "https://github.com/Pixel-CLI/pixel.git", branch: "main"
 
   livecheck do
     url :stable

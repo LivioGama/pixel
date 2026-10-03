@@ -6,7 +6,7 @@ case "$(uname -m)" in
     *) echo 'Unsupported Linux architecture' >&2; exit 2 ;;
 esac
 archive="pixel-${PIXEL_RELEASE}-${target}.tar.gz"
-url="https://github.com/LivioGama/pixel/releases/download/${PIXEL_RELEASE}/${archive}"
+url="https://github.com/Pixel-CLI/pixel/releases/download/${PIXEL_RELEASE}/${archive}"
 cd /tmp
 curl --fail --silent --show-error --location --max-time 120 "$url" -o "$archive"
 curl --fail --silent --show-error --location --max-time 120 "$url.sha256" -o "$archive.sha256"

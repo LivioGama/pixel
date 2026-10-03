@@ -54,6 +54,8 @@ on:
       - "docs/manual-setup.md"
       - "website/content/docs.md"
       - "website/content/benchmarks.md"
+      # docs_drift.rs reads llms.txt (agent pages and answers links):
+      - "website/static/llms.txt"
       - ".agents/rules/**"
       - ".agents/skills/rust-guidelines/**"
       # scripts/test-prepare.py and pixel-release's tests read prepare.sh:
@@ -191,6 +193,43 @@ jobs:
             echo "deps=$(flag deps.re)"
           } >> "$GITHUB_OUTPUT"
           cat changed.txt
+
+  # The branch's install.sh, on the two Linux runners the release publishes
+  # a musl archive for. It downloads the latest release (the archives
+  # release.yml builds), checks the checksum, runs the binary, and must
+  # leave that binary on PATH for the next step. A script PR that skips
+  # this installs a file the contract tests never executed.
+  linux-install:
+    name: install.sh (${{ matrix.target }})
+    needs: [scope, changes]
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.scripts == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-26.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-26.04-arm
+            target: aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install the Linux binary
+        env:
+          PIXEL_INSTALL_DIR: ${{ runner.temp }}/pixel
+          PIXEL_NO_UPDATE_CHECK: "1"
+        run: sh scripts/install.sh
+
+      - name: Later steps see this target
+        env:
+          PIXEL_NO_UPDATE_CHECK: "1"
+        run: |
+          set -eu
+          pixel --version | tee "$RUNNER_TEMP/version.txt"
+          grep -F "target: ${{ matrix.target }}" "$RUNNER_TEMP/version.txt"
 
   test:
     name: Test + Format

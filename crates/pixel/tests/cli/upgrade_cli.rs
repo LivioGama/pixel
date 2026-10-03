@@ -389,7 +389,7 @@ fn upgrade_dry_run_prints_target_and_installs_nothing() {
     assert_eq!(std::fs::read(&managed).unwrap(), b"old bytes\n");
 }
 
-/// The layout `mise use github:LivioGama/pixel` leaves under a fixture HOME:
+/// The layout `mise use github:Pixel-CLI/pixel` leaves under a fixture HOME:
 /// a shim (skipped by the resolver) and the install dir mise put on PATH.
 /// Returns the installed binary and a PATH whose first `pixel` is it.
 fn mise_install(fixture: &Fixture) -> (PathBuf, std::ffi::OsString) {

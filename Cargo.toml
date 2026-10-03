@@ -5,7 +5,7 @@ members = ["crates/pixel-index", "crates/pixel", "crates/pixel-graph", "crates/p
 [workspace.package]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/LivioGama/pixel"
+repository = "https://github.com/Pixel-CLI/pixel"
 rust-version = "1.91"
 
 # Lint policy for every workspace member (each crate opts in with

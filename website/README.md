@@ -55,7 +55,7 @@ touched (Hugo 0.166; a plain `hugo` build is right).
   no closing chapter. Hero and nav share one primary action: try Pixel on
   your repo, which lands on `#install`. Installation is four steps: step 1 (get the binary)
   full width, its one terminal switching between Script, Read it first,
-  Homebrew and Your agent (which says the agent runs steps 2 and 3), then
+  and Your agent (which says the agent runs steps 2 and 3), then
   `pixel install`, the optional `pixel doctor .` and the optional
   `pixel audit` (`#your-number`) in one row. Every command has its own
   Copy, never a chained one. On phones the variant tabs scroll on one line

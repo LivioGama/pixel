@@ -32,15 +32,15 @@ Pixel has two co-founders, who share the project as equals:
 
 Livio started Pixel and gave it its shape. The first commit, on 29 August 2026, brought in the workspace it grew from. Navid brought the monolith problem above, taught Pixel to read Ruby and Rails, and has written most of the code since. We work on the same `main`, and today every change reaches it through a public pull request.
 
-Everyone else who has contributed code is on the repository's [contributors page](https://github.com/LivioGama/pixel/graphs/contributors).
+Everyone else who has contributed code is on the repository's [contributors page](https://github.com/Pixel-CLI/pixel/graphs/contributors).
 
 ## Why you can trust it on your code
 
 - **We use it before you do.** Pixel is built with coding agents that run Pixel. Its hooks are active in every session we open on its repository, so a regression hits us first.
-- **We write down our mistakes.** The rules in the repository's [`.agents/rules/`](https://github.com/LivioGama/pixel/tree/main/.agents/rules) come from things that went wrong, often with the pull request that paid for them. Our agents read them before editing, and so can you.
-- **Open source**: the code, its history and every review are public on [GitHub](https://github.com/LivioGama/pixel), under the [MIT License](https://github.com/LivioGama/pixel/blob/main/LICENSE).
+- **We write down our mistakes.** The rules in the repository's [`.agents/rules/`](https://github.com/Pixel-CLI/pixel/tree/main/.agents/rules) come from things that went wrong, often with the pull request that paid for them. Our agents read them before editing, and so can you.
+- **Open source**: the code, its history and every review are public on [GitHub](https://github.com/Pixel-CLI/pixel), under the [MIT License](https://github.com/Pixel-CLI/pixel/blob/main/LICENSE).
 - **Local by design**: the index stays in `.pixel/` on your machine, and the binary sends no telemetry ([Privacy Policy](/legal/privacy-policy/)).
-- **Public releases**: each version is a tag on `main`, with its [changelog](https://github.com/LivioGama/pixel/blob/main/CHANGELOG.md) and a [release](https://github.com/LivioGama/pixel/releases) you can follow as a feed.
+- **Public releases**: each version is a tag on `main`, with its [changelog](https://github.com/Pixel-CLI/pixel/blob/main/CHANGELOG.md) and a [release](https://github.com/Pixel-CLI/pixel/releases) you can follow as a feed.
 - **Easy to leave**: one `pixel uninstall` undoes the setup.
 
 ## Try it on your own code
@@ -59,10 +59,10 @@ A question about how you use Pixel is as welcome as a bug report.
 
 | For | Where |
 | --- | --- |
-| a question, an idea, or feedback on how you use Pixel | [GitHub Discussions](https://github.com/LivioGama/pixel/discussions) |
-| a bug, with the command and its output | [GitHub Issues](https://github.com/LivioGama/pixel/issues) |
-| a pull request | [CONTRIBUTING.md](https://github.com/LivioGama/pixel/blob/main/CONTRIBUTING.md) lists what it needs to be merged |
-| a security vulnerability, privately | [a private security advisory](https://github.com/LivioGama/pixel/security/advisories/new) ([SECURITY.md](https://github.com/LivioGama/pixel/blob/main/SECURITY.md)) |
+| a question, an idea, or feedback on how you use Pixel | [GitHub Discussions](https://github.com/Pixel-CLI/pixel/discussions) |
+| a bug, with the command and its output | [GitHub Issues](https://github.com/Pixel-CLI/pixel/issues) |
+| a pull request | [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/CONTRIBUTING.md) lists what it needs to be merged |
+| a security vulnerability, privately | [a private security advisory](https://github.com/Pixel-CLI/pixel/security/advisories/new) ([SECURITY.md](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md)) |
 | a request about your data | as the [Privacy Policy](/legal/privacy-policy/#who-is-responsible) says |
 
 There is no contact form, so the site keeps nothing you send. Every channel above is on GitHub, where you can read past threads before you write.

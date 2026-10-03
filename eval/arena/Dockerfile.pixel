@@ -1,6 +1,6 @@
-# pixel arm — LivioGama/pixel, installed and indexing the repo at container start.
+# pixel arm — Pixel-CLI/pixel, installed and indexing the repo at container start.
 FROM pixel-arena-base:latest
-RUN curl -fsSL https://raw.githubusercontent.com/LivioGama/pixel/main/scripts/install.sh | sh
+RUN curl -fsSL https://raw.githubusercontent.com/Pixel-CLI/pixel/main/scripts/install.sh | sh
 ENV ARM_TOOL=pixel
 COPY entrypoint.sh /usr/local/bin/arena-entrypoint
 RUN chmod +x /usr/local/bin/arena-entrypoint

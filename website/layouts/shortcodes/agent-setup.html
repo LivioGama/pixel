@@ -13,7 +13,7 @@ Pixel is a command-line tool: {{ $a.name }} runs the `pixel` binary, so install 
 curl -fsSL https://github.com/{{ site.Params.repo }}/releases/latest/download/install.sh | sh
 ```
 
-[How to read the script before it runs, and Homebrew]({{ $docs }}#install), the other channel. Neither one changes any agent's configuration.
+[How to read the script before it runs]({{ $docs }}#install). It does not change any agent's configuration.
 {{ if eq $a.wiring "install" }}
 ## What pixel install writes
 

@@ -1,10 +1,10 @@
 #!/bin/sh
 # pixel install script — downloads the latest release binary from GitHub.
-# Usage: curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh
+# Usage: curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
 # (published as an asset of every release; main may be ahead of the latest release)
 set -eu
 
-REPO="LivioGama/pixel"
+REPO="Pixel-CLI/pixel"
 INSTALL_DIR="${PIXEL_INSTALL_DIR:-${HOME}/.local/bin}"
 
 # A SHA-256 digest exactly as the release workflow writes it: 64 lower-case
@@ -127,11 +127,33 @@ if [ ! -f "$BINARY" ]; then
     # Fallback: some archives may not have the version-prefixed dir
     BINARY="${TMPDIR}/bin/pixel"
 fi
+if [ ! -f "$BINARY" ]; then
+    echo "Archive ${ARCHIVE} has no bin/pixel." >&2
+    exit 1
+fi
 DEST="${INSTALL_DIR}/pixel"
 TMP_DEST="${INSTALL_DIR}/.pixel.tmp.$$"
 cp "$BINARY" "$TMP_DEST"
 chmod +x "$TMP_DEST"
+
+# Prove the file we are about to put on PATH actually starts. stdin is not a
+# terminal, and the update check is off, so this cannot prompt to upgrade.
+# A failure leaves the previous install in place.
+echo "Checking that the binary runs..."
+if PIXEL_NO_UPDATE_CHECK=1 "$TMP_DEST" --version </dev/null; then
+    :
+else
+    rm -f "$TMP_DEST"
+    echo "The downloaded binary did not run." >&2
+    exit 1
+fi
 mv -f "$TMP_DEST" "$DEST"
+
+# GitHub Actions reads GITHUB_PATH after the step. Appending here makes the
+# one-liner enough: later steps see pixel without a second command.
+if [ -n "${GITHUB_PATH:-}" ]; then
+    echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+fi
 
 echo "Installed pixel to ${INSTALL_DIR}/pixel"
 echo "Add ${INSTALL_DIR} to your PATH if it's not already there."

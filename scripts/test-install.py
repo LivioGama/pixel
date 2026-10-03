@@ -62,7 +62,7 @@ if url.endswith('/releases/latest'):
         sys.stderr.write('curl: (6) Could not resolve host: github.com\\n')
         sys.exit(6)
     page = 'releases/tag/v9.8.7' if mode == 'tag' else 'releases'
-    sys.stdout.write('https://github.com/LivioGama/pixel/' + page)
+    sys.stdout.write('https://github.com/Pixel-CLI/pixel/' + page)
 elif url.endswith('.sha256'):
     if os.environ.get('FIXTURE_CHECKSUM', 'ok') == 'unreachable':
         sys.stderr.write('curl: (22) The requested URL returned error: 404\\n')
@@ -132,11 +132,37 @@ for path in args:
         for _ in range(2):
             result = self.install()
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("isolated-pixel-9.8.7", result.stdout)
             installed = subprocess.check_output(
                 [str(self.destination / "pixel")], text=True, timeout=5
             )
             self.assertEqual(installed.strip(), "isolated-pixel-9.8.7")
             self.assertEqual(list(self.destination.glob(".pixel.tmp.*")), [])
+
+    def test_a_binary_that_does_not_run_is_not_installed(self):
+        stage = self.root / "pixel-v9.8.7-aarch64-apple-darwin"
+        binary = stage / "bin/pixel"
+        binary.write_text("#!/bin/sh\nexit 1\n")
+        archive = self.root / "fixture.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(stage, arcname=stage.name)
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        (self.root / "sha").write_text(digest + "  fixture.tar.gz\n")
+        self.destination.mkdir()
+        installed = self.destination / "pixel"
+        installed.write_bytes(b"previous installation")
+        result = self.install()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("The downloaded binary did not run.", result.stderr)
+        self.assertEqual(installed.read_bytes(), b"previous installation")
+        self.assertEqual(list(self.destination.glob(".pixel.tmp.*")), [])
+
+    def test_github_actions_receives_the_install_directory(self):
+        path_file = self.root / "github_path"
+        self.env["GITHUB_PATH"] = str(path_file)
+        result = self.install()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(path_file.read_text().splitlines(), [str(self.destination)])
 
     def test_checksum_failure_preserves_previous_install(self):
         self.destination.mkdir()
@@ -157,7 +183,7 @@ for path in args:
         result = self.install()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(
-            "Could not download https://github.com/LivioGama/pixel/releases/"
+            "Could not download https://github.com/Pixel-CLI/pixel/releases/"
             "download/v9.8.7/pixel-v9.8.7-aarch64-apple-darwin.tar.gz.sha256",
             result.stderr,
         )
@@ -226,7 +252,7 @@ for path in args:
             "the anonymous API is rate limited per IP",
         )
         self.assertIn(
-            "https://github.com/LivioGama/pixel/releases/download/v9.8.7/"
+            "https://github.com/Pixel-CLI/pixel/releases/download/v9.8.7/"
             "pixel-v9.8.7-aarch64-apple-darwin.tar.gz",
             urls,
         )
@@ -236,7 +262,7 @@ for path in args:
         self.env["FIXTURE_LATEST"] = "none"
         result = self.install()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("No prebuilt release found for LivioGama/pixel.", result.stderr)
+        self.assertIn("No prebuilt release found for Pixel-CLI/pixel.", result.stderr)
         self.assertIn("cargo install --git", result.stderr)
         self.assertFalse((self.destination / "pixel").exists())
 
@@ -248,7 +274,7 @@ for path in args:
         result = self.install()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Could not resolve host: github.com", result.stderr)
-        self.assertIn("Could not reach https://github.com/LivioGama/pixel/releases/latest", result.stderr)
+        self.assertIn("Could not reach https://github.com/Pixel-CLI/pixel/releases/latest", result.stderr)
         self.assertNotIn("No prebuilt release found", result.stderr)
         self.assertEqual(installed.read_bytes(), b"previous installation")
 

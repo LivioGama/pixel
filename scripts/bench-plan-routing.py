@@ -77,7 +77,7 @@ def train_rows(path):
     with Path(path).open() as stream:
         raw = list(csv.DictReader(stream, delimiter='\t'))
     rows = [dict(id=f'train-{i:03}', family=r['family'], text=r['text'],
-                 labels=r['labels'].split(','), split='train', repository='LivioGama/pixel',
+                 labels=r['labels'].split(','), split='train', repository='Pixel-CLI/pixel',
                  commit=BASE, evidence='plan.rs:19-29 query semantics; protocol operational gold policy',
                  provenance='parent-authored synthetic scenario; not production traffic')
             for i, r in enumerate(raw)]

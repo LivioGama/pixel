@@ -22,7 +22,7 @@ before. Homebrew's own gcc and glibc on hosts older than its CI are a separate
 matter no formula can change (README, "Install").
 
 `PIXEL_RELEASE_URL` overrides the download base
-(`https://github.com/LivioGama/pixel/releases/download`), so a local Homebrew
+(`https://github.com/Pixel-CLI/pixel/releases/download`), so a local Homebrew
 can be pointed at a directory served over HTTP.
 """
 
@@ -34,7 +34,7 @@ import sys
 import tarfile
 from pathlib import Path
 
-DEFAULT_RELEASE_URL = "https://github.com/LivioGama/pixel/releases/download"
+DEFAULT_RELEASE_URL = "https://github.com/Pixel-CLI/pixel/releases/download"
 
 # Homebrew bottle tag of each Linux release target, arm64 first as
 # `brew style` orders bottle tags.

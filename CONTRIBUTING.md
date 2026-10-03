@@ -52,7 +52,7 @@ No `rust-toolchain` file is pinned; CI uses `dtolnay/rust-toolchain@stable`.
 ## Build
 
 ```bash
-git clone https://github.com/LivioGama/pixel.git
+git clone https://github.com/Pixel-CLI/pixel.git
 cd pixel
 cargo build --release -p pixel-cli        # binary: target/release/pixel
 ```
@@ -616,7 +616,7 @@ Read them, newest review last:
 
 ```bash
 gh pr view <n> --comments                        # review bodies and PR-level comments
-gh api repos/LivioGama/pixel/pulls/<n>/comments \
+gh api repos/Pixel-CLI/pixel/pulls/<n>/comments \
   --jq '.[] | select(.user.login == "coderabbitai[bot]") | {id, path, line, body}'
 ```
 
@@ -649,7 +649,7 @@ Reply inside the thread, so the answer stays attached to the line it is
 about; a new top-level comment leaves the thread unanswered:
 
 ```bash
-gh api repos/LivioGama/pixel/pulls/<n>/comments/<comment-id>/replies \
+gh api repos/Pixel-CLI/pixel/pulls/<n>/comments/<comment-id>/replies \
   -f body='Fixed in <sha>: <what changed>.'
 ```
 

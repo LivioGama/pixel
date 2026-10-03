@@ -291,7 +291,7 @@ on musl).
 
 ## 5. Verify the publication
 
-Start from the `smoke` jobs: `gh run view <run-id> --repo LivioGama/pixel`
+Start from the `smoke` jobs: `gh run view <run-id> --repo Pixel-CLI/pixel`
 must show all three green, and each job log names what it installed and
 the `--version` it read. Skipped steps inside `build` and `smoke` are the other
 target's lane (each matrix entry skips the cross or native build it does not
@@ -307,21 +307,21 @@ skipped, or predates the job (0.2.4 and older):
 
 ```bash
 V=vx.y.z; D=$(mktemp -d); cd "$D"
-gh release view $V --repo LivioGama/pixel --json isDraft,isPrerelease,isImmutable,body \
+gh release view $V --repo Pixel-CLI/pixel --json isDraft,isPrerelease,isImmutable,body \
   --jq '{isDraft, isPrerelease, isImmutable, body: .body[0:200]}'   # false, false, true, the changelog section (not "See [CHANGELOG.md]")
-gh release download $V --repo LivioGama/pixel
+gh release download $V --repo Pixel-CLI/pixel
 ls                                                     # 3 archives + 2 .bottle.tar.gz, 3 .sha256, pixel.rb, pixel-core.rb, install.sh
 shasum -a 256 -c ./*.sha256                            # 3 × OK
 for f in ./*.sha256; do grep -c "$(awk '{print $1}' "$f")" pixel.rb; done   # darwin 2, each musl 1: the formula carries the real hashes (darwin is also the formula's top-level url)
 for b in ./*.bottle.tar.gz; do grep -c "$(shasum -a 256 "$b" | awk '{print $1}')" pixel.rb; done   # 1 each: the bottle block names the published bottles
-curl -fsSL "https://github.com/LivioGama/pixel/archive/refs/tags/$V.tar.gz" | shasum -a 256 | awk '{print $1}' | xargs -I{} grep -c {} pixel-core.rb   # 1: the core formula names the tag's source archive
+curl -fsSL "https://github.com/Pixel-CLI/pixel/archive/refs/tags/$V.tar.gz" | shasum -a 256 | awk '{print $1}' | xargs -I{} grep -c {} pixel-core.rb   # 1: the core formula names the tag's source archive
 git -C <repo> show "${V}:scripts/install.sh" | diff - install.sh && echo "install.sh == tag's"
 gh api repos/LivioGama/homebrew-tap/contents/Formula/pixel.rb --jq .content \
   | base64 -d | diff - pixel.rb && echo "tap == release formula"
 tar xzf pixel-$V-aarch64-apple-darwin.tar.gz
 HOME="$D/home" ./pixel-$V-aarch64-apple-darwin/bin/pixel --version
 git -C <repo> rev-list -n 1 $V                         # must equal the `commit:` line above
-gh run view <run-id> --repo LivioGama/pixel         # no ANNOTATIONS section = no no-token/no-changelog warning
+gh run view <run-id> --repo Pixel-CLI/pixel         # no ANNOTATIONS section = no no-token/no-changelog warning
 ```
 
 `pixel --version` prints `pixel x.y.z` and `commit: <sha>`: the commit line

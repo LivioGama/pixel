@@ -10,8 +10,8 @@ disableKinds = ["taxonomy", "term", "RSS"]
 
 [params]
 description = "A local code index that gives coding agents a map of your repository and reduces whole-file reads. Try it on your own code; evidence and limits are documented."
-github_url = "https://github.com/LivioGama/pixel"
-repo = "LivioGama/pixel"
+github_url = "https://github.com/Pixel-CLI/pixel"
+repo = "Pixel-CLI/pixel"
 # The nav shows the repository's GitHub star count only from this many up:
 # below it the badge stays hidden (layouts/partials/footer.html). 0 always
 # shows it.

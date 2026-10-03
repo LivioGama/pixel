@@ -6,8 +6,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/LivioGama/pixel/releases/latest"><img src="https://img.shields.io/github/v/release/LivioGama/pixel?color=2ea043&label=release" alt="Latest release" /></a>
-  <a href="https://github.com/LivioGama/pixel/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/LivioGama/pixel/ci.yml?branch=main&label=CI" alt="CI" /></a>
+  <a href="https://github.com/Pixel-CLI/pixel/releases/latest"><img src="https://img.shields.io/github/v/release/Pixel-CLI/pixel?color=2ea043&label=release" alt="Latest release" /></a>
+  <a href="https://github.com/Pixel-CLI/pixel/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Pixel-CLI/pixel/ci.yml?branch=main&label=CI" alt="CI" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license" /></a>
 </p>
 
@@ -82,21 +82,21 @@ These are benchmark accuracy scores, not per-decision probabilities.
 ## Install
 
 ```bash
-curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
 pixel install      # once: wires Claude Code, Codex, Pi, OpenCode and Antigravity
 pixel doctor .     # optional health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
-The one-liner runs [`scripts/install.sh`](scripts/install.sh), which every release publishes as an asset: one POSIX `sh` file, no `sudo`. It downloads the release archive for your platform (macOS on Apple Silicon, Linux x86_64 or arm64), refuses it unless its SHA-256 matches the release's checksum, and writes a single file, `~/.local/bin/pixel` (`PIXEL_INSTALL_DIR` moves it). It edits no shell profile; if that directory is not on your `PATH`, it says so. To read it before it runs:
+The one-liner runs [`scripts/install.sh`](scripts/install.sh), which every release publishes as an asset: one POSIX `sh` file, no `sudo`. It downloads the release archive for the machine it is running on (macOS on Apple Silicon, Linux x86_64 or arm64), refuses it unless its SHA-256 matches the release's checksum, runs the binary once, and writes a single file, `~/.local/bin/pixel` (`PIXEL_INSTALL_DIR` moves it). When `GITHUB_PATH` is set it appends that directory. It edits no shell profile; if that directory is not on your `PATH`, it says so. To read it before it runs:
 
 ```bash
-curl -fsSL -o install.sh https://github.com/LivioGama/pixel/releases/latest/download/install.sh
+curl -fsSL -o install.sh https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh
 less install.sh    # every line it will run
 sh install.sh
 ```
 
-With Homebrew instead: `brew install LivioGama/tap/pixel`. On Linux, Homebrew gives every formula its own `glibc` and `gcc` (gcc alone is over 400 MB) when the system glibc is older than the one its CI builds with (2.39 on Homebrew 7: Ubuntu 22.04 and Debian 12 are older); Pixel is a static binary and needs neither, so the script is the lighter path there.
+An install that already came from Homebrew still updates with `brew update && brew upgrade LivioGama/tap/pixel`.
 
 Once a day, a command run at a terminal prints one yellow line when a newer release is out, with the command that updates your install (`brew`, `mise` or `install.sh`); hooks and agents never see it, and `PIXEL_NO_UPDATE_CHECK=1` turns it off.
 
@@ -107,7 +107,7 @@ Other channels, per-agent plugins and manual setup are in the [docs](https://pix
 Paste this into Claude Code, Codex, Pi or any coding agent with a shell:
 
 ```text
-Install Pixel (https://github.com/LivioGama/pixel) for me: follow the
+Install Pixel (https://github.com/Pixel-CLI/pixel) for me: follow the
 "For AI agents" section of its README, then tell me what changed and
 whether `pixel doctor .` is green.
 ```
@@ -119,7 +119,7 @@ Looking for something specific? [`llms.txt`](https://pixel-cli.dev/llms.txt) map
 If you are an LLM reading this to set Pixel up for a user, do this, in order:
 
 1. **Check first.** `command -v pixel && pixel --version`. If it prints a version, skip to step 3.
-2. **Install the binary** (macOS or Linux). With Homebrew: `brew install LivioGama/tap/pixel`. Without it: `curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh`, which installs into `~/.local/bin` (override with `PIXEL_INSTALL_DIR`); make sure that directory is on `PATH`.
+2. **Install the binary** (macOS or Linux, including a GitHub Actions runner). Run `curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh`. It installs into `~/.local/bin` (override with `PIXEL_INSTALL_DIR`); make sure that directory is on `PATH`. On GitHub Actions, also run `echo "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}" >> "$GITHUB_PATH"`.
 3. **Wire the agents.** Tell the user it writes to their home configuration (`~/.local/share/pixel/`, `~/.claude/settings.json`, `~/.codex/config.toml`, `~/.pi/agent/APPEND_SYSTEM.md`), then run `pixel install`. It is idempotent: running it again only refreshes what it wrote.
 4. **Index the current repository** (optional, speeds up the first queries): `pixel prepare-repo .`
 5. **Verify:** `pixel doctor . --json`. Report every check that is not green, with its message; do not claim success otherwise.

@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
 #
-# CodeRabbit review configuration for LivioGama/pixel.
+# CodeRabbit review configuration for Pixel-CLI/pixel.
 #
 # The file is read from the branch under review, so a change to it is
 # exercised by the pull request that carries it. Every setting below that
