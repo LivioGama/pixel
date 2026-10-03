@@ -3445,8 +3445,9 @@ mod tests {
 
     /// The files every equivalence scenario below writes: a Rust `use` with
     /// an alias and a group, a module path call, a literal environment read
-    /// (a concept) behind a guard (a crux line), a relative TS import, a JSX
-    /// handler, and Ruby calls without receiver or parentheses.
+    /// (a concept) behind a guard (a crux line), a relative TS import, a
+    /// function passed as a value (a reference), a JSX handler, and Ruby calls
+    /// without receiver or parentheses.
     const EQUIVALENCE_TREE: &[(&str, &str)] = &[
         (
             "src/lib.rs",
@@ -3466,7 +3467,8 @@ mod tests {
         ),
         (
             "web/a.ts",
-            "import { helper } from \"./b\";\nexport function work() { return helper() }\n",
+            "import { helper } from \"./b\";\nexport function work() { return helper() }\n\
+             export function setup(schema: any) { schema.plugin(helper); }\n",
         ),
         ("web/b.ts", "export function helper() { return 1 }\n"),
         (
@@ -3592,6 +3594,12 @@ mod tests {
                 "Text(\"src/ship.rs#ship#function\") | Text(\"src/push.rs#push#function\") | Text(\"calls\") | Text(\"exact\")"
             )),
             "the aliased `use` must give an Exact edge in the reference ({edges:#?})"
+        );
+        assert!(
+            edges.iter().any(|e| e.starts_with(
+                "Text(\"web/a.ts#setup#function\") | Text(\"web/b.ts#helper#function\") | Text(\"references\")"
+            )),
+            "`schema.plugin(helper)` must give a references edge in the reference ({edges:#?})"
         );
 
         let all: Vec<(&str, bool)> = EQUIVALENCE_TREE
