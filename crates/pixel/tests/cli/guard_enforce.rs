@@ -1521,6 +1521,41 @@ fn codex_prompt_submit_injects_pixel_first_guidance_on_every_repository_prompt()
     );
 }
 
+/// The task_context/task_boundary opt-outs silence the task notes, not the
+/// Pixel-first guidance: with both disabled, an indexed repository's prompt
+/// still carries the guidance for Codex and for a real Claude host.
+#[test]
+fn prompt_submit_still_guides_when_task_features_are_disabled() {
+    let dir = indexed_dir("prompt-features-disabled");
+    let envs = [
+        ("PIXEL_TASK_CONTEXT", "0"),
+        ("PIXEL_TASK_BOUNDARY", "0"),
+    ];
+    let submit = |provider: &str| {
+        hook(
+            &["run-hook", "prompt-submit", "--provider", provider],
+            &json!({
+                "hook_event_name":"UserPromptSubmit",
+                "prompt":"where is the foreign-denial precedence decided in the guard?",
+                "cwd":dir.as_ref()
+            }),
+            &envs,
+        )
+    };
+    let codex = submit("codex")["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("Codex guidance survives the task feature opt-outs")
+        .to_string();
+    assert!(codex.starts_with("Pixel-first retrieval"), "{codex}");
+    assert!(codex.contains("pixel find-code"), "{codex}");
+    let claude = submit("claude")["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("Claude guidance survives the task feature opt-outs")
+        .to_string();
+    assert!(claude.starts_with("Pixel-first retrieval"), "{claude}");
+    assert!(claude.contains("pixel-indexed repository"), "{claude}");
+}
+
 /// Claude Code's guidance is always-on, like Devin's and Codex's, but only
 /// on a real Claude host: a prompt-submit runs its task packet regardless, and
 /// the Pixel-first retrieval to attempt rides on every indexed-repository

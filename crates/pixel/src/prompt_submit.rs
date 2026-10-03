@@ -114,9 +114,6 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         crate::config_cmd::feature_enabled(root.as_deref(), "task_context", "PIXEL_TASK_CONTEXT");
     let task_boundary =
         crate::config_cmd::feature_enabled(root.as_deref(), "task_boundary", "PIXEL_TASK_BOUNDARY");
-    if prompt_features_disabled(task_context, task_boundary) {
-        std::process::exit(0);
-    }
 
     let event_name = payload
         .hook_event_name
@@ -125,6 +122,30 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
         .unwrap_or("UserPromptSubmit");
 
     let claude_host = is_claude_host(provider);
+    // A discovered root without a shard is not indexed: the same commands
+    // there would build a full index instead of answering, so the guidance
+    // stays quiet.
+    let indexed = root.as_deref().is_some_and(|root| {
+        root.join(pixel_index::index::SHARD_DIR)
+            .join(pixel_index::index::SHARD_FILE)
+            .is_file()
+    });
+    // The opt-outs silence the task notes, not the Pixel-first guidance:
+    // with both features disabled the guidance still rides an indexed
+    // repository's prompt on Codex and on a real Claude host.
+    if prompt_features_disabled(task_context, task_boundary) {
+        let guidance = if matches!(provider, Some(crate::guard::Provider::Codex)) && indexed {
+            CODEX_PIXEL_GUIDANCE
+        } else if claude_host && indexed {
+            CLAUDE_PIXEL_GUIDANCE
+        } else {
+            ""
+        };
+        if !guidance.is_empty() {
+            emit_context(guidance, event_name);
+        }
+        std::process::exit(0);
+    }
     // Run independently: a missing embedding model must not prevent retrieval.
     let (tx, rx) = std::sync::mpsc::channel();
     let deadline = Instant::now() + HOOK_DEADLINE;
@@ -193,11 +214,6 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // guidance. A discovered root without a shard is not indexed: the same
     // commands there would build a full index instead of answering (the
     // sub-agent prompt carries the same rule), so the guidance stays quiet.
-    let indexed = root.as_deref().is_some_and(|root| {
-        root.join(pixel_index::index::SHARD_DIR)
-            .join(pixel_index::index::SHARD_FILE)
-            .is_file()
-    });
     if matches!(provider, Some(crate::guard::Provider::Codex)) && indexed {
         context = render_codex_context(&context);
     }

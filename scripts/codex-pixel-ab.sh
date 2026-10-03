@@ -72,6 +72,7 @@ fi
 case "$TIMEOUT" in *[!0-9]*|'') die '--timeout must be a positive integer' ;; esac
 [ "$TIMEOUT" -gt 0 ] || die '--timeout must be positive'
 case "$PIXEL_POLICY_MODE" in advisory|enforce|classify) ;; *) die '--pixel-policy must be advisory, enforce, or classify' ;; esac
+awk -v v="$CLASSIFY_MIN_CONFIDENCE" 'BEGIN { exit !(v ~ /^[0-9]*\.?[0-9]+$/ && v+0 >= 0 && v+0 <= 1) }' || die '--classify-min-confidence must be a number between 0 and 1'
 
 REPO=${REPO:-$PWD}
 REPO=$(cd "$REPO" && pwd) || die "repository not found: $REPO"
@@ -112,6 +113,13 @@ if [ "$PIXEL_POLICY_MODE" = classify ]; then
 fi
 
 cleanup() {
+  # Stop the arms before removing their worktrees: a runner still writing in
+  # a removed worktree keeps consuming against a deleted checkout.
+  tmux kill-session -t "$SESSION" >/dev/null 2>&1 || true
+  for _ in 1 2 3 4 5; do
+    tmux has-session -t "$SESSION" 2>/dev/null || break
+    sleep 1
+  done
   git -C "$REPO" worktree remove --force "$RAW_DIR" >/dev/null 2>&1 || true
   git -C "$REPO" worktree remove --force "$PIXEL_DIR" >/dev/null 2>&1 || true
 }
@@ -119,6 +127,16 @@ trap cleanup ERR INT TERM EXIT
 git -C "$REPO" worktree add --detach "$RAW_DIR" "$BASE_SHA" >/dev/null
 git -C "$REPO" worktree add --detach "$PIXEL_DIR" "$BASE_SHA" >/dev/null
 [ ! -e "$RAW_DIR/.codex" ] || die 'base contains .codex; cannot establish a clean raw control'
+# The raw arm is the non-Pixel control: --ignore-rules skips exec-policy rules
+# only, so Pixel-first agent instructions and the pixel binary itself must be
+# out of reach in the raw worktree. Strip the rule files Codex/agent would
+# read and shadow `pixel` on PATH with a failing stub.
+rm -rf "$RAW_DIR/.claude" "$RAW_DIR/.agents" "$RAW_DIR/.cursor" "$RAW_DIR/.pixel"
+rm -f "$RAW_DIR/AGENTS.md" "$RAW_DIR/CLAUDE.md"
+RAW_BIN="$RUN_DIR/raw-bin"
+mkdir -p "$RAW_BIN"
+printf '#!/usr/bin/env bash\nprintf "pixel: command not available in the raw control arm\\n" >&2\nexit 127\n' > "$RAW_BIN/pixel"
+chmod +x "$RAW_BIN/pixel"
 
 if [ "$EFFECTIVE_PIXEL_POLICY" != off ]; then
   "$PIXEL_BIN" install --repo "$PIXEL_DIR" >/dev/null
@@ -152,7 +170,8 @@ PIXEL_Q=$(q "$PIXEL_DIR")
 ANSWER_RAW_Q=$(q "$RUN_DIR/raw-answer.md")
 ANSWER_PIXEL_Q=$(q "$RUN_DIR/pixel-answer.md")
 PIXEL_CONFIG="projects.\"$PIXEL_DIR\".trust_level=\"trusted\""
-RAW_COMMAND="env -u PIXEL_BIN -u PIXEL_POLICY codex exec --json --ephemeral --ignore-user-config --ignore-rules -c features.hooks=false --approve-for-me -C $RAW_Q --output-last-message $ANSWER_RAW_Q $PROMPT_Q"
+RAW_PATH_Q=$(q "$RAW_BIN:$PATH")
+RAW_COMMAND="env PATH=$RAW_PATH_Q -u PIXEL_BIN -u PIXEL_POLICY codex exec --json --ephemeral --ignore-user-config --ignore-rules -c features.hooks=false --approve-for-me -C $RAW_Q --output-last-message $ANSWER_RAW_Q $PROMPT_Q"
 if [ "$EFFECTIVE_PIXEL_POLICY" = off ]; then
   PIXEL_COMMAND="env -u PIXEL_BIN -u PIXEL_POLICY codex exec --json --ephemeral --ignore-user-config --ignore-rules -c features.hooks=false --approve-for-me -C $PIXEL_Q --output-last-message $ANSWER_PIXEL_Q $PROMPT_Q"
 else
@@ -178,13 +197,16 @@ report() {
   pixel_wall=$(( ${pixel_finished:-$now} - ${pixel_started:-$now} ))
   raw_calls=$(rg -c '"type":"item.started".*"command":.*pixel (find-code|search-content|impact|scope-task)' "$RUN_DIR/raw.jsonl" 2>/dev/null || true)
   pixel_calls=$(rg -c '"type":"item.started".*"command":.*pixel (find-code|search-content|impact|scope-task)' "$RUN_DIR/pixel.jsonl" 2>/dev/null || true)
+  local raw_status=${raw_exit:-timeout} pixel_status=${pixel_exit:-timeout}
+  [ "${RAW_TIMED_OUT:-0}" -eq 0 ] || raw_status="timeout (exit ${raw_exit:-none})"
+  [ "${PIXEL_TIMED_OUT:-0}" -eq 0 ] || pixel_status="timeout (exit ${pixel_exit:-none})"
   cat > "$RUN_DIR/report.md" <<EOF
 # Codex / Pixel A/B report
 
 | Arm | Exit | Wall | Pixel retrieval commands | Last answer |
 | --- | ---: | ---: | ---: | --- |
-| Raw Codex | ${raw_exit:-timeout} | ${raw_wall}s | ${raw_calls:-0} | [raw-answer.md](raw-answer.md) |
-| Codex + Pixel | ${pixel_exit:-timeout} | ${pixel_wall}s | ${pixel_calls:-0} | [pixel-answer.md](pixel-answer.md) |
+| Raw Codex | ${raw_status} | ${raw_wall}s | ${raw_calls:-0} | [raw-answer.md](raw-answer.md) |
+| Codex + Pixel | ${pixel_status} | ${pixel_wall}s | ${pixel_calls:-0} | [pixel-answer.md](pixel-answer.md) |
 
 - Base: \`${BASE_SHA}\`
 - Prompt SHA-256: \`${PROMPT_SHA}\`
@@ -201,6 +223,8 @@ EOF
 }
 
 deadline=$(( $(date +%s) + TIMEOUT ))
+RAW_TIMED_OUT=0
+PIXEL_TIMED_OUT=0
 while [ ! -f "$RUN_DIR/raw.meta" ] || [ ! -f "$RUN_DIR/pixel.meta" ]; do
   [ "$(date +%s)" -lt "$deadline" ] || break
   sleep 1
@@ -209,8 +233,11 @@ done
 # past the reported timeout, then give its runner a moment to record the
 # exit it ended with. Pane 0 is the raw arm, pane 1 the Pixel arm.
 if [ ! -f "$RUN_DIR/raw.meta" ] || [ ! -f "$RUN_DIR/pixel.meta" ]; then
-  [ -f "$RUN_DIR/raw.meta" ] || tmux send-keys -t "$SESSION":0.0 C-c || true
-  [ -f "$RUN_DIR/pixel.meta" ] || tmux send-keys -t "$SESSION":0.1 C-c || true
+  # Record which arms missed the deadline before interrupting them: an arm
+  # that writes its meta after C-c still ran past the requested timeout, and
+  # the report must say so rather than showing its post-interrupt exit code.
+  [ -f "$RUN_DIR/raw.meta" ] || { RAW_TIMED_OUT=1; tmux send-keys -t "$SESSION":0.0 C-c || true; }
+  [ -f "$RUN_DIR/pixel.meta" ] || { PIXEL_TIMED_OUT=1; tmux send-keys -t "$SESSION":0.1 C-c || true; }
   grace=$(( $(date +%s) + 5 ))
   while [ ! -f "$RUN_DIR/raw.meta" ] || [ ! -f "$RUN_DIR/pixel.meta" ]; do
     [ "$(date +%s)" -lt "$grace" ] || break
