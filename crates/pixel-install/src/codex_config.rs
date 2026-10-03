@@ -974,6 +974,39 @@ mod tests {
         let _ = fs::remove_dir_all(&home);
     }
 
+    #[test]
+    fn metrics_hook_check_is_red_when_only_the_prompt_submit_marker_is_missing() {
+        let home = scratch_codex_home("half-registered");
+        install_metrics_hook(&home, Path::new("pixel"), false).unwrap();
+        assert!(check_metrics_hook(&home).is_ok());
+
+        // Remove only the prompt-submit guidance entry: the PostToolUse
+        // metrics marker and every task gate stay registered, so the check
+        // fails iff each marker is required on its own.
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(home.join(HOOKS_FILE)).unwrap()).unwrap();
+        value["hooks"]["UserPromptSubmit"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|entry| {
+                !entry["hooks"].as_array().unwrap().iter().any(|hook| {
+                    hook["command"]
+                        .as_str()
+                        .is_some_and(|command| command.contains(PROMPT_SUBMIT_HOOK_MARKER))
+                })
+            });
+        fs::write(
+            home.join(HOOKS_FILE),
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .unwrap();
+        assert!(
+            check_metrics_hook(&home).is_err(),
+            "a missing prompt-submit marker alone fails the check"
+        );
+        let _ = fs::remove_dir_all(&home);
+    }
+
     // ---- project trust ---------------------------------------------------
 
     fn write_config(home: &Path, body: &str) {
