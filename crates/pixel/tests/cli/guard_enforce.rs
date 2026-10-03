@@ -1501,6 +1501,24 @@ fn codex_prompt_submit_injects_pixel_first_guidance_on_every_repository_prompt()
         Value::Null,
         "outside a repository there is no index to point at"
     );
+    // The Codex guidance is Codex's alone: an indexed repository must not
+    // make it ride along on another provider's prompt.
+    let devin = hook(
+        &["run-hook", "prompt-submit", "--provider", "devin"],
+        &json!({
+            "hook_event_name":"UserPromptSubmit",
+            "prompt":"explain the guard's precedence rules",
+            "cwd":dir.as_ref()
+        }),
+        &[],
+    );
+    let devin_context = devin["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("Devin keeps its own guidance");
+    assert!(
+        !devin_context.contains("for this repository prompt"),
+        "{devin_context}"
+    );
 }
 
 /// Devin loads `~/.claude/settings.json` hooks verbatim, so the Claude entry
