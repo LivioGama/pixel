@@ -76,7 +76,9 @@ use pixel_daemon::daemon;
 use pixel_index::index::{build, shard_path};
 use pixel_index::shard::Shard;
 use pixel_index::{Crc32Weigher, GramExtractor, SparseGramExtractor, TrigramExtractor};
-use pixel_proto::{QueryKind, QueryStatus, compile_query};
+use pixel_proto::{
+    QueryKind, QueryStatus, TargetsFactsResult, TargetsFactsUnavailableReason, compile_query,
+};
 use serde_json::{Value, json};
 
 /// `pixel --version` (long form): the crate version plus where the binary
@@ -324,6 +326,11 @@ enum Command {
         /// Skip writing the enforcement manifest.
         #[arg(long)]
         no_manifest: bool,
+        /// Serve only already-published deterministic facts from a compatible
+        /// running daemon. Never starts a daemon or builds/refreshes indexes.
+        /// This mode never writes a targets manifest.
+        #[arg(long)]
+        read_only: bool,
         /// Deactivate scoping: delete .pixel/targets.json and exit.
         #[arg(long)]
         clear: bool,
@@ -2128,6 +2135,30 @@ fn execute(path: &Path, req: Request, no_daemon: bool) -> Result<Value, String> 
     });
     serve_trace::record(step);
     unwrap_response(resp.map_err(|e| e.to_string())?)
+}
+
+/// Read-only fact retrieval intentionally has no in-process or autostart
+/// fallback. A missing or incompatible daemon is data for the caller, never a
+/// reason to create an index as a side effect of a fact query.
+fn execute_targets_facts_read_only(
+    path: &Path,
+    task: String,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let root = discover_root(path)?;
+    let unavailable = || {
+        serde_json::to_value(TargetsFactsResult::Unavailable {
+            reason: TargetsFactsUnavailableReason::DaemonUnavailable,
+        })
+        .map_err(|error| error.to_string())
+    };
+    if probe_daemon(&root) != DaemonProbe::Current {
+        return unavailable();
+    }
+    match send_to_daemon(&root, &Request::TargetsFacts { task, limit }) {
+        DaemonRoute::Served(response) => unwrap_response(*response).or_else(|_| unavailable()),
+        DaemonRoute::Absent | DaemonRoute::Declined => unavailable(),
+    }
 }
 
 fn unwrap_response(resp: Response) -> Result<Value, String> {
@@ -4923,6 +4954,7 @@ fn run_command(
             json,
             limit,
             no_manifest,
+            read_only,
             clear,
             max_tier,
             precision,
@@ -4966,22 +4998,33 @@ fn run_command(
             let manifest_path = root
                 .join(pixel_index::index::SHARD_DIR)
                 .join("targets.json");
-            let data = execute(
-                &path,
-                Request::Targets {
-                    task: task.clone(),
-                    limit,
-                    max_tier: max_tier.clone(),
-                    precision,
-                },
-                false,
-            )?;
-            let active_tasks = if no_manifest {
+            if read_only && (max_tier.is_some() || precision) {
+                return Err("--read-only does not support --max-tier or --precision".to_string());
+            }
+            let data = if read_only {
+                execute_targets_facts_read_only(&path, task.clone(), limit)?
+            } else {
+                execute(
+                    &path,
+                    Request::Targets {
+                        task: task.clone(),
+                        limit,
+                        max_tier: max_tier.clone(),
+                        precision,
+                    },
+                    false,
+                )?
+            };
+            let active_tasks = if no_manifest || read_only {
                 None
             } else {
                 Some(write_targets_manifest(&manifest_path, &task, &data)?)
             };
-            finish_graph_cmd(data, json, pretty_targets)?;
+            if read_only {
+                print_data(&data, true)?;
+            } else {
+                finish_graph_cmd(data, json, pretty_targets)?;
+            }
             if let Some(active) = active_tasks {
                 eprintln!(
                     "targets manifest active: {} ({active} task(s)) — scoping enforced; run `pixel scope-task --clear` when the task ends",
@@ -7890,6 +7933,35 @@ mod tests {
         drop(pixel_facts::FactsStore::open(root).unwrap());
         let block = facts_status(root).expect("present once built");
         assert_eq!(block["commits_indexed"], 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_only_targets_refuse_an_absent_daemon_without_creating_an_index() {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-targets-facts-read-only-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.as_path();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let data = execute_targets_facts_read_only(root, "change login".into(), Some(8)).unwrap();
+
+        assert_eq!(data["status"], "unavailable");
+        assert_eq!(data["reason"], "daemon_unavailable");
+        assert!(
+            !root.join(".pixel").exists(),
+            "a read-only fact query must not create index state"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

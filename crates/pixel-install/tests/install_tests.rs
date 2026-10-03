@@ -3483,6 +3483,16 @@ fn plugin_assets_are_in_sync() {
     );
 }
 
+#[test]
+fn prompt_packet_guidance_allows_exploration_beyond_candidates() {
+    let prompt = include_str!("../assets/pixel-agent-prompt.md");
+    assert!(prompt.contains("bounded set of"));
+    assert!(
+        prompt.contains("not an action recommendation, an exhaustive map, or a read/edit boundary")
+    );
+    assert!(prompt.contains("continue exploring any files or"));
+}
+
 fn repo_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

@@ -21,7 +21,10 @@ use pixel_graph::{EdgeKind, EdgeRow, FileRow, GraphStore, SymbolKind, SymbolRow}
 use pixel_index::TrigramExtractor;
 use pixel_index::index::{MAX_FILE_BYTES, credential_path, open_regular_bounded};
 use pixel_index::indexset::{IndexSet, IndexSetError, OpenTimings, RefreshOutcome, millis};
-use pixel_proto::{Envelope, Epistemics, ErrorCode, PixelError, SnapshotInfo, Warning};
+use pixel_proto::{
+    Envelope, Epistemics, ErrorCode, PixelError, SnapshotInfo, TargetsFactsInputs,
+    TargetsFactsResult, TargetsFactsUnavailableReason, Warning,
+};
 use pixel_recall::embed::{EmbedKind, Embedder, open_default_embedder};
 
 pub const GRAPH_DB_FILE: &str = "graph.v2.db";
@@ -30,9 +33,9 @@ pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// to 7 with the Envelope v2 migration: the wire shape changed from
 /// `{ok, error, data}` to the full `Envelope` (`ok, op, protocol, requestId,
 /// snapshot, epistemics, budget, result, error, warnings`), gated by
-/// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`. 10: the `plan` op, which a
-/// daemon of an older build rejects as an unknown variant.
-pub const PROTOCOL_VERSION: u64 = 11;
+/// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`. 12 adds the deterministic
+/// `targets_facts` request, which older daemons reject as an unknown variant.
+pub const PROTOCOL_VERSION: u64 = 12;
 
 /// Rows a `search` returns when the request names no `limit`.
 pub const SEARCH_DEFAULT_ROWS: usize = 100;
@@ -51,6 +54,7 @@ const MAX_SEED_SYMBOLS: usize = 24;
 /// P0 is the only tier the doctrine mandates checking before the first
 /// edit, so it is the only tier worth spending tokens to pre-justify.
 const EVIDENCE_MAX_LINES_PER_TARGET: usize = 2;
+const TARGETS_FACTS_ALGORITHM_VERSION: u32 = 1;
 
 /// `context` and `uses`: edges returned per direction before elision.
 const EDGE_LIMIT: usize = 20;
@@ -916,6 +920,7 @@ impl Service {
                 scope,
             } => self.op_search(&pattern, limit, offset, paths.as_deref(), scope.as_deref()),
             Request::Targets { task, limit, max_tier, precision } => self.op_targets(&task, limit, max_tier.as_deref(), precision),
+            Request::TargetsFacts { task, limit } => self.op_targets_facts(&task, limit),
             Request::Symbol { name } => self.op_symbol(&name),
             Request::Skeleton { file } => self.op_skeleton(&file),
             Request::Context { uid, budget_tokens } => self.op_context(&uid, budget_tokens),
@@ -1307,15 +1312,96 @@ impl Service {
         max_tier: Option<&str>,
         precision: bool,
     ) -> Result<Value, String> {
+        self.op_targets_mode(task, limit, max_tier, precision, false)
+    }
+
+    /// Serve deterministic targets facts only from a fresh published snapshot.
+    fn op_targets_facts(&mut self, task: &str, limit: Option<usize>) -> Result<Value, String> {
+        let limit = limit.unwrap_or(pixel_rank::DEFAULT_LIMIT);
+        let publication = Arc::clone(&self.publication);
+        let state = publication.read().expect("publication lock poisoned");
+        let unavailable = |reason| {
+            serde_json::to_value(TargetsFactsResult::Unavailable { reason })
+                .map_err(|error| error.to_string())
+        };
+        if !state.healthy {
+            return unavailable(TargetsFactsUnavailableReason::PublicationUnhealthy);
+        }
+        if state.graph_lagging {
+            return unavailable(TargetsFactsUnavailableReason::GraphStale);
+        }
+
+        let index_status = match self.index.read() {
+            Ok(index) => index.status(),
+            Err(_) => return unavailable(TargetsFactsUnavailableReason::IndexUnavailable),
+        };
+        if index_status.commit_oid != pixel_index::gitsync::rev_parse_head(&self.root) {
+            return unavailable(TargetsFactsUnavailableReason::IndexStale);
+        }
+
+        let graph_path = self.graph_db_path();
+        if !graph_path.is_file() {
+            return unavailable(TargetsFactsUnavailableReason::GraphMissing);
+        }
+        let graph = match GraphStore::open_read_only(&graph_path) {
+            Ok(graph) => graph,
+            Err(_) => return unavailable(TargetsFactsUnavailableReason::GraphStale),
+        };
+        let stored_signature = match graph.meta_get(pixel_graph::build::FRESHNESS_KEY) {
+            Ok(signature) => signature,
+            Err(_) => return unavailable(TargetsFactsUnavailableReason::GraphStale),
+        };
+        let extractor_version = match graph.meta_get(pixel_graph::build::EXTRACTOR_VERSION_KEY) {
+            Ok(version) => version,
+            Err(_) => return unavailable(TargetsFactsUnavailableReason::GraphStale),
+        };
+        let graph_signature = pixel_graph::build::freshness_signature(&self.root);
+        if stored_signature.as_deref() != Some(graph_signature.as_str())
+            || extractor_version.as_deref() != Some(pixel_graph::build::EXTRACTOR_VERSION)
+        {
+            return unavailable(TargetsFactsUnavailableReason::GraphStale);
+        }
+
+        let inputs = TargetsFactsInputs {
+            task: task.to_owned(),
+            limit,
+            index_commit_oid: index_status.commit_oid,
+            index_base_files: index_status.base_files,
+            index_delta_files: index_status.delta_files,
+            index_overlay_files: index_status.overlay_files,
+            index_tombstones: index_status.tombstones,
+            graph_generation: state.generation,
+            graph_signature,
+            algorithm_version: TARGETS_FACTS_ALGORITHM_VERSION,
+            activity_reranking: false,
+            semantic_fallback: false,
+        };
+        self.graph = Some(graph);
+        let facts = self.op_targets_mode(task, Some(limit), None, false, true)?;
+        serde_json::to_value(TargetsFactsResult::Available { inputs, facts })
+            .map_err(|error| error.to_string())
+    }
+
+    fn op_targets_mode(
+        &mut self,
+        task: &str,
+        limit: Option<usize>,
+        max_tier: Option<&str>,
+        precision: bool,
+        fact_mode: bool,
+    ) -> Result<Value, String> {
         use pixel_graph::targets as graph_targets;
         use pixel_rank as engine;
 
         let started = Instant::now();
         let query = engine::tokenize_task(task)?;
 
-        let ensured = self.ensure_graph();
-        let graph_available = ensured.is_ok();
-        let build_info = ensured.ok().flatten();
+        let (graph_available, build_info) = if fact_mode {
+            (true, None)
+        } else {
+            let ensured = self.ensure_graph();
+            (ensured.is_ok(), ensured.ok().flatten())
+        };
 
         let all_paths = self.admitted_paths();
         // S6: explicit file paths named in the task, matched against the
@@ -1463,44 +1549,38 @@ impl Service {
         // error-sink channels are not wired here). The per-path test penalty
         // demotes test files only when the task does NOT mention tests/specs
         // (a test file is a worse target for a non-test task).
-        let target_paths: Vec<String> = report.targets.iter().map(|t| t.path.clone()).collect();
-        let signals = self.engine_signals(&target_paths);
-        // Per-path test penalty: demote a test file only when the task does
-        // NOT mention tests/specs (a test file is a *worse* target for a
-        // non-test task, but a *better* one for a test task).
-        let mentions_tests = task.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| {
-            matches!(
-                t.to_ascii_lowercase().as_str(),
-                "test" | "tests" | "spec" | "specs"
-            )
-        });
-        let penalty = |path: &str| -> f64 {
-            if pixel_rank::signals::is_test_path(path) && !mentions_tests {
-                0.7
-            } else {
-                1.0
+        if !fact_mode {
+            let target_paths: Vec<String> = report.targets.iter().map(|t| t.path.clone()).collect();
+            let signals = self.engine_signals(&target_paths);
+            // Per-path test penalty: demote a test file only when the task does
+            // NOT mention tests/specs (a test file is a *worse* target for a
+            // non-test task, but a *better* one for a test task).
+            let mentions_tests = task.split(|c: char| !c.is_ascii_alphanumeric()).any(|t| {
+                matches!(
+                    t.to_ascii_lowercase().as_str(),
+                    "test" | "tests" | "spec" | "specs"
+                )
+            });
+            let penalty = |path: &str| -> f64 {
+                if pixel_rank::signals::is_test_path(path) && !mentions_tests {
+                    0.7
+                } else {
+                    1.0
+                }
+            };
+            let weights =
+                engine::rerank::RerankWeights::from(&engine::signals::SignalOptions::default());
+            report.targets =
+                engine::rerank::rerank_targets(report.targets, &signals, &weights, penalty);
+            let has_p0_p1 = report
+                .targets
+                .iter()
+                .any(|t| matches!(t.tier.as_str(), "P0" | "P1"));
+            if semantic_fallback_wanted(has_p0_p1, max_tier) {
+                let eff_limit = limit.unwrap_or(engine::DEFAULT_LIMIT);
+                let fallback = self.semantic_fallback(task, eff_limit);
+                apply_semantic_leads(&mut report, &fallback, eff_limit);
             }
-        };
-        // The formula reads the tunable coefficients instead of its own
-        // literals: the table `engine_signals` scored this bundle with
-        // (`SignalOptions::default()`; neither call site tunes the weights yet).
-        let weights =
-            engine::rerank::RerankWeights::from(&engine::signals::SignalOptions::default());
-        report.targets =
-            engine::rerank::rerank_targets(report.targets, &signals, &weights, penalty);
-        // Cross-lingual semantic fallback: when lexical targeting returns 0
-        // P0/P1 files (e.g. a French task against English code), embed the
-        // query with the multilingual potion-code model and inject top-k
-        // files as a "P1 (semantic)" tier. English queries that produce P0/P1
-        // targets lexically never hit this path.
-        let has_p0_p1 = report
-            .targets
-            .iter()
-            .any(|t| matches!(t.tier.as_str(), "P0" | "P1"));
-        if semantic_fallback_wanted(has_p0_p1, max_tier) {
-            let eff_limit = limit.unwrap_or(engine::DEFAULT_LIMIT);
-            let fallback = self.semantic_fallback(task, eff_limit);
-            apply_semantic_leads(&mut report, &fallback, eff_limit);
         }
         let mut out = serde_json::to_value(&report).map_err(|e| e.to_string())?;
         // Phase 3 item 1: attach per-file content evidence to each target so
@@ -1553,7 +1633,9 @@ impl Service {
             }
         }
         if let Some(stats) = out.get_mut("stats") {
-            stats["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
+            if !fact_mode {
+                stats["elapsed_ms"] = json!(started.elapsed().as_millis() as u64);
+            }
             stats["commit_oid"] = json!(
                 self.index
                     .read()
@@ -1561,6 +1643,12 @@ impl Service {
                     .status()
                     .commit_oid
             );
+        }
+        // The regular targets command owns an enforcement manifest and keeps
+        // its legacy closed-list explanation. Fact packets never enforce a
+        // read/edit boundary, so do not carry that imperative prose forward.
+        if fact_mode && let Some(object) = out.as_object_mut() {
+            object.remove("closed_world");
         }
         merge_build_info(&mut out, build_info);
         Ok(out)
@@ -3327,6 +3415,7 @@ pub const RETRIEVAL_OPS: &[&str] = &[
     "search",
     "resolve",
     "targets",
+    "targets_facts",
     "impact",
     "uses",
     "trace",
@@ -6543,6 +6632,165 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    #[test]
+    fn targets_facts_refuse_missing_graph_without_building_it() {
+        let root = tmpdir("targets-facts-missing-graph");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut service = Service::open(&root).unwrap();
+        let graph_path = service.graph_db_path();
+        assert!(!graph_path.exists(), "fixture starts with no graph file");
+        let response = service.handle(Request::TargetsFacts {
+            task: "change login".into(),
+            limit: Some(8),
+        });
+
+        assert!(response.ok, "availability is a typed result: {response:?}");
+        assert_eq!(response.data()["status"], "unavailable");
+        assert_eq!(response.data()["reason"], "graph_missing");
+        assert!(
+            !graph_path.exists(),
+            "a fact request must not create a missing graph"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn targets_facts_refuse_stale_graph_without_refreshing_it() {
+        let root = tmpdir("targets-facts-stale-graph");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut service = Service::open(&root).unwrap();
+        let built = service.handle(Request::Targets {
+            task: "change login".into(),
+            limit: Some(8),
+            max_tier: None,
+            precision: false,
+        });
+        assert!(built.ok, "fixture graph build: {built:?}");
+        let graph_path = service.graph_db_path();
+        let graph_before = std::fs::read(&graph_path).unwrap();
+        std::fs::write(root.join("login.rs"), "pub fn login_v2() {}\n").unwrap();
+
+        let response = service.handle(Request::TargetsFacts {
+            task: "change login".into(),
+            limit: Some(8),
+        });
+
+        assert!(response.ok, "availability is a typed result: {response:?}");
+        assert_eq!(response.data()["status"], "unavailable");
+        assert_eq!(response.data()["reason"], "graph_stale");
+        assert_eq!(
+            std::fs::read(&graph_path).unwrap(),
+            graph_before,
+            "a fact request must not refresh a stale graph"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn targets_facts_refuse_stale_index_without_reopening_it() {
+        let root = tmpdir("targets-facts-stale-index");
+        std::fs::write(root.join("login.rs"), "pub fn login() {}\n").unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut service = Service::open(&root).unwrap();
+        let built = service.handle(Request::Targets {
+            task: "change login".into(),
+            limit: Some(8),
+            max_tier: None,
+            precision: false,
+        });
+        assert!(built.ok, "fixture graph build: {built:?}");
+        let graph_path = service.graph_db_path();
+        let graph_before = std::fs::read(&graph_path).unwrap();
+        std::fs::write(root.join("session.rs"), "pub fn session() {}\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "add session"]);
+
+        let response = service.handle(Request::TargetsFacts {
+            task: "change session".into(),
+            limit: Some(8),
+        });
+
+        assert!(response.ok, "availability is a typed result: {response:?}");
+        assert_eq!(response.data()["status"], "unavailable");
+        assert_eq!(response.data()["reason"], "index_stale");
+        assert_eq!(
+            std::fs::read(&graph_path).unwrap(),
+            graph_before,
+            "a fact request must not refresh a stale index or graph"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn targets_facts_repeat_identically_and_declare_fixed_inputs() {
+        let root = tmpdir("targets-facts-deterministic");
+        std::fs::write(
+            root.join("login.rs"),
+            "pub fn login() {}\n#[cfg(test)] mod tests {}\n",
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let mut service = Service::open(&root).unwrap();
+        let built = service.handle(Request::Targets {
+            task: "change login".into(),
+            limit: Some(8),
+            max_tier: None,
+            precision: false,
+        });
+        assert!(built.ok, "fixture graph build: {built:?}");
+        let graph_path = service.graph_db_path();
+        let graph_before = std::fs::read(&graph_path).unwrap();
+        let request = || Request::TargetsFacts {
+            task: "change login".into(),
+            limit: Some(8),
+        };
+        let first = service.handle(request());
+        let second = service.handle(request());
+
+        assert!(first.ok, "first fact result: {first:?}");
+        assert!(second.ok, "second fact result: {second:?}");
+        assert_eq!(first.data(), second.data(), "same inputs yield same facts");
+        assert_eq!(first.data()["status"], "available");
+        let inputs = &first.data()["inputs"];
+        assert_eq!(inputs["task"], "change login");
+        assert_eq!(inputs["limit"], 8);
+        assert_eq!(inputs["algorithm_version"], TARGETS_FACTS_ALGORITHM_VERSION);
+        assert!(!inputs["activity_reranking"].as_bool().unwrap());
+        assert!(!inputs["semantic_fallback"].as_bool().unwrap());
+        assert_eq!(
+            inputs["graph_signature"],
+            pixel_graph::build::freshness_signature(&root)
+        );
+        assert!(
+            first.data()["facts"]["stats"].get("elapsed_ms").is_none(),
+            "wall-clock timing is not part of deterministic facts"
+        );
+        assert!(
+            first.data()["facts"].get("closed_world").is_none(),
+            "fact packets must not carry the targets-manifest read/edit boundary"
+        );
+        assert_eq!(
+            std::fs::read(&graph_path).unwrap(),
+            graph_before,
+            "fact queries leave the published graph unchanged"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// S1 fix: ranked search must match a file whose basename contains a
     /// single word of a multi-word pattern ("gain ledger" → `ledger.ts`),
     /// not require the whole phrase to be a basename substring. Without the
@@ -6645,6 +6893,13 @@ mod tests {
                     limit: Some(5),
                     max_tier: None,
                     precision: false,
+                },
+            ),
+            (
+                "targets_facts",
+                Request::TargetsFacts {
+                    task: "alpha beta".into(),
+                    limit: Some(5),
                 },
             ),
             (

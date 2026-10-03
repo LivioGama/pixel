@@ -57,6 +57,14 @@ pub enum Op {
         #[serde(default)]
         precision: bool,
     },
+    /// Deterministic prompt-start file facts from already-published indexes.
+    /// This operation never builds or refreshes either index; unavailable or
+    /// stale inputs are reported in a typed successful result.
+    TargetsFacts {
+        task: String,
+        #[serde(default)]
+        limit: Option<usize>,
+    },
     Symbol {
         name: String,
     },
@@ -373,6 +381,7 @@ impl Op {
             Op::Recall { .. } => "recall",
             Op::Search { .. } => "search",
             Op::Targets { .. } => "targets",
+            Op::TargetsFacts { .. } => "targets_facts",
             Op::Symbol { .. } => "symbol",
             Op::Skeleton { .. } => "skeleton",
             Op::Context { .. } => "context",
@@ -428,6 +437,7 @@ pub const SESSION_CAPABILITIES: &[&str] = &[
     "recall",
     "search",
     "targets",
+    "targets_facts",
     "symbol",
     "skeleton",
     "context",
@@ -523,6 +533,33 @@ mod tests {
                 limit: None,
                 max_tier: None,
                 precision: false,
+            }
+        );
+    }
+
+    #[test]
+    fn targets_facts_round_trips_with_defaulted_limit() {
+        let op = Op::TargetsFacts {
+            task: "fix login flow".into(),
+            limit: Some(12),
+        };
+        let value = serde_json::to_value(&op).unwrap();
+        assert_eq!(
+            value,
+            json!({"op": "targets_facts", "task": "fix login flow", "limit": 12})
+        );
+        assert_eq!(serde_json::from_value::<Op>(value).unwrap(), op);
+
+        let defaulted: Op = serde_json::from_value(json!({
+            "op": "targets_facts",
+            "task": "fix login flow"
+        }))
+        .unwrap();
+        assert_eq!(
+            defaulted,
+            Op::TargetsFacts {
+                task: "fix login flow".into(),
+                limit: None,
             }
         );
     }
@@ -675,6 +712,13 @@ mod tests {
                     precision: false,
                 },
                 "targets",
+            ),
+            (
+                Op::TargetsFacts {
+                    task: "".into(),
+                    limit: None,
+                },
+                "targets_facts",
             ),
             (Op::Symbol { name: "".into() }, "symbol"),
             (Op::Skeleton { file: "".into() }, "skeleton"),
@@ -920,6 +964,7 @@ mod tests {
             "recall",
             "search",
             "targets",
+            "targets_facts",
             "symbol",
             "skeleton",
             "context",
