@@ -14,7 +14,6 @@ pub(crate) fn settings(root: &Path) -> Result<Value, String> {
 /// Whether the task gates may deny a tool call or a stop. Off by default:
 /// tasks still bind, observe and record — the verdicts are advisory unless
 /// the repository asks for enforcement (`task.enforcement: enforce`).
-#[cfg_attr(test, mutants::skip)] // advisory and off are aliases: `Ok(false)` is an equivalent mutant
 pub(crate) fn enabled(root: &Path) -> Result<bool, String> {
     let config = settings(root)?;
     match config.get("enforcement").and_then(Value::as_str) {
@@ -234,9 +233,11 @@ mod tests {
     }
 
     #[test]
-    fn enabled_should_honor_explicit_off_and_reject_invalid_enforcement() {
+    fn enabled_should_require_explicit_enforcement_and_reject_invalid_settings() {
         let root = Scratch::new();
-        assert!(enabled(&root.0).unwrap());
+        assert!(!enabled(&root.0).unwrap());
+        root.write(&json!({"enforcement":"advisory"}));
+        assert!(!enabled(&root.0).unwrap());
         root.write(&json!({"enforcement":"off"}));
         assert!(!enabled(&root.0).unwrap());
         root.write(&json!({"enforcement":"enforce"}));
@@ -244,7 +245,7 @@ mod tests {
         root.write(&json!({"enforcement":"invalid"}));
         assert_eq!(
             enabled(&root.0).unwrap_err(),
-            "task.enforcement must be enforce or off"
+            "task.enforcement must be enforce, advisory or off"
         );
     }
 
