@@ -1834,7 +1834,7 @@ impl Service {
             probe["text"] = json!(rendered.text);
             probe["rendered_tokens"] = json!(estimate_tokens(&rendered.text));
             let excess = value_tokens(&probe).saturating_sub(budget);
-            if excess == 0 || text_budget == 0 {
+            if excess == 0 {
                 break;
             }
             // Shrink from what the text used, not from the budget it had:
@@ -1850,7 +1850,7 @@ impl Service {
         if reserved.contains(&"elided_items") {
             response["elided_items"] = json!(source_elided_items.saturating_add(rendered.omitted));
         }
-        if rendered.layer != "L2" || rendered.omitted > 0 || rendered.target_condensed {
+        if rendered.is_partial() {
             response["truncated"] = json!(true);
         }
         let mut text = rendered.text;
@@ -4467,6 +4467,14 @@ mod bridge {
         /// True when the target's body is not shown whole: cut excerpt,
         /// crux lines instead of the body, or no body at all.
         pub target_condensed: bool,
+    }
+
+    impl Rendered {
+        /// True unless the target's whole body is shown and no neighbour
+        /// was left out or shown as less than its body.
+        pub fn is_partial(&self) -> bool {
+            self.layer != "L2" || self.omitted > 0 || self.target_condensed
+        }
     }
 
     /// `target` followed by the distinct layers the neighbours got, richest first.
@@ -8333,9 +8341,41 @@ mod tests {
         assert_eq!(bare.layer, "L1+L1");
         assert!(bare.target_condensed);
 
+        // The neighbours get exactly what the target's form leaves.
+        let body = pixel_context::estimate_tokens(&bridge::render_context(&items[..1], 5000).text);
+        let distilled_alone = bridge::render_context(&items[..1], 60);
+        assert_eq!(distilled_alone.layer, "L1+crux");
+        let crux_form = pixel_context::estimate_tokens(&distilled_alone.text);
+        let neighbour_name = pixel_context::estimate_tokens("src/a.rs:1-40 function neighbour\n");
+        assert_eq!(
+            bridge::render_context(&items, body + neighbour_name).layer,
+            "L2+L0"
+        );
+        assert_eq!(
+            bridge::render_context(&items, crux_form + neighbour_name).layer,
+            "L1+crux+L0"
+        );
+
         let starved = bridge::render_context(&items, 0);
         assert_eq!(starved.layer, "elided");
         assert_eq!(starved.omitted, 2);
+
+        let partial = |layer: &str, omitted: usize, target_condensed: bool| {
+            bridge::Rendered {
+                text: String::new(),
+                layer: layer.to_owned(),
+                omitted,
+                target_condensed,
+            }
+            .is_partial()
+        };
+        assert!(!partial("L2", 0, false), "whole body, nothing left out");
+        assert!(
+            partial("L2+L1", 0, false),
+            "neighbours shown without their bodies"
+        );
+        assert!(partial("L2", 1, false), "every neighbour left out");
+        assert!(partial("L2", 0, true), "the body itself was cut");
 
         let empty = bridge::render_context(&[], 100);
         assert_eq!(

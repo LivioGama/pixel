@@ -391,7 +391,8 @@ mod tests {
         let marker = "… 2 more items elided (budget): h2 src/m2.rs:10, h3 src/m3.rs:10\n";
         let kept = [line(&items[0], Layer::L0), line(&items[1], Layer::L0)];
         let budget = tokens_of(&[kept[0].clone(), kept[1].clone(), marker.to_owned()]);
-        let fit = fit_items(&items, budget, Layer::L0);
+        // The elision line's room is kept through the raising passes too.
+        let fit = fit_items(&items, budget, Layer::L2);
         assert_eq!(
             fit.layers,
             vec![Some(Layer::L0), Some(Layer::L0), None, None]
@@ -411,6 +412,19 @@ mod tests {
         let fit = fit_items(&items, estimate_tokens(named), Layer::L2);
         assert_eq!(fit.layers, vec![None; 8]);
         assert_eq!(fit.text, named);
+    }
+
+    #[test]
+    fn fit_items_should_name_exactly_five_omissions_without_a_remainder() {
+        let items: Vec<ContextItem> = (0..5)
+            .map(|i| item(&format!("h{i}"), &format!("src/m{i}.rs"), 2))
+            .collect();
+        let named = "… 5 more items elided (budget): h0 src/m0.rs:10, h1 src/m1.rs:10, \
+                     h2 src/m2.rs:10, h3 src/m3.rs:10, h4 src/m4.rs:10\n";
+        assert_eq!(
+            fit_items(&items, estimate_tokens(named), Layer::L2).text,
+            named
+        );
     }
 
     #[test]
