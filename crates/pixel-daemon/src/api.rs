@@ -119,10 +119,6 @@ pub use pixel_proto::Op as Request;
 use crate::evaluate;
 use pixel_proto::evaluate as wire;
 
-#[cfg(test)]
-#[path = "evaluate_tests.rs"]
-mod evaluate_tests;
-
 /// The daemon response type: a `pixel_proto::Envelope<serde_json::Value>`.
 /// Success → `Envelope::success(op_name, result)`; failure →
 /// `Envelope::failure(op_name, error)`. The old ad-hoc `{ok, error, data}`
@@ -3956,155 +3952,6 @@ fn context_item(
                 (s.start_line > 0 && line <= s.end_line).then(|| (line, text.clone()))
             })
             .collect(),
-    }
-}
-
-#[cfg(test)]
-mod context_crux_coordinate_tests {
-    use super::*;
-
-    fn symbol(start_line: u32, end_line: u32) -> SymbolRow {
-        SymbolRow {
-            id: 1,
-            uid: "sample.rs#check#function".to_owned(),
-            file_id: 1,
-            name: "check".to_owned(),
-            qualified: "check".to_owned(),
-            kind: pixel_graph::SymbolKind::Function,
-            start_line,
-            end_line,
-            sig: "pub fn check(flag: bool) -> i32 {".to_owned(),
-        }
-    }
-
-    #[test]
-    fn context_crux_coordinates_match_real_source_after_shift() {
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-crux-coordinates-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        let body = "pub fn check(flag: bool) -> i32 {\n    if flag {\n        return 1;\n    }\n    0\n}\n";
-        let crux = vec![(2, "if flag {".to_owned()), (3, "return 1;".to_owned())];
-        let files = HashMap::from([(1, "sample.rs".to_owned())]);
-        for padding in [10, 20] {
-            let source = format!("{}{body}", "// padding\n".repeat(padding));
-            std::fs::write(dir.join("sample.rs"), &source).unwrap();
-            let item = context_item(
-                &source,
-                &symbol(padding as u32 + 1, padding as u32 + 6),
-                &files,
-                4096,
-                &crux,
-            );
-            for (line, text) in &item.crux {
-                assert_eq!(source.lines().nth(*line as usize - 1).unwrap().trim(), text);
-            }
-            let rendered = bridge::render_context(&[item], 2000).text;
-            assert!(rendered.contains(&format!("crux:{} if flag {{", padding + 2)));
-            assert!(rendered.contains(&format!("crux:{} return 1;", padding + 3)));
-        }
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn context_crux_rejects_zero_out_of_span_and_overflow_coordinates() {
-        let files = HashMap::new();
-        let crux = vec![
-            (0, "invalid".to_owned()),
-            (2, "valid".to_owned()),
-            (9, "outside".to_owned()),
-        ];
-        let item = context_item("", &symbol(11, 16), &files, 0, &crux);
-        assert_eq!(item.crux, vec![(12, "valid".to_owned())]);
-        assert!(
-            context_item("", &symbol(0, 6), &files, 0, &crux)
-                .crux
-                .is_empty()
-        );
-        assert!(
-            context_item("", &symbol(u32::MAX, u32::MAX), &files, 0, &crux)
-                .crux
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn context_warm_graph_omits_stale_source_and_crux_with_truthful_warning() {
-        let root = std::env::temp_dir().join(format!(
-            "pixel-crux-freshness-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        assert!(
-            std::process::Command::new("git")
-                .args(["init", "-q"])
-                .current_dir(&root)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let body = "pub fn check(flag: bool) -> i32 {\n    if flag {\n        return 1;\n    }\n    0\n}\n";
-        let original = format!("{}{body}", "// padding\n".repeat(10));
-        std::fs::write(root.join("sample.rs"), &original).unwrap();
-        let request = || Request::Context {
-            uid: "sample.rs#check#function".to_owned(),
-            budget_tokens: Some(2000),
-        };
-        let mut service = Service::open(&root).unwrap();
-        let before = service.handle(request());
-        assert!(before.ok, "{before:?}");
-        assert!(
-            before.data()["text"]
-                .as_str()
-                .unwrap()
-                .contains("crux:13 return 1;")
-        );
-
-        std::fs::write(
-            root.join("sample.rs"),
-            format!(
-                "{}{}",
-                "// shifted\n".repeat(10),
-                original.replace("return 1;", "return 2;")
-            ),
-        )
-        .unwrap();
-        let stale = service.handle(request());
-        assert!(stale.ok, "{stale:?}");
-        assert_eq!(stale.data()["text"], "");
-        assert!(stale.data().get("symbol").is_none());
-        let wire = serde_json::to_value(&stale).unwrap();
-        assert_eq!(wire["epistemics"]["lower_bound"], true);
-        assert_eq!(wire["epistemics"]["closed_world"], false);
-        assert!(wire["warnings"].as_array().unwrap().iter().any(|warning| {
-            warning["message"]
-                .as_str()
-                .unwrap()
-                .contains("source differs")
-        }));
-
-        // A fresh graph snapshot recovers normal excerpts and absolute lines.
-        let mut refreshed = Service::open(&root).unwrap();
-        let after = refreshed.handle(request());
-        assert!(after.ok, "{after:?}");
-        assert_eq!(after.data()["symbol"]["start_line"], 21);
-        assert!(
-            after.data()["text"]
-                .as_str()
-                .unwrap()
-                .contains("crux:23 return 2;")
-        );
-        assert!(!after.data()["text"].as_str().unwrap().contains("return 1;"));
-        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
@@ -8466,5 +8313,158 @@ mod tests {
         );
         assert!(!page_has_more(0, 0, 0));
         assert!(page_has_more(0, 2, 3));
+    }
+}
+
+#[cfg(test)]
+#[path = "evaluate_tests.rs"]
+mod evaluate_tests;
+
+#[cfg(test)]
+mod context_crux_coordinate_tests {
+    use super::*;
+
+    fn symbol(start_line: u32, end_line: u32) -> SymbolRow {
+        SymbolRow {
+            id: 1,
+            uid: "sample.rs#check#function".to_owned(),
+            file_id: 1,
+            name: "check".to_owned(),
+            qualified: "check".to_owned(),
+            kind: pixel_graph::SymbolKind::Function,
+            start_line,
+            end_line,
+            sig: "pub fn check(flag: bool) -> i32 {".to_owned(),
+        }
+    }
+
+    #[test]
+    fn context_crux_coordinates_match_real_source_after_shift() {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-crux-coordinates-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let body = "pub fn check(flag: bool) -> i32 {\n    if flag {\n        return 1;\n    }\n    0\n}\n";
+        let crux = vec![(2, "if flag {".to_owned()), (3, "return 1;".to_owned())];
+        let files = HashMap::from([(1, "sample.rs".to_owned())]);
+        for padding in [10, 20] {
+            let source = format!("{}{body}", "// padding\n".repeat(padding));
+            std::fs::write(dir.join("sample.rs"), &source).unwrap();
+            let item = context_item(
+                &source,
+                &symbol(padding as u32 + 1, padding as u32 + 6),
+                &files,
+                4096,
+                &crux,
+            );
+            for (line, text) in &item.crux {
+                assert_eq!(source.lines().nth(*line as usize - 1).unwrap().trim(), text);
+            }
+            let rendered = bridge::render_context(&[item], 2000).text;
+            assert!(rendered.contains(&format!("crux:{} if flag {{", padding + 2)));
+            assert!(rendered.contains(&format!("crux:{} return 1;", padding + 3)));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn context_crux_rejects_zero_out_of_span_and_overflow_coordinates() {
+        let files = HashMap::new();
+        let crux = vec![
+            (0, "invalid".to_owned()),
+            (2, "valid".to_owned()),
+            (9, "outside".to_owned()),
+        ];
+        let item = context_item("", &symbol(11, 16), &files, 0, &crux);
+        assert_eq!(item.crux, vec![(12, "valid".to_owned())]);
+        assert!(
+            context_item("", &symbol(0, 6), &files, 0, &crux)
+                .crux
+                .is_empty()
+        );
+        assert!(
+            context_item("", &symbol(u32::MAX, u32::MAX), &files, 0, &crux)
+                .crux
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn context_warm_graph_omits_stale_source_and_crux_with_truthful_warning() {
+        let root = std::env::temp_dir().join(format!(
+            "pixel-crux-freshness-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let body = "pub fn check(flag: bool) -> i32 {\n    if flag {\n        return 1;\n    }\n    0\n}\n";
+        let original = format!("{}{body}", "// padding\n".repeat(10));
+        std::fs::write(root.join("sample.rs"), &original).unwrap();
+        let request = || Request::Context {
+            uid: "sample.rs#check#function".to_owned(),
+            budget_tokens: Some(2000),
+        };
+        let mut service = Service::open(&root).unwrap();
+        let before = service.handle(request());
+        assert!(before.ok, "{before:?}");
+        assert!(
+            before.data()["text"]
+                .as_str()
+                .unwrap()
+                .contains("crux:13 return 1;")
+        );
+
+        std::fs::write(
+            root.join("sample.rs"),
+            format!(
+                "{}{}",
+                "// shifted\n".repeat(10),
+                original.replace("return 1;", "return 2;")
+            ),
+        )
+        .unwrap();
+        let stale = service.handle(request());
+        assert!(stale.ok, "{stale:?}");
+        assert_eq!(stale.data()["text"], "");
+        assert!(stale.data().get("symbol").is_none());
+        let wire = serde_json::to_value(&stale).unwrap();
+        assert_eq!(wire["epistemics"]["lower_bound"], true);
+        assert_eq!(wire["epistemics"]["closed_world"], false);
+        assert!(wire["warnings"].as_array().unwrap().iter().any(|warning| {
+            warning["message"]
+                .as_str()
+                .unwrap()
+                .contains("source differs")
+        }));
+
+        // A fresh graph snapshot recovers normal excerpts and absolute lines.
+        let mut refreshed = Service::open(&root).unwrap();
+        let after = refreshed.handle(request());
+        assert!(after.ok, "{after:?}");
+        assert_eq!(after.data()["symbol"]["start_line"], 21);
+        assert!(
+            after.data()["text"]
+                .as_str()
+                .unwrap()
+                .contains("crux:23 return 2;")
+        );
+        assert!(!after.data()["text"].as_str().unwrap().contains("return 1;"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

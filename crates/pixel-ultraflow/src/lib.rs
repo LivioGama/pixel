@@ -30,9 +30,6 @@ pub mod elements;
 pub mod replay;
 pub mod value;
 
-#[cfg(test)]
-pub(crate) mod testutil;
-
 pub use action::{Action, ActionSpace, Choice, Op};
 pub use compose::{Composed, FlowMeta, compose};
 pub use decide::{Decider, Decision, Distribution};
@@ -42,3 +39,6 @@ pub use discover::{
 pub use elements::{Element, Observation};
 pub use replay::{ConditionRecord, Deviation, ReplayReport, ReplayRequest, replay};
 pub use value::{Resolved, ValueChoice, ValueSource, Var};
+
+#[cfg(test)]
+pub(crate) mod testutil;

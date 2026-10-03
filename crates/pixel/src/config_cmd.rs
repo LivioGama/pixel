@@ -811,84 +811,6 @@ fn yes_no(value: bool) -> String {
     }
 }
 
-#[cfg(test)]
-mod picker_tests {
-    use super::*;
-
-    #[test]
-    fn the_picker_choice_tokens_keep_the_same_display_width() {
-        // The active and inactive tokens must overwrite each other in place
-        // without erasing, so their widths must match exactly.
-        let (yes_active, no_inactive) = choice_tokens(true, false);
-        let (yes_inactive, no_active) = choice_tokens(false, false);
-        for token in [
-            yes_active.clone(),
-            no_inactive.clone(),
-            yes_inactive,
-            no_active.clone(),
-        ] {
-            assert_eq!(token.chars().count(), 3, "{token}");
-        }
-        assert_eq!(yes_active, "(Y)");
-        assert_eq!(no_active, "(n)");
-    }
-
-    #[test]
-    fn color_on_paints_the_active_choice_and_the_inactive_stays_dim() {
-        let (yes_active, _) = choice_tokens(true, true);
-        assert_eq!(yes_active, "\x1b[1;32m(Y)\x1b[0m");
-        let (_, no_active) = choice_tokens(false, true);
-        assert_eq!(no_active, "\x1b[1;33m(n)\x1b[0m");
-    }
-
-    #[test]
-    fn render_choice_writes_the_question_with_the_active_choice_marked() {
-        let mut output = Vec::new();
-        render_choice(&mut output, "Choice?", true, "  hint", false).unwrap();
-        let line = String::from_utf8(output).unwrap();
-        assert!(line.contains("Choice? [ (Y) /  n  ]  hint"), "{line}");
-        assert!(line.starts_with('\r'), "{line}");
-
-        let mut output = Vec::new();
-        render_choice(&mut output, "Choice?", false, "  hint", false).unwrap();
-        let line = String::from_utf8(output).unwrap();
-        assert!(line.contains("Choice? [  Y  / (n) ]  hint"), "{line}");
-    }
-
-    #[test]
-    fn the_review_rows_line_up_on_one_key_column() {
-        let mut output = Vec::new();
-        let review = [
-            ("metrics", "on".to_string()),
-            ("daemon auto-start", "yes".to_string()),
-            ("classify", "enabled".to_string()),
-        ];
-        let key_width = review
-            .iter()
-            .map(|(key, _)| key.chars().count())
-            .max()
-            .unwrap_or(0);
-        for (key, value) in &review {
-            writeln!(
-                output,
-                "  {}  {}",
-                paint(false, "2", &format!("{key:<key_width$}")),
-                value
-            )
-            .unwrap();
-        }
-        let rendered = String::from_utf8(output).unwrap();
-        let value_column = 2 + key_width + 2;
-        for (row, (_, value)) in rendered.lines().zip(review.iter()) {
-            assert_eq!(
-                row.chars().skip(value_column).collect::<String>(),
-                *value,
-                "{row}"
-            );
-        }
-    }
-}
-
 /// One yes/no question: the arrow picker on a live terminal, line input
 /// otherwise. `None` means cancelled.
 #[cfg_attr(test, mutants::skip)] // the raw branch needs a real tty; each branch is tested through its own fn
@@ -2517,5 +2439,83 @@ mod tests {
         assert_eq!(stored["classify"]["ollaya"]["model"], "winnow:e4b");
 
         restore_home(saved);
+    }
+}
+
+#[cfg(test)]
+mod picker_tests {
+    use super::*;
+
+    #[test]
+    fn the_picker_choice_tokens_keep_the_same_display_width() {
+        // The active and inactive tokens must overwrite each other in place
+        // without erasing, so their widths must match exactly.
+        let (yes_active, no_inactive) = choice_tokens(true, false);
+        let (yes_inactive, no_active) = choice_tokens(false, false);
+        for token in [
+            yes_active.clone(),
+            no_inactive.clone(),
+            yes_inactive,
+            no_active.clone(),
+        ] {
+            assert_eq!(token.chars().count(), 3, "{token}");
+        }
+        assert_eq!(yes_active, "(Y)");
+        assert_eq!(no_active, "(n)");
+    }
+
+    #[test]
+    fn color_on_paints_the_active_choice_and_the_inactive_stays_dim() {
+        let (yes_active, _) = choice_tokens(true, true);
+        assert_eq!(yes_active, "\x1b[1;32m(Y)\x1b[0m");
+        let (_, no_active) = choice_tokens(false, true);
+        assert_eq!(no_active, "\x1b[1;33m(n)\x1b[0m");
+    }
+
+    #[test]
+    fn render_choice_writes_the_question_with_the_active_choice_marked() {
+        let mut output = Vec::new();
+        render_choice(&mut output, "Choice?", true, "  hint", false).unwrap();
+        let line = String::from_utf8(output).unwrap();
+        assert!(line.contains("Choice? [ (Y) /  n  ]  hint"), "{line}");
+        assert!(line.starts_with('\r'), "{line}");
+
+        let mut output = Vec::new();
+        render_choice(&mut output, "Choice?", false, "  hint", false).unwrap();
+        let line = String::from_utf8(output).unwrap();
+        assert!(line.contains("Choice? [  Y  / (n) ]  hint"), "{line}");
+    }
+
+    #[test]
+    fn the_review_rows_line_up_on_one_key_column() {
+        let mut output = Vec::new();
+        let review = [
+            ("metrics", "on".to_string()),
+            ("daemon auto-start", "yes".to_string()),
+            ("classify", "enabled".to_string()),
+        ];
+        let key_width = review
+            .iter()
+            .map(|(key, _)| key.chars().count())
+            .max()
+            .unwrap_or(0);
+        for (key, value) in &review {
+            writeln!(
+                output,
+                "  {}  {}",
+                paint(false, "2", &format!("{key:<key_width$}")),
+                value
+            )
+            .unwrap();
+        }
+        let rendered = String::from_utf8(output).unwrap();
+        let value_column = 2 + key_width + 2;
+        for (row, (_, value)) in rendered.lines().zip(review.iter()) {
+            assert_eq!(
+                row.chars().skip(value_column).collect::<String>(),
+                *value,
+                "{row}"
+            );
+        }
     }
 }

@@ -499,6 +499,72 @@ pub mod fast {
     }
 }
 
+#[cfg(all(test, feature = "model2vec"))]
+mod potion_gate_tests {
+    use super::potion::{finish_load, require_set_up};
+
+    const CODE_16M: &str = "minishlab/potion-code-16M-v2";
+    const CODE_64M: &str = "minishlab/potion-code-64M-v2";
+
+    #[test]
+    fn require_set_up_should_refuse_only_a_model_never_set_up_without_download() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = require_set_up(dir.path(), CODE_16M, false).unwrap_err();
+        assert!(err.contains("run `pixel recall setup`"), "{err}");
+        assert_eq!(require_set_up(dir.path(), CODE_16M, true), Ok(()));
+
+        std::fs::write(crate::potion_marker(dir.path(), CODE_16M), CODE_16M).unwrap();
+        assert_eq!(require_set_up(dir.path(), CODE_16M, false), Ok(()));
+        assert!(require_set_up(dir.path(), CODE_64M, false).is_err());
+    }
+
+    /// A download that loaded writes this repository's marker, which is what
+    /// makes the daemon see its model as cached; a load without download,
+    /// or one that produced no embedding, writes none.
+    #[test]
+    fn finish_load_should_mark_only_a_successful_download() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(finish_load(dir.path(), CODE_64M, true, 256), Ok(256));
+        assert_eq!(
+            std::fs::read_to_string(crate::potion_marker(dir.path(), CODE_64M)).unwrap(),
+            CODE_64M,
+            "the repository's own marker, not the shared legacy one"
+        );
+        assert!(!dir.path().join(crate::LEGACY_POTION_MARKER).exists());
+        assert!(!crate::potion_cached(dir.path(), CODE_16M));
+
+        assert_eq!(finish_load(dir.path(), CODE_16M, false, 256), Ok(256));
+        assert!(!crate::potion_cached(dir.path(), CODE_16M));
+
+        assert!(finish_load(dir.path(), CODE_16M, true, 0).is_err());
+        assert!(!crate::potion_cached(dir.path(), CODE_16M));
+    }
+
+    /// Before per-repository markers, one `potion.ok` admitted every model;
+    /// an upgrade must not refuse a model that loaded the day before.
+    #[test]
+    fn a_legacy_marker_should_still_admit_any_model() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(crate::LEGACY_POTION_MARKER), CODE_16M).unwrap();
+        assert_eq!(require_set_up(dir.path(), CODE_64M, false), Ok(()));
+    }
+}
+
+#[cfg(all(test, not(feature = "fastembed")))]
+mod model_selection_tests {
+    #[test]
+    fn explicit_e5_is_not_replaced_by_code_potion_override() {
+        let error = super::open_selected_embedder(
+            "multilingual-e5-small",
+            false,
+            Some("minishlab/potion-code-16M-v2"),
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("e5 requested"), "{error}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -759,71 +825,5 @@ mod tests {
             assert!(w[1].0 < w[0].1, "windows must overlap");
         }
         assert_eq!(chunk_offsets("short"), vec![(0, 5)]);
-    }
-}
-
-#[cfg(all(test, feature = "model2vec"))]
-mod potion_gate_tests {
-    use super::potion::{finish_load, require_set_up};
-
-    const CODE_16M: &str = "minishlab/potion-code-16M-v2";
-    const CODE_64M: &str = "minishlab/potion-code-64M-v2";
-
-    #[test]
-    fn require_set_up_should_refuse_only_a_model_never_set_up_without_download() {
-        let dir = tempfile::tempdir().unwrap();
-        let err = require_set_up(dir.path(), CODE_16M, false).unwrap_err();
-        assert!(err.contains("run `pixel recall setup`"), "{err}");
-        assert_eq!(require_set_up(dir.path(), CODE_16M, true), Ok(()));
-
-        std::fs::write(crate::potion_marker(dir.path(), CODE_16M), CODE_16M).unwrap();
-        assert_eq!(require_set_up(dir.path(), CODE_16M, false), Ok(()));
-        assert!(require_set_up(dir.path(), CODE_64M, false).is_err());
-    }
-
-    /// A download that loaded writes this repository's marker, which is what
-    /// makes the daemon see its model as cached; a load without download,
-    /// or one that produced no embedding, writes none.
-    #[test]
-    fn finish_load_should_mark_only_a_successful_download() {
-        let dir = tempfile::tempdir().unwrap();
-        assert_eq!(finish_load(dir.path(), CODE_64M, true, 256), Ok(256));
-        assert_eq!(
-            std::fs::read_to_string(crate::potion_marker(dir.path(), CODE_64M)).unwrap(),
-            CODE_64M,
-            "the repository's own marker, not the shared legacy one"
-        );
-        assert!(!dir.path().join(crate::LEGACY_POTION_MARKER).exists());
-        assert!(!crate::potion_cached(dir.path(), CODE_16M));
-
-        assert_eq!(finish_load(dir.path(), CODE_16M, false, 256), Ok(256));
-        assert!(!crate::potion_cached(dir.path(), CODE_16M));
-
-        assert!(finish_load(dir.path(), CODE_16M, true, 0).is_err());
-        assert!(!crate::potion_cached(dir.path(), CODE_16M));
-    }
-
-    /// Before per-repository markers, one `potion.ok` admitted every model;
-    /// an upgrade must not refuse a model that loaded the day before.
-    #[test]
-    fn a_legacy_marker_should_still_admit_any_model() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(crate::LEGACY_POTION_MARKER), CODE_16M).unwrap();
-        assert_eq!(require_set_up(dir.path(), CODE_64M, false), Ok(()));
-    }
-}
-
-#[cfg(all(test, not(feature = "fastembed")))]
-mod model_selection_tests {
-    #[test]
-    fn explicit_e5_is_not_replaced_by_code_potion_override() {
-        let error = super::open_selected_embedder(
-            "multilingual-e5-small",
-            false,
-            Some("minishlab/potion-code-16M-v2"),
-        )
-        .err()
-        .unwrap();
-        assert!(error.contains("e5 requested"), "{error}");
     }
 }

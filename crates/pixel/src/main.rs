@@ -1613,92 +1613,6 @@ fn flow_vars(
     Ok(var_map)
 }
 
-#[cfg(test)]
-mod flow_vars_tests {
-    use super::*;
-
-    /// The `--account` shortcut picks the account variable the flow itself
-    /// declares, and a malformed `--var` is refused before anything opens.
-    #[test]
-    fn flow_vars_parses_the_pairs_and_uses_the_flows_account_var() {
-        let _guard = crate::ENV_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join(format!("pixel-flow-vars-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        // SAFETY: ENV_LOCK serialises every test that touches process-wide
-        // variables, and PIXEL_FLOW_DIR is one of them.
-        unsafe {
-            std::env::set_var("PIXEL_FLOW_DIR", &dir);
-        }
-        let store = |name: &str, vars: &[(&str, &str)]| {
-            let vars: Vec<String> = vars
-                .iter()
-                .map(|(n, d)| {
-                    format!(r#"{{"name": "{n}", "description": "{d}", "required": false}}"#)
-                })
-                .collect();
-            std::fs::write(
-                dir.join(format!("{name}.json")),
-                format!(
-                    r#"{{"name": "{name}", "title": "t", "description": "",
-                        "vars": [{}], "steps": [{{"action": "snapshot"}}],
-                        "created_unix": 1, "revised_unix": 1, "revision": 1, "proven": false }}"#,
-                    vars.join(", ")
-                ),
-            )
-            .unwrap();
-        };
-        store(
-            "codex",
-            &[
-                ("openai_account", "the Codex account"),
-                ("env_name", "which env"),
-            ],
-        );
-        // A trailing variable after google_account must not win the lookup.
-        store(
-            "claude",
-            &[
-                ("google_account", "which account"),
-                ("env_name", "which env"),
-            ],
-        );
-
-        // `--account` lands on the variable the flow itself declares.
-        let vars = flow_vars(
-            "codex",
-            &["env=prod".to_string()],
-            &Some("bob@example.com".to_string()),
-        )
-        .unwrap();
-        assert_eq!(
-            vars.get("openai_account").map(String::as_str),
-            Some("bob@example.com")
-        );
-        assert_eq!(vars.get("env").map(String::as_str), Some("prod"));
-        // A flow without an openai_account falls back to google_account.
-        let vars = flow_vars("claude", &[], &Some("carol@example.com".to_string())).unwrap();
-        assert_eq!(
-            vars.get("google_account").map(String::as_str),
-            Some("carol@example.com")
-        );
-
-        // The pairs are read in order and a malformed one is refused.
-        let vars = flow_vars("codex", &["a=1".to_string(), "b=2".to_string()], &None).unwrap();
-        assert_eq!(vars.get("a").map(String::as_str), Some("1"));
-        assert_eq!(vars.get("b").map(String::as_str), Some("2"));
-        assert_eq!(
-            flow_vars("codex", &["broken".to_string()], &None).unwrap_err(),
-            "--var expects key=value, got 'broken'"
-        );
-        // SAFETY: as above.
-        unsafe {
-            std::env::remove_var("PIXEL_FLOW_DIR");
-        }
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
-
 /// Parse a 1-based inclusive line range "a,b" for `provenance --lines`.
 /// `pixel search-meaning --max-files` help: an optional budget, and the
 /// ceiling that applies without one, spelled from its constant.
@@ -2620,252 +2534,6 @@ fn render_data(data: &Value, raw_json: bool, cap: usize) -> Rendered {
     }
 }
 
-#[cfg(test)]
-mod render_data_tests {
-    use super::*;
-
-    #[test]
-    fn the_install_banner_color_follows_no_color() {
-        assert!(banner_color(None));
-        assert!(banner_color(Some(std::ffi::OsStr::new(""))));
-        assert!(!banner_color(Some(std::ffi::OsStr::new("1"))));
-    }
-
-    #[test]
-    fn the_install_start_banner_stays_on_human_terminal_output() {
-        assert!(should_render_install_banner(false, true));
-        assert!(!should_render_install_banner(true, true));
-        assert!(!should_render_install_banner(false, false));
-    }
-
-    fn big() -> Value {
-        json!({"matches": (0..200).map(|i| json!({"path": format!("src/file_{i}.rs"), "line": i, "text": "é".repeat(20)})).collect::<Vec<_>>()})
-    }
-
-    #[test]
-    fn under_cap_is_untouched() {
-        let d = json!({"a": 1});
-        let r = render_data(&d, true, 1024);
-        assert_eq!(r.text, "{\"a\":1}\n");
-        assert!(!r.truncated);
-        assert_eq!(
-            serde_json::from_str::<Value>(&render_data(&d, false, 1024).text).unwrap(),
-            d
-        );
-    }
-
-    /// The reason this matters: agents call `pixel … --json` and parse
-    /// stdout, then `jq '.index'` / `.graph` on the result. A response that
-    /// is over the cap only because ONE list is long (a `snapshot.dirty`
-    /// full of untracked `vendor/bundle` paths) must keep its shape: the
-    /// scalar fields stay addressable, only the list is shortened, and the
-    /// document says which list was cut and how much survived.
-    #[test]
-    fn json_mode_truncation_shortens_the_largest_array_and_keeps_structure() {
-        let d = json!({
-            "index": {"base_files": 238, "commit_oid": "abc"},
-            "snapshot": {"head": "abc", "branch": "main",
-                          "dirty": (0..500).map(|i| format!("vendor/bundle/gems/g{i}/lib/x.rb")).collect::<Vec<_>>()},
-        });
-        let full = serde_json::to_string(&d).unwrap().len();
-        let cap = full / 3;
-        let r = render_data(&d, true, cap);
-        assert!(r.truncated);
-        assert!(r.text.len() <= cap + 1, "{} > cap {cap}", r.text.len());
-        let v: Value = serde_json::from_str(&r.text).expect("stdout must remain one JSON document");
-        assert_eq!(v["truncated"], true);
-        assert_eq!(v["cap_bytes"], cap);
-        assert_eq!(
-            v["index"]["base_files"], 238,
-            "untouched fields must survive"
-        );
-        assert_eq!(v["snapshot"]["branch"], "main");
-        let dirty = v["snapshot"]["dirty"].as_array().unwrap();
-        assert!(
-            !dirty.is_empty() && dirty.len() < 500,
-            "kept {}",
-            dirty.len()
-        );
-        assert_eq!(
-            dirty[0], "vendor/bundle/gems/g0/lib/x.rb",
-            "prefix, not a sample"
-        );
-        let cuts = v["truncated_arrays"].as_array().unwrap();
-        assert_eq!(cuts.len(), 1);
-        assert_eq!(cuts[0]["path"], "snapshot.dirty");
-        assert_eq!(cuts[0]["total"], 500);
-        assert_eq!(cuts[0]["kept"], dirty.len());
-        assert!(
-            v.get("partial").is_none(),
-            "no textual wrapper when structure fits"
-        );
-        assert_eq!(r.text.matches('\n').count(), 1, "single NDJSON-safe line");
-    }
-
-    /// Nested arrays: the cut lands on the array that actually carries the
-    /// bytes, not blindly on the top-level one, and the path names it.
-    #[test]
-    fn structural_truncation_targets_nested_array_by_size() {
-        let d = json!({"groups": [
-            {"name": "small", "items": ["a", "b"]},
-            {"name": "huge", "items": (0..2000).map(|i| format!("item-{i:05}")).collect::<Vec<_>>()},
-        ]});
-        let r = render_data(&d, true, 2000);
-        let v: Value = serde_json::from_str(&r.text).unwrap();
-        assert_eq!(
-            v["groups"].as_array().unwrap().len(),
-            2,
-            "outer array intact"
-        );
-        assert_eq!(v["groups"][0]["items"].as_array().unwrap().len(), 2);
-        assert!(v["groups"][1]["items"].as_array().unwrap().len() < 2000);
-        assert_eq!(v["truncated_arrays"][0]["path"], "groups[1].items");
-        assert!(r.text.len() <= 2001);
-    }
-
-    /// When the bulk is not an array (one huge string) structural trimming
-    /// cannot help; the textual wrapper must still be one valid document
-    /// that says it was cut.
-    #[test]
-    fn json_mode_falls_back_to_wrapper_when_no_array_can_be_cut() {
-        let d = json!({"blob": "x".repeat(5000)});
-        let r = render_data(&d, true, 500);
-        assert!(r.truncated);
-        let v: Value = serde_json::from_str(&r.text).expect("stdout must remain one JSON document");
-        assert_eq!(v["truncated"], true);
-        assert_eq!(v["cap_bytes"], 500);
-        let partial = v["partial"].as_str().unwrap();
-        assert!(partial.len() <= 500);
-        assert!(partial.starts_with("{\"blob\":\""));
-        assert!(v["note"].as_str().unwrap().contains("TRUNCATED"));
-        assert_eq!(r.text.matches('\n').count(), 1, "single NDJSON-safe line");
-    }
-
-    #[test]
-    fn json_mode_array_of_objects_is_cut_structurally() {
-        let r = render_data(&big(), true, 500);
-        let v: Value = serde_json::from_str(&r.text).unwrap();
-        assert_eq!(v["truncated"], true);
-        assert!(v["matches"].is_array());
-        assert_eq!(v["truncated_arrays"][0]["path"], "matches");
-        assert_eq!(v["truncated_arrays"][0]["total"], 200);
-    }
-
-    #[test]
-    fn human_mode_truncation_keeps_visible_note() {
-        let r = render_data(&big(), false, 500);
-        assert!(r.truncated);
-        assert!(r.text.contains("⚠ OUTPUT TRUNCATED AT 500 BYTES"));
-        assert!(serde_json::from_str::<Value>(&r.text).is_err());
-    }
-
-    /// Multi-byte text near the cap: the cut must land on a char boundary
-    /// so the partial string is valid UTF-8 and serializable.
-    #[test]
-    fn truncation_respects_char_boundaries() {
-        let d = json!({"t": "é".repeat(1000)});
-        for cap in 100..140 {
-            let out = render_data(&d, true, cap).text;
-            let v: Value = serde_json::from_str(&out).unwrap();
-            assert!(v["partial"].as_str().unwrap().len() <= cap);
-        }
-    }
-
-    /// `array_at_mut` must round-trip every path shape `largest_array`
-    /// emits, otherwise a cut silently targets nothing.
-    #[test]
-    fn array_path_round_trip() {
-        let mut d = json!({"a": {"b": [[1, 2, 3], {"c": [4, 5]}]}, "d": [6]});
-        let (path, len, _) = largest_array(&d, "").unwrap();
-        assert_eq!(
-            path, "a.b",
-            "21 bytes / 2 elems: 11 removable, beats a.b[0]'s 5"
-        );
-        assert_eq!(len, 2);
-        assert_eq!(array_at_mut(&mut d, "a.b[0]").unwrap().len(), 3);
-        assert_eq!(array_at_mut(&mut d, "a.b[1].c").unwrap().len(), 2);
-        assert_eq!(array_at_mut(&mut d, "d").unwrap().len(), 1);
-        assert!(array_at_mut(&mut d, "a.b[5]").is_none());
-    }
-
-    /// `PIXEL_OUTPUT_CAP_BYTES=0` is the documented escape hatch for a
-    /// consumer that wants the whole document; anything unparsable must
-    /// keep the safety net rather than silently disabling it.
-    #[test]
-    fn output_cap_env_parsing() {
-        assert_eq!(parse_output_cap(None), STDOUT_BYTE_CAP);
-        assert_eq!(parse_output_cap(Some("0")), usize::MAX);
-        assert_eq!(parse_output_cap(Some(" 4096 ")), 4096);
-        assert_eq!(parse_output_cap(Some("lots")), STDOUT_BYTE_CAP);
-        assert_eq!(parse_output_cap(Some("")), STDOUT_BYTE_CAP);
-    }
-
-    /// `status`/`ready` are freshness answers: the dirty LIST is what let an
-    /// untracked vendor tree blow the cap, the COUNT is all they need.
-    /// The stderr line is how an agent tells a 1 s incremental update from
-    /// a 100 s rebuild of the whole tree; the two must not read the same.
-    #[test]
-    fn graph_build_notice_distinguishes_incremental_from_full() {
-        let incremental =
-            json!({"incremental": true, "changed_files": 2, "removed_files": 0, "build_ms": 1200});
-        assert_eq!(
-            graph_build_notice(&incremental),
-            "updated graph.db for 2 changed file(s) (1200 ms)"
-        );
-        let with_removed =
-            json!({"incremental": true, "changed_files": 1, "removed_files": 1, "build_ms": 40});
-        assert_eq!(
-            graph_build_notice(&with_removed),
-            "updated graph.db for 1 changed file(s), 1 removed (40 ms)"
-        );
-        let first = json!({"incremental": false, "reason": "missing", "build_ms": 36000});
-        assert_eq!(
-            graph_build_notice(&first),
-            "built graph.db on first use (36000 ms)"
-        );
-        let threshold = json!({"incremental": false, "reason": "threshold", "build_ms": 5});
-        assert!(graph_build_notice(&threshold).contains("PIXEL_GRAPH_INCREMENTAL_MAX_PCT"));
-        // Older daemon without the field: still the first-use wording.
-        assert_eq!(
-            graph_build_notice(&json!({"build_ms": 7})),
-            "built graph.db on first use (7 ms)"
-        );
-    }
-
-    #[test]
-    fn compact_snapshot_replaces_dirty_list_with_count() {
-        let mut d = json!({"index": {"base_files": 1},
-            "snapshot": {"head": "abc", "branch": "main", "dirty": ["a", "b", "c"]}});
-        compact_snapshot(&mut d);
-        assert_eq!(d["snapshot"]["dirty_count"], 3);
-        assert!(d["snapshot"].get("dirty").is_none());
-        assert_eq!(d["snapshot"]["head"], "abc");
-        assert_eq!(d["index"]["base_files"], 1);
-        // No snapshot (older daemon / in-process service without one): no-op.
-        let mut bare = json!({"index": {}});
-        compact_snapshot(&mut bare);
-        assert_eq!(bare, json!({"index": {}}));
-    }
-
-    #[test]
-    fn compact_repo_state_drops_the_clean_list_and_keeps_the_count() {
-        let mut d = json!({"root": "/repo", "head": "abc", "branch": "main",
-            "dirty": [], "dirty_count": 0,
-            "clean": ["a", "b"], "clean_count": 2,
-            "clean_list_truncated": false, "clean_list_cap": 200});
-        compact_repo_state(&mut d);
-        assert!(d.get("clean").is_none(), "{d}");
-        assert!(d.get("clean_list_truncated").is_none(), "{d}");
-        assert!(d.get("clean_list_cap").is_none(), "{d}");
-        assert_eq!(d["clean_count"], 2);
-        assert_eq!(d["head"], "abc");
-        // A non-object (never produced today): no-op, no panic.
-        let mut bare = json!([]);
-        compact_repo_state(&mut bare);
-        assert_eq!(bare, json!([]));
-    }
-}
-
 /// The `successor` field `call-path` adds to its output: the `evaluate path`
 /// command asking the same question of the same repository, ready to run,
 /// and what it adds. The rest of the output is untouched: `call-path` stays
@@ -3115,141 +2783,6 @@ fn write_targets_manifest(manifest_path: &Path, task: &str, data: &Value) -> Res
     std::fs::rename(&tmp, manifest_path)
         .map_err(|e| format!("publish {}: {e}", manifest_path.display()))?;
     Ok(active)
-}
-
-#[cfg(test)]
-mod targets_manifest_tests {
-    use super::*;
-
-    fn task_entry(id_src: &str, created: u64, path: &str) -> Value {
-        serde_json::json!({
-            "id": targets_task_id(id_src),
-            "task": id_src,
-            "created_unix": created,
-            "targets": [{"path": path, "tier": "P0"}],
-        })
-    }
-
-    #[test]
-    fn merge_two_tasks_coexist() {
-        let now = 1_000_000;
-        let v = merge_targets_manifest(None, task_entry("task A", now, "src/a.rs"), now);
-        let text = v.to_string();
-        let v2 = merge_targets_manifest(Some(&text), task_entry("task B", now, "src/b.rs"), now);
-        let tasks = v2["tasks"].as_array().unwrap();
-        assert_eq!(v2["version"], 2);
-        assert_eq!(tasks.len(), 2, "concurrent tasks must both survive");
-        let names: Vec<&str> = tasks.iter().map(|t| t["task"].as_str().unwrap()).collect();
-        assert_eq!(names, vec!["task A", "task B"]);
-    }
-
-    #[test]
-    fn merge_replaces_same_task_id() {
-        let now = 1_000_000;
-        let v = merge_targets_manifest(None, task_entry("task A", now - 100, "src/old.rs"), now);
-        let text = v.to_string();
-        let v2 = merge_targets_manifest(Some(&text), task_entry("task A", now, "src/new.rs"), now);
-        let tasks = v2["tasks"].as_array().unwrap();
-        assert_eq!(tasks.len(), 1, "same task id must replace, not append");
-        assert_eq!(tasks[0]["targets"][0]["path"], "src/new.rs");
-    }
-
-    #[test]
-    fn merge_drops_expired_tasks() {
-        let now = 1_000_000_000;
-        let old = merge_targets_manifest(
-            None,
-            task_entry("stale task", now - TARGETS_TTL_SECS - 1, "src/stale.rs"),
-            now - TARGETS_TTL_SECS - 1,
-        );
-        let text = old.to_string();
-        let v2 = merge_targets_manifest(
-            Some(&text),
-            task_entry("fresh task", now, "src/fresh.rs"),
-            now,
-        );
-        let tasks = v2["tasks"].as_array().unwrap();
-        assert_eq!(tasks.len(), 1, "expired task must be dropped on merge");
-        assert_eq!(tasks[0]["task"], "fresh task");
-    }
-
-    #[test]
-    fn merge_wraps_legacy_singleton() {
-        let now = 1_000_000;
-        let legacy = serde_json::json!({
-            "version": 1,
-            "task": "legacy task",
-            "created_unix": now - 50,
-            "head_oid": "abc",
-            "limit": 20,
-            "files": [{"path": "src/legacy.rs", "tier": "P0"}],
-        })
-        .to_string();
-        let v2 = merge_targets_manifest(
-            Some(&legacy),
-            task_entry("new task", now, "src/new.rs"),
-            now,
-        );
-        let tasks = v2["tasks"].as_array().unwrap();
-        assert_eq!(
-            tasks.len(),
-            2,
-            "legacy singleton must be preserved as a v2 task"
-        );
-        assert_eq!(tasks[0]["task"], "legacy task");
-        assert_eq!(tasks[0]["targets"][0]["path"], "src/legacy.rs");
-        assert_eq!(tasks[1]["task"], "new task");
-    }
-
-    #[test]
-    fn merge_survives_corrupt_existing() {
-        let now = 1_000_000;
-        let v2 = merge_targets_manifest(
-            Some("{not json"),
-            task_entry("task A", now, "src/a.rs"),
-            now,
-        );
-        assert_eq!(v2["tasks"].as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn task_id_stable_and_short() {
-        assert_eq!(targets_task_id("x"), targets_task_id("x"));
-        assert_ne!(targets_task_id("x"), targets_task_id("y"));
-        assert_eq!(targets_task_id("anything").len(), 12);
-    }
-
-    #[test]
-    fn merge_caps_at_max_manifest_tasks() {
-        let mut now = 1_000_000u64;
-        let mut text =
-            merge_targets_manifest(None, task_entry("task 0", now, "src/a0.rs"), now).to_string();
-
-        // Add MAX_MANIFEST_TASKS more tasks (total = MAX+1, should cap).
-        for i in 1..=MAX_MANIFEST_TASKS {
-            now += 10;
-            text = merge_targets_manifest(
-                Some(&text),
-                task_entry(&format!("task {i}"), now, &format!("src/a{i}.rs")),
-                now,
-            )
-            .to_string();
-        }
-        let v: Value = serde_json::from_str(&text).unwrap();
-        let tasks = v["tasks"].as_array().unwrap();
-        assert_eq!(
-            tasks.len(),
-            MAX_MANIFEST_TASKS,
-            "manifest must be capped at MAX_MANIFEST_TASKS"
-        );
-        // Oldest task ("task 0") must be evicted; newest ("task {MAX}") kept.
-        let names: Vec<&str> = tasks.iter().map(|t| t["task"].as_str().unwrap()).collect();
-        assert!(!names.contains(&"task 0"), "oldest task must be evicted");
-        assert!(
-            names.contains(&format!("task {MAX_MANIFEST_TASKS}").as_str()),
-            "newest task must survive"
-        );
-    }
 }
 
 /// Circuit-breaker guard for retrieval commands. Call at the top of
@@ -4049,315 +3582,6 @@ fn daemon_ping(root: &Path) -> bool {
     }
 }
 
-#[cfg(test)]
-mod daemon_ping_tests {
-    use super::*;
-    use std::io::{BufRead, BufReader, Write};
-    use std::os::unix::net::UnixListener;
-    use std::time::Instant;
-
-    fn scratch_root(tag: &str) -> PathBuf {
-        let root =
-            std::env::temp_dir().join(format!("pixel-daemon-ping-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        root.canonicalize().unwrap()
-    }
-
-    /// Nothing listens: the probe is false and opens nothing — the repository
-    /// `Service` an auto-starting probe would open is what left `.pixel/`
-    /// inside `~/.local/share/pixel/recall`.
-    #[test]
-    fn daemon_ping_is_false_without_a_daemon() {
-        let root = scratch_root("idle");
-        assert!(!daemon_ping(&root));
-        assert!(
-            !root.join(pixel_index::index::SHARD_DIR).exists(),
-            "the probe must not open a Service on {}",
-            root.display()
-        );
-    }
-
-    /// A daemon answering `Ping` is what the probe reports: without this half,
-    /// a probe that always returned false would pass the idle test.
-    #[test]
-    fn daemon_ping_is_true_when_a_daemon_answers() {
-        let root = scratch_root("live");
-        let listener = UnixListener::bind(daemon::socket_path(&root)).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let server = std::thread::spawn(move || {
-            // Poll with a deadline: a probe that never connects must fail the
-            // assertion, not hang the suite.
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        // A non-blocking listener hands back a non-blocking
-                        // socket on BSD: reset it, or the read races the
-                        // client's write instead of waiting for it.
-                        let _ = stream.set_nonblocking(false);
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-                        let mut line = String::new();
-                        let Ok(n) = BufReader::new(&stream).read_line(&mut line) else {
-                            return;
-                        };
-                        if n == 0 {
-                            return;
-                        }
-                        assert_eq!(
-                            serde_json::from_str::<Request>(&line).unwrap(),
-                            Request::Ping,
-                            "the probe asks with a Ping"
-                        );
-                        let reply = Response::success(
-                            "ping",
-                            json!({"pong": true, "protocol_version": PROTOCOL_VERSION}),
-                        );
-                        writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
-                        return;
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(20));
-                    }
-                    Err(_) => return,
-                }
-            }
-        });
-        assert!(daemon_ping(&root));
-        server.join().unwrap();
-        let _ = std::fs::remove_file(daemon::socket_path(&root));
-    }
-
-    fn ping_reply(ok: bool, version: Option<u64>) -> Response {
-        let mut reply = Response::success("ping", json!({"pong": true}));
-        if let Some(version) = version {
-            reply = Response::success("ping", json!({"pong": true, "protocol_version": version}));
-        }
-        reply.ok = ok;
-        reply
-    }
-
-    #[test]
-    fn only_a_healthy_ping_on_this_protocol_may_serve_and_only_a_newer_one_is_spared() {
-        assert_eq!(
-            classify_ping(&ping_reply(true, Some(PROTOCOL_VERSION))),
-            DaemonProbe::Current
-        );
-        assert_eq!(
-            classify_ping(&ping_reply(false, Some(PROTOCOL_VERSION))),
-            DaemonProbe::Stale,
-            "a failing daemon on our protocol is replaced, not used"
-        );
-        assert_eq!(
-            classify_ping(&ping_reply(true, Some(PROTOCOL_VERSION - 1))),
-            DaemonProbe::Stale
-        );
-        assert_eq!(classify_ping(&ping_reply(true, None)), DaemonProbe::Stale);
-        assert_eq!(
-            classify_ping(&ping_reply(true, Some(PROTOCOL_VERSION + 1))),
-            DaemonProbe::Newer
-        );
-    }
-
-    /// A fake daemon answering Ping with `version` and recording every
-    /// request, for at most `connections` connections. After a Shutdown it
-    /// keeps answering for `linger` (a real daemon takes a moment to exit),
-    /// then removes its socket and answers whatever is still queued.
-    fn fake_daemon(
-        root: &Path,
-        version: u64,
-        connections: usize,
-        linger: Duration,
-    ) -> std::thread::JoinHandle<Vec<Request>> {
-        fn answer(mut stream: UnixStream, version: u64) -> Option<Request> {
-            let _ = stream.set_nonblocking(false);
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
-            let mut line = String::new();
-            if BufReader::new(&stream).read_line(&mut line).unwrap_or(0) == 0 {
-                return None;
-            }
-            let request: Request = serde_json::from_str(&line).unwrap();
-            let reply = match request {
-                Request::Ping => ping_reply(true, Some(version)),
-                _ => Response::success("ok", json!({})),
-            };
-            writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
-            Some(request)
-        }
-        let sock = daemon::socket_path(root);
-        let listener = UnixListener::bind(&sock).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        std::thread::spawn(move || {
-            let mut seen = Vec::new();
-            let deadline = Instant::now() + Duration::from_secs(5);
-            let mut exit_at: Option<Instant> = None;
-            while Instant::now() < deadline
-                && seen.len() < connections
-                && exit_at.is_none_or(|at| Instant::now() < at)
-            {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        if let Some(request) = answer(stream, version) {
-                            if request == Request::Shutdown {
-                                exit_at = Some(Instant::now() + linger);
-                            }
-                            seen.push(request);
-                        }
-                    }
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(10));
-                    }
-                    Err(_) => break,
-                }
-            }
-            if exit_at.is_some() {
-                let _ = std::fs::remove_file(&sock);
-                // Answer what connected before the socket went away, so no
-                // client waits out its read timeout.
-                while let Ok((stream, _)) = listener.accept() {
-                    let _ = answer(stream, version);
-                }
-            }
-            seen
-        })
-    }
-
-    /// A current daemon's answer is logged as a daemon route with both its
-    /// phases timed: the probe (the queue ahead) and the request itself.
-    #[test]
-    fn route_through_daemon_times_the_probe_and_the_request_of_a_current_daemon() {
-        let root = scratch_root("route-current");
-        let server = fake_daemon(&root, PROTOCOL_VERSION, 2, Duration::ZERO);
-        let (response, step) = route_through_daemon(&root, &Request::Status {});
-        assert!(response.is_some_and(|r| r.ok));
-        assert_eq!(step.route, ServeRoute::Daemon);
-        assert_eq!(step.reason, None);
-        assert!(
-            step.probe_ms.is_some() && step.request_ms.is_some(),
-            "{step:?}"
-        );
-        assert_eq!((step.start_ms, step.open_ms), (None, None), "{step:?}");
-        assert_eq!(
-            server.join().unwrap(),
-            vec![Request::Ping, Request::Status {}]
-        );
-        let _ = std::fs::remove_file(daemon::socket_path(&root));
-    }
-
-    /// A newer daemon sends the request back to this process without a
-    /// start attempt: the step says so, and times only the probe.
-    #[test]
-    fn route_through_daemon_names_a_newer_daemon_as_the_in_process_reason() {
-        let root = scratch_root("route-newer");
-        let server = fake_daemon(&root, PROTOCOL_VERSION + 1, 1, Duration::ZERO);
-        let (response, step) = route_through_daemon(&root, &Request::Status {});
-        assert!(response.is_none());
-        assert_eq!(step.route, ServeRoute::InProcess);
-        assert_eq!(step.reason, Some(InProcessReason::NewerDaemon));
-        assert!(step.probe_ms.is_some(), "{step:?}");
-        assert_eq!((step.request_ms, step.start_ms), (None, None), "{step:?}");
-        assert_eq!(server.join().unwrap(), vec![Request::Ping]);
-        let _ = std::fs::remove_file(daemon::socket_path(&root));
-    }
-
-    /// A stale daemon's retirement is timed as the start of its replacement:
-    /// on the first call after an upgrade the probe itself is quick, and a
-    /// `probe_ms` holding the retirement would read as a busy daemon.
-    #[test]
-    fn retiring_a_stale_daemon_counts_toward_the_start_not_the_probe() {
-        let root = scratch_root("route-stale");
-        let server = fake_daemon(&root, PROTOCOL_VERSION - 1, 100, Duration::from_millis(400));
-        let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
-            Err(InProcessReason::StartTimedOut)
-        });
-        assert!(response.is_none());
-        assert_eq!(step.reason, Some(InProcessReason::StartTimedOut));
-        let (probe_ms, start_ms) = (step.probe_ms.unwrap(), step.start_ms.unwrap());
-        assert!(
-            start_ms >= 300,
-            "the retirement waited on the linger: {step:?}"
-        );
-        assert!(probe_ms < start_ms, "{step:?}");
-        let seen = server.join().unwrap();
-        assert_eq!(seen[..2], [Request::Ping, Request::Shutdown]);
-    }
-
-    /// No daemon answers: the started one's answer is returned and logged as
-    /// `daemon_started`; a refused start sends the request back to this
-    /// process under the start's own reason, untimed when it never ran.
-    #[test]
-    fn an_absent_daemon_is_started_or_names_why_it_was_not() {
-        let root = scratch_root("route-absent");
-        let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
-            Ok(Response::success("status", json!({"started": true})))
-        });
-        assert_eq!(response.unwrap().data()["started"], true);
-        assert_eq!(step.route, ServeRoute::DaemonStarted);
-        assert!(
-            step.start_ms.is_some() && step.probe_ms.is_some(),
-            "{step:?}"
-        );
-        assert_eq!(step.request_ms, None, "{step:?}");
-
-        let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
-            Err(InProcessReason::AutoStartDisabled)
-        });
-        assert!(response.is_none());
-        assert_eq!(step.route, ServeRoute::InProcess);
-        assert_eq!(step.reason, Some(InProcessReason::AutoStartDisabled));
-        assert_eq!(step.start_ms, None, "{step:?}");
-    }
-
-    #[test]
-    fn a_newer_daemon_is_left_running_and_declines_without_a_restart() {
-        let root = scratch_root("newer");
-        let server = fake_daemon(&root, PROTOCOL_VERSION + 1, 1, Duration::ZERO);
-        assert!(matches!(
-            try_daemon_inner(&root, &Request::Status {}),
-            DaemonRoute::Declined
-        ));
-        assert_eq!(
-            server.join().unwrap(),
-            vec![Request::Ping],
-            "no Shutdown sent"
-        );
-        let _ = std::fs::remove_file(daemon::socket_path(&root));
-    }
-
-    #[test]
-    fn a_stale_daemon_is_shut_down_so_a_current_one_can_start() {
-        let root = scratch_root("stale");
-        let server = fake_daemon(&root, PROTOCOL_VERSION - 1, 100, Duration::from_millis(200));
-        let started = Instant::now();
-        assert!(
-            !daemon_ping(&root),
-            "a stale daemon is never reported ready"
-        );
-        let waited = started.elapsed();
-        assert!(
-            !daemon::socket_path(&root).exists(),
-            "retirement waits until the old daemon let its socket go"
-        );
-        assert!(
-            waited < STALE_DAEMON_EXIT_CAP,
-            "and returns as soon as it is gone: {waited:?}"
-        );
-        let seen = server.join().unwrap();
-        assert_eq!(seen[..2], [Request::Ping, Request::Shutdown]);
-        assert!(seen[2..].iter().all(|r| *r == Request::Ping), "{seen:?}");
-    }
-
-    #[test]
-    fn daemon_start_refuses_to_fight_a_newer_daemon() {
-        let root = scratch_root("start-newer");
-        let server = fake_daemon(&root, PROTOCOL_VERSION + 1, 1, Duration::ZERO);
-        let error = daemon_start(root.clone(), false, true).unwrap_err();
-        assert!(error.contains("newer pixel daemon"), "{error}");
-        assert_eq!(server.join().unwrap(), vec![Request::Ping]);
-        let _ = std::fs::remove_file(daemon::socket_path(&root));
-    }
-}
-
 fn daemon_start(path: PathBuf, foreground: bool, quiet: bool) -> Result<(), String> {
     let report = |message: &str| {
         if quiet {
@@ -4743,338 +3967,6 @@ fn upgrade_shadowed_by(installed: &Path, path_var: Option<&std::ffi::OsStr>) -> 
         .into_iter()
         .next()
         .filter(|first| *first != installed)
-}
-
-#[cfg(test)]
-mod upgrade_target_tests {
-    use super::cargo_profile_dir;
-
-    /// The install step must read the binary the build step wrote: a
-    /// `--build` on another profile (the `dev-release` iteration loop) used
-    /// to install the stale `target/release/pixel` without any error.
-    #[test]
-    fn profile_dir_follows_the_build_command() {
-        assert_eq!(
-            cargo_profile_dir("cargo build --release -p pixel-cli"),
-            "release"
-        );
-        assert_eq!(cargo_profile_dir("cargo build -r -p pixel-cli"), "release");
-        assert_eq!(cargo_profile_dir("cargo build -p pixel-cli"), "debug");
-        assert_eq!(
-            cargo_profile_dir("cargo build --profile dev-release -p pixel-cli"),
-            "dev-release"
-        );
-        assert_eq!(
-            cargo_profile_dir("cargo build --profile=dev-release"),
-            "dev-release"
-        );
-        // `--profile` beats `--release` whichever comes first, as in cargo.
-        assert_eq!(
-            cargo_profile_dir("cargo build --release --profile dev-release"),
-            "dev-release"
-        );
-        assert_eq!(cargo_profile_dir("cargo build --profile dev"), "debug");
-        assert_eq!(cargo_profile_dir("cargo build --profile bench"), "release");
-        assert_eq!(
-            cargo_profile_dir("~/.cargo/bin/cargo build -p pixel-cli"),
-            "debug"
-        );
-        // Not a cargo invocation: no flag semantics, historical `release`
-        // (the upgrade CLI tests fake the build with `/usr/bin/true`).
-        assert_eq!(cargo_profile_dir("/usr/bin/true"), "release");
-        assert_eq!(cargo_profile_dir("./scripts/build.sh"), "release");
-        assert_eq!(
-            cargo_profile_dir("./scripts/build.sh --profile fast"),
-            "fast"
-        );
-    }
-    use super::*;
-
-    fn sandbox(tag: &str) -> PathBuf {
-        let dir =
-            std::env::temp_dir().join(format!("pixel-upgrade-target-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
-    }
-
-    fn touch(path: &Path) -> PathBuf {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, b"x").unwrap();
-        path.canonicalize().unwrap()
-    }
-
-    #[test]
-    fn explicit_flag_wins_verbatim() {
-        let t = resolve_upgrade_target(
-            Some(PathBuf::from("/opt/x/pixel")),
-            Some(PathBuf::from("/nope")),
-            None,
-            Path::new("/home/u"),
-        );
-        assert_eq!(t.path, PathBuf::from("/opt/x/pixel"));
-        assert_eq!(t.source, "--install-path");
-        assert!(t.explicit);
-    }
-
-    /// The point of the change: on a machine where `pixel` is a managed
-    /// install behind a shim, the running binary is that install, and the
-    /// upgrade must land there, not in a `~/.local/bin` that shadows or
-    /// misses PATH.
-    #[test]
-    fn running_binary_is_the_install_location() {
-        let d = sandbox("running");
-        let managed = touch(&d.join("mise/installs/pixel/rev-abc/bin/pixel"));
-        let t = resolve_upgrade_target(None, Some(managed.clone()), None, &d);
-        assert_eq!(t.path, managed);
-        assert_eq!(t.source, "running binary");
-        assert!(!t.explicit, "a resolved default is subject to the refusal");
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// `target/release/pixel upgrade` (or a test binary) must never make
-    /// the build output the install location.
-    #[test]
-    fn cargo_target_binary_falls_through_to_path_then_default() {
-        let d = sandbox("target");
-        let built = touch(&d.join("repo/target/release/pixel"));
-        let on_path = touch(&d.join("cellar/bin/pixel"));
-        let shim = touch(&d.join("mise/shims/pixel"));
-        let path_var = std::env::join_paths([
-            shim.parent().unwrap().to_path_buf(),
-            d.join("repo/target/release"),
-            on_path.parent().unwrap().to_path_buf(),
-        ])
-        .unwrap();
-        let t = resolve_upgrade_target(None, Some(built.clone()), Some(&path_var), &d);
-        assert_eq!(t.path, on_path, "shim dir and target dir skipped");
-        assert_eq!(t.source, "first pixel on PATH");
-        assert!(!t.explicit);
-
-        let t = resolve_upgrade_target(None, Some(built), None, &d);
-        assert_eq!(t.path, d.join(".local/bin/pixel"));
-        assert_eq!(t.source, "default");
-        assert!(!t.explicit);
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// #513: `target/` symlinked into a build cache (or a
-    /// `CARGO_TARGET_DIR` elsewhere) canonicalizes to a path with no
-    /// `target` component. Cargo's `CACHEDIR.TAG` above it still marks it
-    /// as build output, for the running binary and a PATH entry alike; a
-    /// cache tag written by another tool does not.
-    #[test]
-    fn a_build_dir_reached_through_a_symlink_is_still_build_output() {
-        let d = sandbox("symlinked-target");
-        let build = d.join("cache/build");
-        std::fs::create_dir_all(&build).unwrap();
-        std::fs::write(
-            build.join("CACHEDIR.TAG"),
-            [CARGO_CACHEDIR_TAG, b"\n# For information about cache directory tags see https://bford.info/cachedir/\n"].concat(),
-        )
-        .unwrap();
-        let built = touch(&build.join("debug/pixel"));
-        std::fs::create_dir_all(d.join("repo")).unwrap();
-        std::os::unix::fs::symlink(&build, d.join("repo/target")).unwrap();
-        let via_link = d.join("repo/target/debug/pixel");
-        assert_eq!(via_link.canonicalize().unwrap(), built);
-        assert!(!built.components().any(|c| c.as_os_str() == "target"));
-        assert!(is_cargo_target_path(&built));
-
-        let path_var = std::env::join_paths([built.parent().unwrap()]).unwrap();
-        let t = resolve_upgrade_target(None, Some(via_link), Some(&path_var), &d);
-        assert_eq!(
-            t.path,
-            d.join(".local/bin/pixel"),
-            "neither the exe nor PATH"
-        );
-        assert_eq!(t.source, "default");
-
-        std::fs::write(
-            build.join("CACHEDIR.TAG"),
-            b"Signature: 8a477f597d28d172789f06886806bc55\n# Created by some other tool.\n",
-        )
-        .unwrap();
-        assert!(!is_cargo_target_path(&built));
-        let t = resolve_upgrade_target(None, Some(built.clone()), None, &d);
-        assert_eq!((t.path, t.source), (built, "running binary"));
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    #[test]
-    fn shadow_is_reported_only_when_a_different_pixel_comes_first() {
-        let d = sandbox("shadow");
-        let stale = touch(&d.join("local/bin/pixel"));
-        let managed = touch(&d.join("mise/installs/pixel/bin/pixel"));
-        let link_dir = d.join("linkdir");
-        std::fs::create_dir_all(&link_dir).unwrap();
-        std::os::unix::fs::symlink(&managed, link_dir.join("pixel")).unwrap();
-
-        let stale_first = std::env::join_paths([
-            stale.parent().unwrap().to_path_buf(),
-            managed.parent().unwrap().to_path_buf(),
-        ])
-        .unwrap();
-        assert_eq!(
-            upgrade_shadowed_by(&managed, Some(&stale_first)),
-            Some(stale.clone())
-        );
-
-        let managed_first = std::env::join_paths([
-            managed.parent().unwrap().to_path_buf(),
-            stale.parent().unwrap().to_path_buf(),
-        ])
-        .unwrap();
-        assert_eq!(upgrade_shadowed_by(&managed, Some(&managed_first)), None);
-
-        // A symlink to the installed binary is the same file, not a shadow.
-        let link_first =
-            std::env::join_paths([link_dir, stale.parent().unwrap().to_path_buf()]).unwrap();
-        assert_eq!(upgrade_shadowed_by(&managed, Some(&link_first)), None);
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// `pixel upgrade --dev` exists to never touch `pixel`: a `pixel` earlier
-    /// on PATH is not shadowing `pixel-dev`, so warning about it would be a
-    /// false alarm on every dev install.
-    #[test]
-    fn a_binary_under_another_name_is_never_shadowed() {
-        let d = sandbox("devshadow");
-        let managed = touch(&d.join("mise/installs/pixel/bin/pixel"));
-        let dev = touch(&d.join("local/bin/pixel-dev"));
-        let path_var = std::env::join_paths([managed.parent().unwrap()]).unwrap();
-        assert_eq!(upgrade_shadowed_by(&dev, Some(&path_var)), None);
-        assert_eq!(
-            dev_install_path(Path::new("/home/u")),
-            PathBuf::from("/home/u/.local/bin/pixel-dev")
-        );
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    fn roots_of(roots: &[ManagedRoot]) -> Vec<(PathBuf, &'static str)> {
-        roots
-            .iter()
-            .map(|r| (r.root.clone(), r.manager.name()))
-            .collect()
-    }
-
-    /// The trees a bare upgrade must not write into: mise's default and
-    /// relocated `installs/`, the macOS and Linuxbrew Cellars, and the Cellar
-    /// `brew shellenv` exports. An unset or empty variable adds nothing
-    /// (an empty `HOMEBREW_CELLAR` would otherwise make `""` a root).
-    #[test]
-    fn package_manager_roots_cover_mise_and_homebrew() {
-        let home = Path::new("/nonexistent-home");
-        let base = roots_of(&package_manager_roots(home, None, None));
-        assert_eq!(
-            base,
-            vec![
-                (home.join(".local/share/mise/installs"), "mise"),
-                (PathBuf::from("/opt/homebrew/Cellar"), "Homebrew"),
-                (PathBuf::from("/usr/local/Cellar"), "Homebrew"),
-                (
-                    PathBuf::from("/home/linuxbrew/.linuxbrew/Cellar"),
-                    "Homebrew"
-                ),
-            ]
-        );
-        let empty = std::ffi::OsStr::new("");
-        assert_eq!(
-            roots_of(&package_manager_roots(home, Some(empty), Some(empty))),
-            base
-        );
-        let with_env = roots_of(&package_manager_roots(
-            home,
-            Some(std::ffi::OsStr::new("/nonexistent-mise")),
-            Some(std::ffi::OsStr::new("/nonexistent-cellar")),
-        ));
-        assert!(with_env.contains(&(PathBuf::from("/nonexistent-mise/installs"), "mise")));
-        assert!(with_env.contains(&(PathBuf::from("/nonexistent-cellar"), "Homebrew")));
-        assert_eq!(with_env.len(), 6);
-    }
-
-    fn target(path: PathBuf, explicit: bool) -> UpgradeTarget {
-        UpgradeTarget {
-            path,
-            source: "running binary",
-            explicit,
-        }
-    }
-
-    /// The refusal is the guard against clobbering a managed install: a
-    /// resolved path under a root is refused (directly or through a
-    /// symlink), a sibling that merely shares a name prefix is not, and an
-    /// explicit `--install-path` is always the user's call.
-    #[test]
-    fn refusal_follows_symlinks_into_managed_roots_and_spares_explicit_paths() {
-        let d = sandbox("refusal");
-        let cellar = d.join("Cellar");
-        let keg = touch(&cellar.join("pixel/1.0/bin/pixel"));
-        let roots = vec![ManagedRoot {
-            root: cellar.canonicalize().unwrap(),
-            manager: ManagedBy::Homebrew,
-        }];
-
-        let reason = upgrade_target_refusal(&target(keg.clone(), false), &roots).unwrap();
-        assert!(reason.contains(&keg.display().to_string()), "{reason}");
-        assert!(reason.contains("(running binary)"), "{reason}");
-        assert!(reason.contains("Homebrew"), "{reason}");
-        assert!(
-            reason.contains("brew update && brew upgrade LivioGama/tap/pixel"),
-            "{reason}"
-        );
-
-        let link = d.join("bin/pixel");
-        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
-        std::os::unix::fs::symlink(&keg, &link).unwrap();
-        let reason = upgrade_target_refusal(&target(link, false), &roots).unwrap();
-        assert!(
-            reason.contains(&keg.display().to_string()),
-            "resolved: {reason}"
-        );
-
-        assert!(upgrade_target_refusal(&target(keg, true), &roots).is_none());
-        let sibling = touch(&d.join("Cellarx/pixel"));
-        assert!(upgrade_target_refusal(&target(sibling, false), &roots).is_none());
-        // A path that does not exist yet (the `~/.local/bin/pixel` default)
-        // is compared as given.
-        let missing = cellar.canonicalize().unwrap().join("new/pixel");
-        assert!(upgrade_target_refusal(&target(missing, false), &roots).is_some());
-        let _ = std::fs::remove_dir_all(&d);
-    }
-
-    /// Each manager's refusal names its own update command: a mise or
-    /// Homebrew install is updated through its package manager, not by
-    /// `pixel self-update`, and that command is the actionable half of the
-    /// refusal.
-    #[test]
-    fn refusal_names_the_owning_managers_update_command() {
-        let d = sandbox("manager-command");
-        let mise_root = d.join("Mise");
-        let mise_keg = touch(&mise_root.join("pixel/1.0/bin/pixel"));
-        let cellar = d.join("Cellar");
-        let brew_keg = touch(&cellar.join("pixel/1.0/bin/pixel"));
-        let roots = vec![
-            ManagedRoot {
-                root: mise_root.canonicalize().unwrap(),
-                manager: ManagedBy::Mise,
-            },
-            ManagedRoot {
-                root: cellar.canonicalize().unwrap(),
-                manager: ManagedBy::Homebrew,
-            },
-        ];
-
-        let reason = upgrade_target_refusal(&target(mise_keg, false), &roots).unwrap();
-        assert!(reason.contains("mise upgrade pixel"), "{reason}");
-
-        let reason = upgrade_target_refusal(&target(brew_keg, false), &roots).unwrap();
-        assert!(
-            reason.contains("brew update && brew upgrade LivioGama/tap/pixel"),
-            "{reason}"
-        );
-        let _ = std::fs::remove_dir_all(&d);
-    }
 }
 
 /// Upgrade control messages must never inherit the retrieval client's 600s timeout.
@@ -5475,83 +4367,6 @@ fn read_only_invocation(matches: &ArgMatches) -> bool {
         Some(("list-errors", nested)) => nested.subcommand_name() != Some("gc"),
         Some(("list-branches", nested)) => !nested.get_flag("fetch"),
         _ => true,
-    }
-}
-
-#[cfg(test)]
-mod update_close_tests {
-    use super::{Cli, READ_ONLY_COMMANDS, read_only_invocation};
-    use clap::CommandFactory;
-
-    #[test]
-    fn every_read_only_label_is_a_real_command() {
-        // Building the full clap command overflows a test thread's default
-        // 2 MiB stack; give the builder room.
-        let check = std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(|| {
-                let cli = Cli::command();
-                let real: Vec<&str> = cli.get_subcommands().map(clap::Command::get_name).collect();
-                for label in READ_ONLY_COMMANDS {
-                    assert!(
-                        real.contains(label),
-                        "{label} is not a subcommand name; the allow-list entry is dead"
-                    );
-                }
-            })
-            .unwrap();
-        check.join().unwrap();
-    }
-
-    fn read_only(args: &[&str]) -> bool {
-        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
-        let check = std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
-            .spawn(move || {
-                let matches = Cli::command()
-                    .try_get_matches_from(
-                        std::iter::once("pixel")
-                            .chain(args.iter().map(std::string::String::as_str)),
-                    )
-                    .unwrap();
-                read_only_invocation(&matches)
-            })
-            .unwrap();
-        check.join().unwrap()
-    }
-
-    #[test]
-    fn read_only_should_accept_retrieval_and_refuse_state_changers() {
-        assert!(read_only(&["search-content", "pattern"]));
-        assert!(read_only(&["impact", "symbol"]));
-        assert!(read_only(&["diff", "HEAD~1"]));
-        // Every one of these re-run would mutate state: the gate must keep
-        // the update question away from them.
-        for args in [
-            &["push", "origin", "main", "--request-id", "x"][..],
-            &["commit", "--request-id", "x", "--message", "m"],
-            &["install"],
-            &["config", "classify-engine", "local"],
-            &["scope-task", "--clear"],
-            &["build-index", "."],
-            &["doctor"],
-            &["self-update"],
-            &["run-hook", "guard"],
-            &["rename", "a", "b"],
-        ] {
-            assert!(!read_only(args), "{args:?} must not relaunch");
-        }
-    }
-
-    #[test]
-    fn nested_mutating_modes_and_outward_flags_should_refuse() {
-        assert!(read_only(&["recall", "search", "pattern"]));
-        assert!(read_only(&["recall", "sessions"]));
-        assert!(!read_only(&["recall", "index"]));
-        assert!(read_only(&["list-errors", "last"]));
-        assert!(!read_only(&["list-errors", "gc"]));
-        assert!(read_only(&["list-branches"]));
-        assert!(!read_only(&["list-branches", "--fetch"]));
     }
 }
 
@@ -8065,20 +6880,6 @@ fn should_offer_classify_setup(
     is_global_install && !json && stdin_tty && stderr_tty
 }
 
-#[cfg(test)]
-mod classify_setup_prompt_tests {
-    use super::should_offer_classify_setup;
-
-    #[test]
-    fn prompt_runs_only_for_an_interactive_non_json_global_install() {
-        assert!(should_offer_classify_setup(true, false, true, true));
-        assert!(!should_offer_classify_setup(false, false, true, true));
-        assert!(!should_offer_classify_setup(true, true, true, true));
-        assert!(!should_offer_classify_setup(true, false, false, true));
-        assert!(!should_offer_classify_setup(true, false, true, false));
-    }
-}
-
 /// The subcommands `pixel --help` lists (hidden aliases and commands
 /// excluded), in declaration order: what the session-start block advertises.
 fn session_commands() -> Vec<String> {
@@ -8501,60 +7302,6 @@ fn normalize_commit_message(raw: &str) -> Result<String, String> {
         return Err("commit message is empty".into());
     }
     Ok(text.to_string())
-}
-
-#[cfg(test)]
-mod commit_message_tests {
-    use super::{commit_message, normalize_commit_message};
-    use std::path::Path;
-
-    #[test]
-    fn normalize_should_keep_paragraphs_and_drop_trailing_whitespace() {
-        let raw = "subject\n\nbody line one\n\n- bullet\n\n";
-        assert_eq!(
-            normalize_commit_message(raw).unwrap(),
-            "subject\n\nbody line one\n\n- bullet"
-        );
-    }
-
-    #[test]
-    fn normalize_should_refuse_a_blank_message() {
-        assert_eq!(
-            normalize_commit_message(" \n\t\n").unwrap_err(),
-            "commit message is empty"
-        );
-    }
-
-    #[test]
-    fn commit_message_should_prefer_inline_text_and_name_a_missing_file() {
-        assert_eq!(
-            commit_message(Some("fix: x".into()), None).unwrap(),
-            "fix: x"
-        );
-        let missing = Path::new("/nonexistent/pixel-msg.txt");
-        let err = commit_message(None, Some(missing)).unwrap_err();
-        assert!(
-            err.starts_with("cannot read commit message file /nonexistent/pixel-msg.txt:"),
-            "{err}"
-        );
-        assert_eq!(
-            commit_message(None, None).unwrap_err(),
-            "a commit message is required (-m or --message-file)"
-        );
-    }
-
-    #[test]
-    fn commit_message_should_read_the_file_verbatim() {
-        let dir = std::env::temp_dir().join(format!("pixel-msg-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("msg.txt");
-        std::fs::write(&file, "feat: a\n\nSecond paragraph.\n").unwrap();
-        assert_eq!(
-            commit_message(None, Some(&file)).unwrap(),
-            "feat: a\n\nSecond paragraph."
-        );
-        let _ = std::fs::remove_dir_all(dir);
-    }
 }
 
 fn validate_cli_syntax(args: &[String]) -> Result<(), String> {
@@ -9955,5 +8702,1258 @@ mod renamed_command_tests {
         );
         assert_eq!(rename_note(&argv(&["pixel", "ready"]), false), None);
         assert_eq!(rename_note(&argv(&["pixel", "prepare-repo"]), true), None);
+    }
+}
+
+#[cfg(test)]
+mod flow_vars_tests {
+    use super::*;
+
+    /// The `--account` shortcut picks the account variable the flow itself
+    /// declares, and a malformed `--var` is refused before anything opens.
+    #[test]
+    fn flow_vars_parses_the_pairs_and_uses_the_flows_account_var() {
+        let _guard = crate::ENV_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("pixel-flow-vars-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: ENV_LOCK serialises every test that touches process-wide
+        // variables, and PIXEL_FLOW_DIR is one of them.
+        unsafe {
+            std::env::set_var("PIXEL_FLOW_DIR", &dir);
+        }
+        let store = |name: &str, vars: &[(&str, &str)]| {
+            let vars: Vec<String> = vars
+                .iter()
+                .map(|(n, d)| {
+                    format!(r#"{{"name": "{n}", "description": "{d}", "required": false}}"#)
+                })
+                .collect();
+            std::fs::write(
+                dir.join(format!("{name}.json")),
+                format!(
+                    r#"{{"name": "{name}", "title": "t", "description": "",
+                        "vars": [{}], "steps": [{{"action": "snapshot"}}],
+                        "created_unix": 1, "revised_unix": 1, "revision": 1, "proven": false }}"#,
+                    vars.join(", ")
+                ),
+            )
+            .unwrap();
+        };
+        store(
+            "codex",
+            &[
+                ("openai_account", "the Codex account"),
+                ("env_name", "which env"),
+            ],
+        );
+        // A trailing variable after google_account must not win the lookup.
+        store(
+            "claude",
+            &[
+                ("google_account", "which account"),
+                ("env_name", "which env"),
+            ],
+        );
+
+        // `--account` lands on the variable the flow itself declares.
+        let vars = flow_vars(
+            "codex",
+            &["env=prod".to_string()],
+            &Some("bob@example.com".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            vars.get("openai_account").map(String::as_str),
+            Some("bob@example.com")
+        );
+        assert_eq!(vars.get("env").map(String::as_str), Some("prod"));
+        // A flow without an openai_account falls back to google_account.
+        let vars = flow_vars("claude", &[], &Some("carol@example.com".to_string())).unwrap();
+        assert_eq!(
+            vars.get("google_account").map(String::as_str),
+            Some("carol@example.com")
+        );
+
+        // The pairs are read in order and a malformed one is refused.
+        let vars = flow_vars("codex", &["a=1".to_string(), "b=2".to_string()], &None).unwrap();
+        assert_eq!(vars.get("a").map(String::as_str), Some("1"));
+        assert_eq!(vars.get("b").map(String::as_str), Some("2"));
+        assert_eq!(
+            flow_vars("codex", &["broken".to_string()], &None).unwrap_err(),
+            "--var expects key=value, got 'broken'"
+        );
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("PIXEL_FLOW_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod render_data_tests {
+    use super::*;
+
+    #[test]
+    fn the_install_banner_color_follows_no_color() {
+        assert!(banner_color(None));
+        assert!(banner_color(Some(std::ffi::OsStr::new(""))));
+        assert!(!banner_color(Some(std::ffi::OsStr::new("1"))));
+    }
+
+    #[test]
+    fn the_install_start_banner_stays_on_human_terminal_output() {
+        assert!(should_render_install_banner(false, true));
+        assert!(!should_render_install_banner(true, true));
+        assert!(!should_render_install_banner(false, false));
+    }
+
+    fn big() -> Value {
+        json!({"matches": (0..200).map(|i| json!({"path": format!("src/file_{i}.rs"), "line": i, "text": "é".repeat(20)})).collect::<Vec<_>>()})
+    }
+
+    #[test]
+    fn under_cap_is_untouched() {
+        let d = json!({"a": 1});
+        let r = render_data(&d, true, 1024);
+        assert_eq!(r.text, "{\"a\":1}\n");
+        assert!(!r.truncated);
+        assert_eq!(
+            serde_json::from_str::<Value>(&render_data(&d, false, 1024).text).unwrap(),
+            d
+        );
+    }
+
+    /// The reason this matters: agents call `pixel … --json` and parse
+    /// stdout, then `jq '.index'` / `.graph` on the result. A response that
+    /// is over the cap only because ONE list is long (a `snapshot.dirty`
+    /// full of untracked `vendor/bundle` paths) must keep its shape: the
+    /// scalar fields stay addressable, only the list is shortened, and the
+    /// document says which list was cut and how much survived.
+    #[test]
+    fn json_mode_truncation_shortens_the_largest_array_and_keeps_structure() {
+        let d = json!({
+            "index": {"base_files": 238, "commit_oid": "abc"},
+            "snapshot": {"head": "abc", "branch": "main",
+                          "dirty": (0..500).map(|i| format!("vendor/bundle/gems/g{i}/lib/x.rb")).collect::<Vec<_>>()},
+        });
+        let full = serde_json::to_string(&d).unwrap().len();
+        let cap = full / 3;
+        let r = render_data(&d, true, cap);
+        assert!(r.truncated);
+        assert!(r.text.len() <= cap + 1, "{} > cap {cap}", r.text.len());
+        let v: Value = serde_json::from_str(&r.text).expect("stdout must remain one JSON document");
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["cap_bytes"], cap);
+        assert_eq!(
+            v["index"]["base_files"], 238,
+            "untouched fields must survive"
+        );
+        assert_eq!(v["snapshot"]["branch"], "main");
+        let dirty = v["snapshot"]["dirty"].as_array().unwrap();
+        assert!(
+            !dirty.is_empty() && dirty.len() < 500,
+            "kept {}",
+            dirty.len()
+        );
+        assert_eq!(
+            dirty[0], "vendor/bundle/gems/g0/lib/x.rb",
+            "prefix, not a sample"
+        );
+        let cuts = v["truncated_arrays"].as_array().unwrap();
+        assert_eq!(cuts.len(), 1);
+        assert_eq!(cuts[0]["path"], "snapshot.dirty");
+        assert_eq!(cuts[0]["total"], 500);
+        assert_eq!(cuts[0]["kept"], dirty.len());
+        assert!(
+            v.get("partial").is_none(),
+            "no textual wrapper when structure fits"
+        );
+        assert_eq!(r.text.matches('\n').count(), 1, "single NDJSON-safe line");
+    }
+
+    /// Nested arrays: the cut lands on the array that actually carries the
+    /// bytes, not blindly on the top-level one, and the path names it.
+    #[test]
+    fn structural_truncation_targets_nested_array_by_size() {
+        let d = json!({"groups": [
+            {"name": "small", "items": ["a", "b"]},
+            {"name": "huge", "items": (0..2000).map(|i| format!("item-{i:05}")).collect::<Vec<_>>()},
+        ]});
+        let r = render_data(&d, true, 2000);
+        let v: Value = serde_json::from_str(&r.text).unwrap();
+        assert_eq!(
+            v["groups"].as_array().unwrap().len(),
+            2,
+            "outer array intact"
+        );
+        assert_eq!(v["groups"][0]["items"].as_array().unwrap().len(), 2);
+        assert!(v["groups"][1]["items"].as_array().unwrap().len() < 2000);
+        assert_eq!(v["truncated_arrays"][0]["path"], "groups[1].items");
+        assert!(r.text.len() <= 2001);
+    }
+
+    /// When the bulk is not an array (one huge string) structural trimming
+    /// cannot help; the textual wrapper must still be one valid document
+    /// that says it was cut.
+    #[test]
+    fn json_mode_falls_back_to_wrapper_when_no_array_can_be_cut() {
+        let d = json!({"blob": "x".repeat(5000)});
+        let r = render_data(&d, true, 500);
+        assert!(r.truncated);
+        let v: Value = serde_json::from_str(&r.text).expect("stdout must remain one JSON document");
+        assert_eq!(v["truncated"], true);
+        assert_eq!(v["cap_bytes"], 500);
+        let partial = v["partial"].as_str().unwrap();
+        assert!(partial.len() <= 500);
+        assert!(partial.starts_with("{\"blob\":\""));
+        assert!(v["note"].as_str().unwrap().contains("TRUNCATED"));
+        assert_eq!(r.text.matches('\n').count(), 1, "single NDJSON-safe line");
+    }
+
+    #[test]
+    fn json_mode_array_of_objects_is_cut_structurally() {
+        let r = render_data(&big(), true, 500);
+        let v: Value = serde_json::from_str(&r.text).unwrap();
+        assert_eq!(v["truncated"], true);
+        assert!(v["matches"].is_array());
+        assert_eq!(v["truncated_arrays"][0]["path"], "matches");
+        assert_eq!(v["truncated_arrays"][0]["total"], 200);
+    }
+
+    #[test]
+    fn human_mode_truncation_keeps_visible_note() {
+        let r = render_data(&big(), false, 500);
+        assert!(r.truncated);
+        assert!(r.text.contains("⚠ OUTPUT TRUNCATED AT 500 BYTES"));
+        assert!(serde_json::from_str::<Value>(&r.text).is_err());
+    }
+
+    /// Multi-byte text near the cap: the cut must land on a char boundary
+    /// so the partial string is valid UTF-8 and serializable.
+    #[test]
+    fn truncation_respects_char_boundaries() {
+        let d = json!({"t": "é".repeat(1000)});
+        for cap in 100..140 {
+            let out = render_data(&d, true, cap).text;
+            let v: Value = serde_json::from_str(&out).unwrap();
+            assert!(v["partial"].as_str().unwrap().len() <= cap);
+        }
+    }
+
+    /// `array_at_mut` must round-trip every path shape `largest_array`
+    /// emits, otherwise a cut silently targets nothing.
+    #[test]
+    fn array_path_round_trip() {
+        let mut d = json!({"a": {"b": [[1, 2, 3], {"c": [4, 5]}]}, "d": [6]});
+        let (path, len, _) = largest_array(&d, "").unwrap();
+        assert_eq!(
+            path, "a.b",
+            "21 bytes / 2 elems: 11 removable, beats a.b[0]'s 5"
+        );
+        assert_eq!(len, 2);
+        assert_eq!(array_at_mut(&mut d, "a.b[0]").unwrap().len(), 3);
+        assert_eq!(array_at_mut(&mut d, "a.b[1].c").unwrap().len(), 2);
+        assert_eq!(array_at_mut(&mut d, "d").unwrap().len(), 1);
+        assert!(array_at_mut(&mut d, "a.b[5]").is_none());
+    }
+
+    /// `PIXEL_OUTPUT_CAP_BYTES=0` is the documented escape hatch for a
+    /// consumer that wants the whole document; anything unparsable must
+    /// keep the safety net rather than silently disabling it.
+    #[test]
+    fn output_cap_env_parsing() {
+        assert_eq!(parse_output_cap(None), STDOUT_BYTE_CAP);
+        assert_eq!(parse_output_cap(Some("0")), usize::MAX);
+        assert_eq!(parse_output_cap(Some(" 4096 ")), 4096);
+        assert_eq!(parse_output_cap(Some("lots")), STDOUT_BYTE_CAP);
+        assert_eq!(parse_output_cap(Some("")), STDOUT_BYTE_CAP);
+    }
+
+    /// `status`/`ready` are freshness answers: the dirty LIST is what let an
+    /// untracked vendor tree blow the cap, the COUNT is all they need.
+    /// The stderr line is how an agent tells a 1 s incremental update from
+    /// a 100 s rebuild of the whole tree; the two must not read the same.
+    #[test]
+    fn graph_build_notice_distinguishes_incremental_from_full() {
+        let incremental =
+            json!({"incremental": true, "changed_files": 2, "removed_files": 0, "build_ms": 1200});
+        assert_eq!(
+            graph_build_notice(&incremental),
+            "updated graph.db for 2 changed file(s) (1200 ms)"
+        );
+        let with_removed =
+            json!({"incremental": true, "changed_files": 1, "removed_files": 1, "build_ms": 40});
+        assert_eq!(
+            graph_build_notice(&with_removed),
+            "updated graph.db for 1 changed file(s), 1 removed (40 ms)"
+        );
+        let first = json!({"incremental": false, "reason": "missing", "build_ms": 36000});
+        assert_eq!(
+            graph_build_notice(&first),
+            "built graph.db on first use (36000 ms)"
+        );
+        let threshold = json!({"incremental": false, "reason": "threshold", "build_ms": 5});
+        assert!(graph_build_notice(&threshold).contains("PIXEL_GRAPH_INCREMENTAL_MAX_PCT"));
+        // Older daemon without the field: still the first-use wording.
+        assert_eq!(
+            graph_build_notice(&json!({"build_ms": 7})),
+            "built graph.db on first use (7 ms)"
+        );
+    }
+
+    #[test]
+    fn compact_snapshot_replaces_dirty_list_with_count() {
+        let mut d = json!({"index": {"base_files": 1},
+            "snapshot": {"head": "abc", "branch": "main", "dirty": ["a", "b", "c"]}});
+        compact_snapshot(&mut d);
+        assert_eq!(d["snapshot"]["dirty_count"], 3);
+        assert!(d["snapshot"].get("dirty").is_none());
+        assert_eq!(d["snapshot"]["head"], "abc");
+        assert_eq!(d["index"]["base_files"], 1);
+        // No snapshot (older daemon / in-process service without one): no-op.
+        let mut bare = json!({"index": {}});
+        compact_snapshot(&mut bare);
+        assert_eq!(bare, json!({"index": {}}));
+    }
+
+    #[test]
+    fn compact_repo_state_drops_the_clean_list_and_keeps_the_count() {
+        let mut d = json!({"root": "/repo", "head": "abc", "branch": "main",
+            "dirty": [], "dirty_count": 0,
+            "clean": ["a", "b"], "clean_count": 2,
+            "clean_list_truncated": false, "clean_list_cap": 200});
+        compact_repo_state(&mut d);
+        assert!(d.get("clean").is_none(), "{d}");
+        assert!(d.get("clean_list_truncated").is_none(), "{d}");
+        assert!(d.get("clean_list_cap").is_none(), "{d}");
+        assert_eq!(d["clean_count"], 2);
+        assert_eq!(d["head"], "abc");
+        // A non-object (never produced today): no-op, no panic.
+        let mut bare = json!([]);
+        compact_repo_state(&mut bare);
+        assert_eq!(bare, json!([]));
+    }
+}
+
+#[cfg(test)]
+mod targets_manifest_tests {
+    use super::*;
+
+    fn task_entry(id_src: &str, created: u64, path: &str) -> Value {
+        serde_json::json!({
+            "id": targets_task_id(id_src),
+            "task": id_src,
+            "created_unix": created,
+            "targets": [{"path": path, "tier": "P0"}],
+        })
+    }
+
+    #[test]
+    fn merge_two_tasks_coexist() {
+        let now = 1_000_000;
+        let v = merge_targets_manifest(None, task_entry("task A", now, "src/a.rs"), now);
+        let text = v.to_string();
+        let v2 = merge_targets_manifest(Some(&text), task_entry("task B", now, "src/b.rs"), now);
+        let tasks = v2["tasks"].as_array().unwrap();
+        assert_eq!(v2["version"], 2);
+        assert_eq!(tasks.len(), 2, "concurrent tasks must both survive");
+        let names: Vec<&str> = tasks.iter().map(|t| t["task"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["task A", "task B"]);
+    }
+
+    #[test]
+    fn merge_replaces_same_task_id() {
+        let now = 1_000_000;
+        let v = merge_targets_manifest(None, task_entry("task A", now - 100, "src/old.rs"), now);
+        let text = v.to_string();
+        let v2 = merge_targets_manifest(Some(&text), task_entry("task A", now, "src/new.rs"), now);
+        let tasks = v2["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1, "same task id must replace, not append");
+        assert_eq!(tasks[0]["targets"][0]["path"], "src/new.rs");
+    }
+
+    #[test]
+    fn merge_drops_expired_tasks() {
+        let now = 1_000_000_000;
+        let old = merge_targets_manifest(
+            None,
+            task_entry("stale task", now - TARGETS_TTL_SECS - 1, "src/stale.rs"),
+            now - TARGETS_TTL_SECS - 1,
+        );
+        let text = old.to_string();
+        let v2 = merge_targets_manifest(
+            Some(&text),
+            task_entry("fresh task", now, "src/fresh.rs"),
+            now,
+        );
+        let tasks = v2["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1, "expired task must be dropped on merge");
+        assert_eq!(tasks[0]["task"], "fresh task");
+    }
+
+    #[test]
+    fn merge_wraps_legacy_singleton() {
+        let now = 1_000_000;
+        let legacy = serde_json::json!({
+            "version": 1,
+            "task": "legacy task",
+            "created_unix": now - 50,
+            "head_oid": "abc",
+            "limit": 20,
+            "files": [{"path": "src/legacy.rs", "tier": "P0"}],
+        })
+        .to_string();
+        let v2 = merge_targets_manifest(
+            Some(&legacy),
+            task_entry("new task", now, "src/new.rs"),
+            now,
+        );
+        let tasks = v2["tasks"].as_array().unwrap();
+        assert_eq!(
+            tasks.len(),
+            2,
+            "legacy singleton must be preserved as a v2 task"
+        );
+        assert_eq!(tasks[0]["task"], "legacy task");
+        assert_eq!(tasks[0]["targets"][0]["path"], "src/legacy.rs");
+        assert_eq!(tasks[1]["task"], "new task");
+    }
+
+    #[test]
+    fn merge_survives_corrupt_existing() {
+        let now = 1_000_000;
+        let v2 = merge_targets_manifest(
+            Some("{not json"),
+            task_entry("task A", now, "src/a.rs"),
+            now,
+        );
+        assert_eq!(v2["tasks"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn task_id_stable_and_short() {
+        assert_eq!(targets_task_id("x"), targets_task_id("x"));
+        assert_ne!(targets_task_id("x"), targets_task_id("y"));
+        assert_eq!(targets_task_id("anything").len(), 12);
+    }
+
+    #[test]
+    fn merge_caps_at_max_manifest_tasks() {
+        let mut now = 1_000_000u64;
+        let mut text =
+            merge_targets_manifest(None, task_entry("task 0", now, "src/a0.rs"), now).to_string();
+
+        // Add MAX_MANIFEST_TASKS more tasks (total = MAX+1, should cap).
+        for i in 1..=MAX_MANIFEST_TASKS {
+            now += 10;
+            text = merge_targets_manifest(
+                Some(&text),
+                task_entry(&format!("task {i}"), now, &format!("src/a{i}.rs")),
+                now,
+            )
+            .to_string();
+        }
+        let v: Value = serde_json::from_str(&text).unwrap();
+        let tasks = v["tasks"].as_array().unwrap();
+        assert_eq!(
+            tasks.len(),
+            MAX_MANIFEST_TASKS,
+            "manifest must be capped at MAX_MANIFEST_TASKS"
+        );
+        // Oldest task ("task 0") must be evicted; newest ("task {MAX}") kept.
+        let names: Vec<&str> = tasks.iter().map(|t| t["task"].as_str().unwrap()).collect();
+        assert!(!names.contains(&"task 0"), "oldest task must be evicted");
+        assert!(
+            names.contains(&format!("task {MAX_MANIFEST_TASKS}").as_str()),
+            "newest task must survive"
+        );
+    }
+}
+
+#[cfg(test)]
+mod daemon_ping_tests {
+    use super::*;
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixListener;
+    use std::time::Instant;
+
+    fn scratch_root(tag: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("pixel-daemon-ping-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    /// Nothing listens: the probe is false and opens nothing — the repository
+    /// `Service` an auto-starting probe would open is what left `.pixel/`
+    /// inside `~/.local/share/pixel/recall`.
+    #[test]
+    fn daemon_ping_is_false_without_a_daemon() {
+        let root = scratch_root("idle");
+        assert!(!daemon_ping(&root));
+        assert!(
+            !root.join(pixel_index::index::SHARD_DIR).exists(),
+            "the probe must not open a Service on {}",
+            root.display()
+        );
+    }
+
+    /// A daemon answering `Ping` is what the probe reports: without this half,
+    /// a probe that always returned false would pass the idle test.
+    #[test]
+    fn daemon_ping_is_true_when_a_daemon_answers() {
+        let root = scratch_root("live");
+        let listener = UnixListener::bind(daemon::socket_path(&root)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            // Poll with a deadline: a probe that never connects must fail the
+            // assertion, not hang the suite.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        // A non-blocking listener hands back a non-blocking
+                        // socket on BSD: reset it, or the read races the
+                        // client's write instead of waiting for it.
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                        let mut line = String::new();
+                        let Ok(n) = BufReader::new(&stream).read_line(&mut line) else {
+                            return;
+                        };
+                        if n == 0 {
+                            return;
+                        }
+                        assert_eq!(
+                            serde_json::from_str::<Request>(&line).unwrap(),
+                            Request::Ping,
+                            "the probe asks with a Ping"
+                        );
+                        let reply = Response::success(
+                            "ping",
+                            json!({"pong": true, "protocol_version": PROTOCOL_VERSION}),
+                        );
+                        writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+                        return;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+        assert!(daemon_ping(&root));
+        server.join().unwrap();
+        let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
+
+    fn ping_reply(ok: bool, version: Option<u64>) -> Response {
+        let mut reply = Response::success("ping", json!({"pong": true}));
+        if let Some(version) = version {
+            reply = Response::success("ping", json!({"pong": true, "protocol_version": version}));
+        }
+        reply.ok = ok;
+        reply
+    }
+
+    #[test]
+    fn only_a_healthy_ping_on_this_protocol_may_serve_and_only_a_newer_one_is_spared() {
+        assert_eq!(
+            classify_ping(&ping_reply(true, Some(PROTOCOL_VERSION))),
+            DaemonProbe::Current
+        );
+        assert_eq!(
+            classify_ping(&ping_reply(false, Some(PROTOCOL_VERSION))),
+            DaemonProbe::Stale,
+            "a failing daemon on our protocol is replaced, not used"
+        );
+        assert_eq!(
+            classify_ping(&ping_reply(true, Some(PROTOCOL_VERSION - 1))),
+            DaemonProbe::Stale
+        );
+        assert_eq!(classify_ping(&ping_reply(true, None)), DaemonProbe::Stale);
+        assert_eq!(
+            classify_ping(&ping_reply(true, Some(PROTOCOL_VERSION + 1))),
+            DaemonProbe::Newer
+        );
+    }
+
+    /// A fake daemon answering Ping with `version` and recording every
+    /// request, for at most `connections` connections. After a Shutdown it
+    /// keeps answering for `linger` (a real daemon takes a moment to exit),
+    /// then removes its socket and answers whatever is still queued.
+    fn fake_daemon(
+        root: &Path,
+        version: u64,
+        connections: usize,
+        linger: Duration,
+    ) -> std::thread::JoinHandle<Vec<Request>> {
+        fn answer(mut stream: UnixStream, version: u64) -> Option<Request> {
+            let _ = stream.set_nonblocking(false);
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let mut line = String::new();
+            if BufReader::new(&stream).read_line(&mut line).unwrap_or(0) == 0 {
+                return None;
+            }
+            let request: Request = serde_json::from_str(&line).unwrap();
+            let reply = match request {
+                Request::Ping => ping_reply(true, Some(version)),
+                _ => Response::success("ok", json!({})),
+            };
+            writeln!(stream, "{}", serde_json::to_string(&reply).unwrap()).unwrap();
+            Some(request)
+        }
+        let sock = daemon::socket_path(root);
+        let listener = UnixListener::bind(&sock).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut exit_at: Option<Instant> = None;
+            while Instant::now() < deadline
+                && seen.len() < connections
+                && exit_at.is_none_or(|at| Instant::now() < at)
+            {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        if let Some(request) = answer(stream, version) {
+                            if request == Request::Shutdown {
+                                exit_at = Some(Instant::now() + linger);
+                            }
+                            seen.push(request);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+            if exit_at.is_some() {
+                let _ = std::fs::remove_file(&sock);
+                // Answer what connected before the socket went away, so no
+                // client waits out its read timeout.
+                while let Ok((stream, _)) = listener.accept() {
+                    let _ = answer(stream, version);
+                }
+            }
+            seen
+        })
+    }
+
+    /// A current daemon's answer is logged as a daemon route with both its
+    /// phases timed: the probe (the queue ahead) and the request itself.
+    #[test]
+    fn route_through_daemon_times_the_probe_and_the_request_of_a_current_daemon() {
+        let root = scratch_root("route-current");
+        let server = fake_daemon(&root, PROTOCOL_VERSION, 2, Duration::ZERO);
+        let (response, step) = route_through_daemon(&root, &Request::Status {});
+        assert!(response.is_some_and(|r| r.ok));
+        assert_eq!(step.route, ServeRoute::Daemon);
+        assert_eq!(step.reason, None);
+        assert!(
+            step.probe_ms.is_some() && step.request_ms.is_some(),
+            "{step:?}"
+        );
+        assert_eq!((step.start_ms, step.open_ms), (None, None), "{step:?}");
+        assert_eq!(
+            server.join().unwrap(),
+            vec![Request::Ping, Request::Status {}]
+        );
+        let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
+
+    /// A newer daemon sends the request back to this process without a
+    /// start attempt: the step says so, and times only the probe.
+    #[test]
+    fn route_through_daemon_names_a_newer_daemon_as_the_in_process_reason() {
+        let root = scratch_root("route-newer");
+        let server = fake_daemon(&root, PROTOCOL_VERSION + 1, 1, Duration::ZERO);
+        let (response, step) = route_through_daemon(&root, &Request::Status {});
+        assert!(response.is_none());
+        assert_eq!(step.route, ServeRoute::InProcess);
+        assert_eq!(step.reason, Some(InProcessReason::NewerDaemon));
+        assert!(step.probe_ms.is_some(), "{step:?}");
+        assert_eq!((step.request_ms, step.start_ms), (None, None), "{step:?}");
+        assert_eq!(server.join().unwrap(), vec![Request::Ping]);
+        let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
+
+    /// A stale daemon's retirement is timed as the start of its replacement:
+    /// on the first call after an upgrade the probe itself is quick, and a
+    /// `probe_ms` holding the retirement would read as a busy daemon.
+    #[test]
+    fn retiring_a_stale_daemon_counts_toward_the_start_not_the_probe() {
+        let root = scratch_root("route-stale");
+        let server = fake_daemon(&root, PROTOCOL_VERSION - 1, 100, Duration::from_millis(400));
+        let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
+            Err(InProcessReason::StartTimedOut)
+        });
+        assert!(response.is_none());
+        assert_eq!(step.reason, Some(InProcessReason::StartTimedOut));
+        let (probe_ms, start_ms) = (step.probe_ms.unwrap(), step.start_ms.unwrap());
+        assert!(
+            start_ms >= 300,
+            "the retirement waited on the linger: {step:?}"
+        );
+        assert!(probe_ms < start_ms, "{step:?}");
+        let seen = server.join().unwrap();
+        assert_eq!(seen[..2], [Request::Ping, Request::Shutdown]);
+    }
+
+    /// No daemon answers: the started one's answer is returned and logged as
+    /// `daemon_started`; a refused start sends the request back to this
+    /// process under the start's own reason, untimed when it never ran.
+    #[test]
+    fn an_absent_daemon_is_started_or_names_why_it_was_not() {
+        let root = scratch_root("route-absent");
+        let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
+            Ok(Response::success("status", json!({"started": true})))
+        });
+        assert_eq!(response.unwrap().data()["started"], true);
+        assert_eq!(step.route, ServeRoute::DaemonStarted);
+        assert!(
+            step.start_ms.is_some() && step.probe_ms.is_some(),
+            "{step:?}"
+        );
+        assert_eq!(step.request_ms, None, "{step:?}");
+
+        let (response, step) = route_through_daemon_with(&root, &Request::Status {}, |_, _| {
+            Err(InProcessReason::AutoStartDisabled)
+        });
+        assert!(response.is_none());
+        assert_eq!(step.route, ServeRoute::InProcess);
+        assert_eq!(step.reason, Some(InProcessReason::AutoStartDisabled));
+        assert_eq!(step.start_ms, None, "{step:?}");
+    }
+
+    #[test]
+    fn a_newer_daemon_is_left_running_and_declines_without_a_restart() {
+        let root = scratch_root("newer");
+        let server = fake_daemon(&root, PROTOCOL_VERSION + 1, 1, Duration::ZERO);
+        assert!(matches!(
+            try_daemon_inner(&root, &Request::Status {}),
+            DaemonRoute::Declined
+        ));
+        assert_eq!(
+            server.join().unwrap(),
+            vec![Request::Ping],
+            "no Shutdown sent"
+        );
+        let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
+
+    #[test]
+    fn a_stale_daemon_is_shut_down_so_a_current_one_can_start() {
+        let root = scratch_root("stale");
+        let server = fake_daemon(&root, PROTOCOL_VERSION - 1, 100, Duration::from_millis(200));
+        let started = Instant::now();
+        assert!(
+            !daemon_ping(&root),
+            "a stale daemon is never reported ready"
+        );
+        let waited = started.elapsed();
+        assert!(
+            !daemon::socket_path(&root).exists(),
+            "retirement waits until the old daemon let its socket go"
+        );
+        assert!(
+            waited < STALE_DAEMON_EXIT_CAP,
+            "and returns as soon as it is gone: {waited:?}"
+        );
+        let seen = server.join().unwrap();
+        assert_eq!(seen[..2], [Request::Ping, Request::Shutdown]);
+        assert!(seen[2..].iter().all(|r| *r == Request::Ping), "{seen:?}");
+    }
+
+    #[test]
+    fn daemon_start_refuses_to_fight_a_newer_daemon() {
+        let root = scratch_root("start-newer");
+        let server = fake_daemon(&root, PROTOCOL_VERSION + 1, 1, Duration::ZERO);
+        let error = daemon_start(root.clone(), false, true).unwrap_err();
+        assert!(error.contains("newer pixel daemon"), "{error}");
+        assert_eq!(server.join().unwrap(), vec![Request::Ping]);
+        let _ = std::fs::remove_file(daemon::socket_path(&root));
+    }
+}
+
+#[cfg(test)]
+mod upgrade_target_tests {
+    use super::cargo_profile_dir;
+
+    /// The install step must read the binary the build step wrote: a
+    /// `--build` on another profile (the `dev-release` iteration loop) used
+    /// to install the stale `target/release/pixel` without any error.
+    #[test]
+    fn profile_dir_follows_the_build_command() {
+        assert_eq!(
+            cargo_profile_dir("cargo build --release -p pixel-cli"),
+            "release"
+        );
+        assert_eq!(cargo_profile_dir("cargo build -r -p pixel-cli"), "release");
+        assert_eq!(cargo_profile_dir("cargo build -p pixel-cli"), "debug");
+        assert_eq!(
+            cargo_profile_dir("cargo build --profile dev-release -p pixel-cli"),
+            "dev-release"
+        );
+        assert_eq!(
+            cargo_profile_dir("cargo build --profile=dev-release"),
+            "dev-release"
+        );
+        // `--profile` beats `--release` whichever comes first, as in cargo.
+        assert_eq!(
+            cargo_profile_dir("cargo build --release --profile dev-release"),
+            "dev-release"
+        );
+        assert_eq!(cargo_profile_dir("cargo build --profile dev"), "debug");
+        assert_eq!(cargo_profile_dir("cargo build --profile bench"), "release");
+        assert_eq!(
+            cargo_profile_dir("~/.cargo/bin/cargo build -p pixel-cli"),
+            "debug"
+        );
+        // Not a cargo invocation: no flag semantics, historical `release`
+        // (the upgrade CLI tests fake the build with `/usr/bin/true`).
+        assert_eq!(cargo_profile_dir("/usr/bin/true"), "release");
+        assert_eq!(cargo_profile_dir("./scripts/build.sh"), "release");
+        assert_eq!(
+            cargo_profile_dir("./scripts/build.sh --profile fast"),
+            "fast"
+        );
+    }
+    use super::*;
+
+    fn sandbox(tag: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pixel-upgrade-target-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn touch(path: &Path) -> PathBuf {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, b"x").unwrap();
+        path.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn explicit_flag_wins_verbatim() {
+        let t = resolve_upgrade_target(
+            Some(PathBuf::from("/opt/x/pixel")),
+            Some(PathBuf::from("/nope")),
+            None,
+            Path::new("/home/u"),
+        );
+        assert_eq!(t.path, PathBuf::from("/opt/x/pixel"));
+        assert_eq!(t.source, "--install-path");
+        assert!(t.explicit);
+    }
+
+    /// The point of the change: on a machine where `pixel` is a managed
+    /// install behind a shim, the running binary is that install, and the
+    /// upgrade must land there, not in a `~/.local/bin` that shadows or
+    /// misses PATH.
+    #[test]
+    fn running_binary_is_the_install_location() {
+        let d = sandbox("running");
+        let managed = touch(&d.join("mise/installs/pixel/rev-abc/bin/pixel"));
+        let t = resolve_upgrade_target(None, Some(managed.clone()), None, &d);
+        assert_eq!(t.path, managed);
+        assert_eq!(t.source, "running binary");
+        assert!(!t.explicit, "a resolved default is subject to the refusal");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `target/release/pixel upgrade` (or a test binary) must never make
+    /// the build output the install location.
+    #[test]
+    fn cargo_target_binary_falls_through_to_path_then_default() {
+        let d = sandbox("target");
+        let built = touch(&d.join("repo/target/release/pixel"));
+        let on_path = touch(&d.join("cellar/bin/pixel"));
+        let shim = touch(&d.join("mise/shims/pixel"));
+        let path_var = std::env::join_paths([
+            shim.parent().unwrap().to_path_buf(),
+            d.join("repo/target/release"),
+            on_path.parent().unwrap().to_path_buf(),
+        ])
+        .unwrap();
+        let t = resolve_upgrade_target(None, Some(built.clone()), Some(&path_var), &d);
+        assert_eq!(t.path, on_path, "shim dir and target dir skipped");
+        assert_eq!(t.source, "first pixel on PATH");
+        assert!(!t.explicit);
+
+        let t = resolve_upgrade_target(None, Some(built), None, &d);
+        assert_eq!(t.path, d.join(".local/bin/pixel"));
+        assert_eq!(t.source, "default");
+        assert!(!t.explicit);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// #513: `target/` symlinked into a build cache (or a
+    /// `CARGO_TARGET_DIR` elsewhere) canonicalizes to a path with no
+    /// `target` component. Cargo's `CACHEDIR.TAG` above it still marks it
+    /// as build output, for the running binary and a PATH entry alike; a
+    /// cache tag written by another tool does not.
+    #[test]
+    fn a_build_dir_reached_through_a_symlink_is_still_build_output() {
+        let d = sandbox("symlinked-target");
+        let build = d.join("cache/build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(
+            build.join("CACHEDIR.TAG"),
+            [CARGO_CACHEDIR_TAG, b"\n# For information about cache directory tags see https://bford.info/cachedir/\n"].concat(),
+        )
+        .unwrap();
+        let built = touch(&build.join("debug/pixel"));
+        std::fs::create_dir_all(d.join("repo")).unwrap();
+        std::os::unix::fs::symlink(&build, d.join("repo/target")).unwrap();
+        let via_link = d.join("repo/target/debug/pixel");
+        assert_eq!(via_link.canonicalize().unwrap(), built);
+        assert!(!built.components().any(|c| c.as_os_str() == "target"));
+        assert!(is_cargo_target_path(&built));
+
+        let path_var = std::env::join_paths([built.parent().unwrap()]).unwrap();
+        let t = resolve_upgrade_target(None, Some(via_link), Some(&path_var), &d);
+        assert_eq!(
+            t.path,
+            d.join(".local/bin/pixel"),
+            "neither the exe nor PATH"
+        );
+        assert_eq!(t.source, "default");
+
+        std::fs::write(
+            build.join("CACHEDIR.TAG"),
+            b"Signature: 8a477f597d28d172789f06886806bc55\n# Created by some other tool.\n",
+        )
+        .unwrap();
+        assert!(!is_cargo_target_path(&built));
+        let t = resolve_upgrade_target(None, Some(built.clone()), None, &d);
+        assert_eq!((t.path, t.source), (built, "running binary"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn shadow_is_reported_only_when_a_different_pixel_comes_first() {
+        let d = sandbox("shadow");
+        let stale = touch(&d.join("local/bin/pixel"));
+        let managed = touch(&d.join("mise/installs/pixel/bin/pixel"));
+        let link_dir = d.join("linkdir");
+        std::fs::create_dir_all(&link_dir).unwrap();
+        std::os::unix::fs::symlink(&managed, link_dir.join("pixel")).unwrap();
+
+        let stale_first = std::env::join_paths([
+            stale.parent().unwrap().to_path_buf(),
+            managed.parent().unwrap().to_path_buf(),
+        ])
+        .unwrap();
+        assert_eq!(
+            upgrade_shadowed_by(&managed, Some(&stale_first)),
+            Some(stale.clone())
+        );
+
+        let managed_first = std::env::join_paths([
+            managed.parent().unwrap().to_path_buf(),
+            stale.parent().unwrap().to_path_buf(),
+        ])
+        .unwrap();
+        assert_eq!(upgrade_shadowed_by(&managed, Some(&managed_first)), None);
+
+        // A symlink to the installed binary is the same file, not a shadow.
+        let link_first =
+            std::env::join_paths([link_dir, stale.parent().unwrap().to_path_buf()]).unwrap();
+        assert_eq!(upgrade_shadowed_by(&managed, Some(&link_first)), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `pixel upgrade --dev` exists to never touch `pixel`: a `pixel` earlier
+    /// on PATH is not shadowing `pixel-dev`, so warning about it would be a
+    /// false alarm on every dev install.
+    #[test]
+    fn a_binary_under_another_name_is_never_shadowed() {
+        let d = sandbox("devshadow");
+        let managed = touch(&d.join("mise/installs/pixel/bin/pixel"));
+        let dev = touch(&d.join("local/bin/pixel-dev"));
+        let path_var = std::env::join_paths([managed.parent().unwrap()]).unwrap();
+        assert_eq!(upgrade_shadowed_by(&dev, Some(&path_var)), None);
+        assert_eq!(
+            dev_install_path(Path::new("/home/u")),
+            PathBuf::from("/home/u/.local/bin/pixel-dev")
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn roots_of(roots: &[ManagedRoot]) -> Vec<(PathBuf, &'static str)> {
+        roots
+            .iter()
+            .map(|r| (r.root.clone(), r.manager.name()))
+            .collect()
+    }
+
+    /// The trees a bare upgrade must not write into: mise's default and
+    /// relocated `installs/`, the macOS and Linuxbrew Cellars, and the Cellar
+    /// `brew shellenv` exports. An unset or empty variable adds nothing
+    /// (an empty `HOMEBREW_CELLAR` would otherwise make `""` a root).
+    #[test]
+    fn package_manager_roots_cover_mise_and_homebrew() {
+        let home = Path::new("/nonexistent-home");
+        let base = roots_of(&package_manager_roots(home, None, None));
+        assert_eq!(
+            base,
+            vec![
+                (home.join(".local/share/mise/installs"), "mise"),
+                (PathBuf::from("/opt/homebrew/Cellar"), "Homebrew"),
+                (PathBuf::from("/usr/local/Cellar"), "Homebrew"),
+                (
+                    PathBuf::from("/home/linuxbrew/.linuxbrew/Cellar"),
+                    "Homebrew"
+                ),
+            ]
+        );
+        let empty = std::ffi::OsStr::new("");
+        assert_eq!(
+            roots_of(&package_manager_roots(home, Some(empty), Some(empty))),
+            base
+        );
+        let with_env = roots_of(&package_manager_roots(
+            home,
+            Some(std::ffi::OsStr::new("/nonexistent-mise")),
+            Some(std::ffi::OsStr::new("/nonexistent-cellar")),
+        ));
+        assert!(with_env.contains(&(PathBuf::from("/nonexistent-mise/installs"), "mise")));
+        assert!(with_env.contains(&(PathBuf::from("/nonexistent-cellar"), "Homebrew")));
+        assert_eq!(with_env.len(), 6);
+    }
+
+    fn target(path: PathBuf, explicit: bool) -> UpgradeTarget {
+        UpgradeTarget {
+            path,
+            source: "running binary",
+            explicit,
+        }
+    }
+
+    /// The refusal is the guard against clobbering a managed install: a
+    /// resolved path under a root is refused (directly or through a
+    /// symlink), a sibling that merely shares a name prefix is not, and an
+    /// explicit `--install-path` is always the user's call.
+    #[test]
+    fn refusal_follows_symlinks_into_managed_roots_and_spares_explicit_paths() {
+        let d = sandbox("refusal");
+        let cellar = d.join("Cellar");
+        let keg = touch(&cellar.join("pixel/1.0/bin/pixel"));
+        let roots = vec![ManagedRoot {
+            root: cellar.canonicalize().unwrap(),
+            manager: ManagedBy::Homebrew,
+        }];
+
+        let reason = upgrade_target_refusal(&target(keg.clone(), false), &roots).unwrap();
+        assert!(reason.contains(&keg.display().to_string()), "{reason}");
+        assert!(reason.contains("(running binary)"), "{reason}");
+        assert!(reason.contains("Homebrew"), "{reason}");
+        assert!(
+            reason.contains("brew update && brew upgrade LivioGama/tap/pixel"),
+            "{reason}"
+        );
+
+        let link = d.join("bin/pixel");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&keg, &link).unwrap();
+        let reason = upgrade_target_refusal(&target(link, false), &roots).unwrap();
+        assert!(
+            reason.contains(&keg.display().to_string()),
+            "resolved: {reason}"
+        );
+
+        assert!(upgrade_target_refusal(&target(keg, true), &roots).is_none());
+        let sibling = touch(&d.join("Cellarx/pixel"));
+        assert!(upgrade_target_refusal(&target(sibling, false), &roots).is_none());
+        // A path that does not exist yet (the `~/.local/bin/pixel` default)
+        // is compared as given.
+        let missing = cellar.canonicalize().unwrap().join("new/pixel");
+        assert!(upgrade_target_refusal(&target(missing, false), &roots).is_some());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Each manager's refusal names its own update command: a mise or
+    /// Homebrew install is updated through its package manager, not by
+    /// `pixel self-update`, and that command is the actionable half of the
+    /// refusal.
+    #[test]
+    fn refusal_names_the_owning_managers_update_command() {
+        let d = sandbox("manager-command");
+        let mise_root = d.join("Mise");
+        let mise_keg = touch(&mise_root.join("pixel/1.0/bin/pixel"));
+        let cellar = d.join("Cellar");
+        let brew_keg = touch(&cellar.join("pixel/1.0/bin/pixel"));
+        let roots = vec![
+            ManagedRoot {
+                root: mise_root.canonicalize().unwrap(),
+                manager: ManagedBy::Mise,
+            },
+            ManagedRoot {
+                root: cellar.canonicalize().unwrap(),
+                manager: ManagedBy::Homebrew,
+            },
+        ];
+
+        let reason = upgrade_target_refusal(&target(mise_keg, false), &roots).unwrap();
+        assert!(reason.contains("mise upgrade pixel"), "{reason}");
+
+        let reason = upgrade_target_refusal(&target(brew_keg, false), &roots).unwrap();
+        assert!(
+            reason.contains("brew update && brew upgrade LivioGama/tap/pixel"),
+            "{reason}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
+
+#[cfg(test)]
+mod update_close_tests {
+    use super::{Cli, READ_ONLY_COMMANDS, read_only_invocation};
+    use clap::CommandFactory;
+
+    #[test]
+    fn every_read_only_label_is_a_real_command() {
+        // Building the full clap command overflows a test thread's default
+        // 2 MiB stack; give the builder room.
+        let check = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let cli = Cli::command();
+                let real: Vec<&str> = cli.get_subcommands().map(clap::Command::get_name).collect();
+                for label in READ_ONLY_COMMANDS {
+                    assert!(
+                        real.contains(label),
+                        "{label} is not a subcommand name; the allow-list entry is dead"
+                    );
+                }
+            })
+            .unwrap();
+        check.join().unwrap();
+    }
+
+    fn read_only(args: &[&str]) -> bool {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        let check = std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || {
+                let matches = Cli::command()
+                    .try_get_matches_from(
+                        std::iter::once("pixel")
+                            .chain(args.iter().map(std::string::String::as_str)),
+                    )
+                    .unwrap();
+                read_only_invocation(&matches)
+            })
+            .unwrap();
+        check.join().unwrap()
+    }
+
+    #[test]
+    fn read_only_should_accept_retrieval_and_refuse_state_changers() {
+        assert!(read_only(&["search-content", "pattern"]));
+        assert!(read_only(&["impact", "symbol"]));
+        assert!(read_only(&["diff", "HEAD~1"]));
+        // Every one of these re-run would mutate state: the gate must keep
+        // the update question away from them.
+        for args in [
+            &["push", "origin", "main", "--request-id", "x"][..],
+            &["commit", "--request-id", "x", "--message", "m"],
+            &["install"],
+            &["config", "classify-engine", "local"],
+            &["scope-task", "--clear"],
+            &["build-index", "."],
+            &["doctor"],
+            &["self-update"],
+            &["run-hook", "guard"],
+            &["rename", "a", "b"],
+        ] {
+            assert!(!read_only(args), "{args:?} must not relaunch");
+        }
+    }
+
+    #[test]
+    fn nested_mutating_modes_and_outward_flags_should_refuse() {
+        assert!(read_only(&["recall", "search", "pattern"]));
+        assert!(read_only(&["recall", "sessions"]));
+        assert!(!read_only(&["recall", "index"]));
+        assert!(read_only(&["list-errors", "last"]));
+        assert!(!read_only(&["list-errors", "gc"]));
+        assert!(read_only(&["list-branches"]));
+        assert!(!read_only(&["list-branches", "--fetch"]));
+    }
+}
+
+#[cfg(test)]
+mod classify_setup_prompt_tests {
+    use super::should_offer_classify_setup;
+
+    #[test]
+    fn prompt_runs_only_for_an_interactive_non_json_global_install() {
+        assert!(should_offer_classify_setup(true, false, true, true));
+        assert!(!should_offer_classify_setup(false, false, true, true));
+        assert!(!should_offer_classify_setup(true, true, true, true));
+        assert!(!should_offer_classify_setup(true, false, false, true));
+        assert!(!should_offer_classify_setup(true, false, true, false));
+    }
+}
+
+#[cfg(test)]
+mod commit_message_tests {
+    use super::{commit_message, normalize_commit_message};
+    use std::path::Path;
+
+    #[test]
+    fn normalize_should_keep_paragraphs_and_drop_trailing_whitespace() {
+        let raw = "subject\n\nbody line one\n\n- bullet\n\n";
+        assert_eq!(
+            normalize_commit_message(raw).unwrap(),
+            "subject\n\nbody line one\n\n- bullet"
+        );
+    }
+
+    #[test]
+    fn normalize_should_refuse_a_blank_message() {
+        assert_eq!(
+            normalize_commit_message(" \n\t\n").unwrap_err(),
+            "commit message is empty"
+        );
+    }
+
+    #[test]
+    fn commit_message_should_prefer_inline_text_and_name_a_missing_file() {
+        assert_eq!(
+            commit_message(Some("fix: x".into()), None).unwrap(),
+            "fix: x"
+        );
+        let missing = Path::new("/nonexistent/pixel-msg.txt");
+        let err = commit_message(None, Some(missing)).unwrap_err();
+        assert!(
+            err.starts_with("cannot read commit message file /nonexistent/pixel-msg.txt:"),
+            "{err}"
+        );
+        assert_eq!(
+            commit_message(None, None).unwrap_err(),
+            "a commit message is required (-m or --message-file)"
+        );
+    }
+
+    #[test]
+    fn commit_message_should_read_the_file_verbatim() {
+        let dir = std::env::temp_dir().join(format!("pixel-msg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("msg.txt");
+        std::fs::write(&file, "feat: a\n\nSecond paragraph.\n").unwrap();
+        assert_eq!(
+            commit_message(None, Some(&file)).unwrap(),
+            "feat: a\n\nSecond paragraph."
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
