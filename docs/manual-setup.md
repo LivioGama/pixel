@@ -26,9 +26,10 @@ wire (Cursor, Gemini CLI, Copilot, ...)? You don't need `pixel install`.
 ## 1. Install the binary
 
 ```bash
-brew tap LivioGama/tap
-brew install pixel
+curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh
 ```
+
+To install the static archive yourself (Linux x86_64, Linux arm64, or Apple Silicon), or from a GitHub Actions job that should not pipe a script, follow [Linux binary](https://pixel-cli.dev/docs/#linux-binary).
 
 Or build from source:
 

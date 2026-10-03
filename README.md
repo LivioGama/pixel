@@ -96,7 +96,9 @@ less install.sh    # every line it will run
 sh install.sh
 ```
 
-With Homebrew instead: `brew install LivioGama/tap/pixel`. On Linux, Homebrew gives every formula its own `glibc` and `gcc` (gcc alone is over 400 MB) when the system glibc is older than the one its CI builds with (2.39 on Homebrew 7: Ubuntu 22.04 and Debian 12 are older); Pixel is a static binary and needs neither, so the script is the lighter path there.
+The release also publishes those archives on their own (`pixel-<tag>-x86_64-unknown-linux-musl.tar.gz`, `pixel-<tag>-aarch64-unknown-linux-musl.tar.gz`, and `pixel-<tag>-aarch64-apple-darwin.tar.gz`), each with a `.sha256`. A GitHub Actions job, or any host that should not pipe a script, downloads the archive, checks the checksum, and moves `bin/pixel` to `~/.local/bin`. The commands are in the [docs](https://pixel-cli.dev/docs/#linux-binary).
+
+An install that already came from Homebrew still updates with `brew update && brew upgrade LivioGama/tap/pixel`.
 
 Once a day, a command run at a terminal prints one yellow line when a newer release is out, with the command that updates your install (`brew`, `mise` or `install.sh`); hooks and agents never see it, and `PIXEL_NO_UPDATE_CHECK=1` turns it off.
 
@@ -119,7 +121,7 @@ Looking for something specific? [`llms.txt`](https://pixel-cli.dev/llms.txt) map
 If you are an LLM reading this to set Pixel up for a user, do this, in order:
 
 1. **Check first.** `command -v pixel && pixel --version`. If it prints a version, skip to step 3.
-2. **Install the binary** (macOS or Linux). With Homebrew: `brew install LivioGama/tap/pixel`. Without it: `curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh`, which installs into `~/.local/bin` (override with `PIXEL_INSTALL_DIR`); make sure that directory is on `PATH`.
+2. **Install the binary** (macOS or Linux). Run `curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh`. It installs into `~/.local/bin` (override with `PIXEL_INSTALL_DIR`); make sure that directory is on `PATH`. On a Linux runner that must not pipe a script, download the static archive instead (`pixel-<tag>-x86_64-unknown-linux-musl.tar.gz` or `pixel-<tag>-aarch64-unknown-linux-musl.tar.gz`), check its `.sha256`, and move `bin/pixel` to `~/.local/bin`. The exact commands, including a GitHub Actions step, are in the docs under [Linux binary](https://pixel-cli.dev/docs/#linux-binary).
 3. **Wire the agents.** Tell the user it writes to their home configuration (`~/.local/share/pixel/`, `~/.claude/settings.json`, `~/.codex/config.toml`, `~/.pi/agent/APPEND_SYSTEM.md`), then run `pixel install`. It is idempotent: running it again only refreshes what it wrote.
 4. **Index the current repository** (optional, speeds up the first queries): `pixel prepare-repo .`
 5. **Verify:** `pixel doctor . --json`. Report every check that is not green, with its message; do not claim success otherwise.
