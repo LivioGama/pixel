@@ -29,7 +29,7 @@ wire (Cursor, Gemini CLI, Copilot, ...)? You don't need `pixel install`.
 curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
 ```
 
-The script picks the archive for this machine (Linux x86_64, Linux arm64, or Apple Silicon), checks its SHA-256, and runs the binary once. On GitHub Actions, add the install directory for the later steps: `echo "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}" >> "$GITHUB_PATH"`.
+The script picks the archive for this machine (Linux x86_64, Linux arm64, or Apple Silicon), checks its SHA-256, and runs the binary once. On GitHub Actions, also run `echo "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}" >> "$GITHUB_PATH"` — needed for the `install.sh` already published on the current release; this branch's script appends itself, so drop the echo after the next release.
 
 Or build from source:
 
