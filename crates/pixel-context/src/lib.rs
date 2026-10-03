@@ -25,10 +25,15 @@ pub struct ContextItem {
     /// Content-anchored, so they stay valid — and preferred over the fixed
     /// span — when the file moves. Empty when no crux was extracted.
     pub crux: Vec<(u32, String)>,
+    /// True when `snippet` stops before `end_line` (a line or byte cap), so
+    /// an L2 rendering declares the excerpt condensed instead of passing it
+    /// off as the whole body.
+    #[serde(default)]
+    pub snippet_cut: bool,
 }
 
-/// Output layer controlling how much detail to include.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Output layer controlling how much detail to include, ordered by cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Layer {
     /// Names + locations only.
     L0,
@@ -39,15 +44,6 @@ pub enum Layer {
 }
 
 impl Layer {
-    /// The next-cheaper layer, if any (L2 → L1 → L0).
-    fn degrade(self) -> Option<Layer> {
-        match self {
-            Layer::L2 => Some(Layer::L1),
-            Layer::L1 => Some(Layer::L0),
-            Layer::L0 => None,
-        }
-    }
-
     pub fn as_str(self) -> &'static str {
         match self {
             Layer::L0 => "L0",
@@ -57,18 +53,26 @@ impl Layer {
     }
 }
 
+/// Outcome of [`fit_items`]: the rendered text and the layer each input
+/// item got, `None` for an item the budget could not hold even as a name.
 #[derive(Clone, Debug, PartialEq)]
-pub struct FitResult {
+pub struct ItemsFit {
     pub text: String,
-    pub layer: Layer,
-    pub elided_items: usize,
+    pub layers: Vec<Option<Layer>>,
+}
+
+impl ItemsFit {
+    /// Number of input items rendered at no layer at all.
+    pub fn omitted(&self) -> usize {
+        self.layers.iter().filter(|layer| layer.is_none()).count()
+    }
 }
 
 /// The declared basis for every budget fit in this crate: token counts are
 /// a bytes/4 heuristic, NOT a real tokenizer. Responses that present a
 /// budget fit should carry this string (e.g. as `budget_basis`) so the
 /// approximation is declared rather than passed off as an exact token cap.
-pub const BUDGET_BASIS: &str = "chars/4 estimate (not a real tokenizer)";
+pub const BUDGET_BASIS: &str = "bytes/4 estimate (not a real tokenizer)";
 
 /// Rough token estimation: ~4 bytes per token (GPT/Claude average), ceiling.
 /// See [`BUDGET_BASIS`] — this is a heuristic, and anything surfacing its
@@ -96,6 +100,15 @@ fn render_item(item: &ContextItem, layer: Layer, out: &mut String) {
             out.push_str(line);
             out.push('\n');
         }
+    }
+    if layer == Layer::L2 && item.snippet_cut {
+        let shown = u32::try_from(item.snippet.lines().count()).unwrap_or(u32::MAX);
+        let last = item.start_line.saturating_add(shown).saturating_sub(1);
+        let _ = writeln!(
+            out,
+            "    … body cut after line {last}; full body: {}:{}-{}",
+            item.path, item.start_line, item.end_line
+        );
     }
     // P2·3: crux lines are the distilled body — at L2 they annotate the
     // shown body with the logic-bearing lines (`crux:LINE`), and they are
@@ -194,67 +207,93 @@ pub fn crux_lines_from_body(body: &str, threshold: i64) -> Vec<(u32, String)> {
         .collect()
 }
 
-/// Fit items into a token budget.
-///
-/// Strategy: try the requested layer; if the rendering exceeds the budget,
-/// degrade the layer (L2 → L1 → L0). If even L0 is over budget, greedily
-/// truncate items (keeping input order) and append an elision marker line
-/// `… N more items elided (budget)`.
-pub fn fit_to_budget(items: &[ContextItem], budget_tokens: usize, layer: Layer) -> String {
-    fit_to_budget_detailed(items, budget_tokens, layer).text
+/// Omitted items named in the elision line before the rest is only counted.
+const OMITTED_NAMED_LIMIT: usize = 5;
+
+/// The elision line naming the first omitted items, empty when none is.
+fn elision_line(omitted: &[ContextItem]) -> String {
+    use std::fmt::Write;
+    if omitted.is_empty() {
+        return String::new();
+    }
+    let mut line = format!("… {} more items elided (budget): ", omitted.len());
+    for (index, item) in omitted.iter().take(OMITTED_NAMED_LIMIT).enumerate() {
+        if index > 0 {
+            line.push_str(", ");
+        }
+        let _ = write!(line, "{} {}:{}", item.name, item.path, item.start_line);
+    }
+    if omitted.len() > OMITTED_NAMED_LIMIT {
+        let _ = write!(line, ", +{} more", omitted.len() - OMITTED_NAMED_LIMIT);
+    }
+    line.push('\n');
+    line
 }
 
-pub fn fit_to_budget_detailed(
-    items: &[ContextItem],
-    budget_tokens: usize,
-    layer: Layer,
-) -> FitResult {
-    // 1. Degrade layers until one fits (or we bottom out at L0).
-    let mut current = layer;
-    loop {
-        let rendered = render(items, current);
-        if estimate_tokens(&rendered) <= budget_tokens {
-            return FitResult {
-                text: rendered,
-                layer: current,
-                elided_items: 0,
-            };
-        }
-        match current.degrade() {
-            Some(next) => current = next,
-            None => break,
-        }
-    }
-
-    // 2. Still over budget at L0: greedy truncation in input order.
-    let mut out = String::new();
-    let mut kept = 0usize;
-    for item in items {
-        let mut candidate = out.clone();
-        render_item(item, Layer::L0, &mut candidate);
-        // Reserve room for the elision line if not all items will fit.
-        let elided = items.len() - (kept + 1);
-        let marker = if elided > 0 {
-            format!("… {elided} more items elided (budget)\n")
-        } else {
-            String::new()
-        };
-        if estimate_tokens(&candidate) + estimate_tokens(&marker) <= budget_tokens {
-            out = candidate;
-            kept += 1;
-        } else {
+/// Fit items into a token budget, one layer per item, in priority order.
+///
+/// Items are in priority order. First every item that fits gets its L0
+/// line, stopping at the first that does not, so an identity is never
+/// dropped for a lower-priority one; the omitted rest is named in a closing
+/// `… N more items elided (budget): name path:line, …` line whose cost is
+/// reserved. Then each placed item is raised one layer at a time (all to L1
+/// before any to L2), up to `max_layer`, while the whole text stays within
+/// the budget: an item too large to raise does not stop the next one.
+pub fn fit_items(items: &[ContextItem], budget_tokens: usize, max_layer: Layer) -> ItemsFit {
+    let fits = |bytes: usize| bytes.div_ceil(4) <= budget_tokens;
+    let rendered: Vec<[String; 3]> = items
+        .iter()
+        .map(|item| {
+            [Layer::L0, Layer::L1, Layer::L2].map(|layer| {
+                let mut out = String::new();
+                render_item(item, layer, &mut out);
+                out
+            })
+        })
+        .collect();
+    let mut layers: Vec<Option<Layer>> = vec![None; items.len()];
+    let mut used = 0usize;
+    for (index, forms) in rendered.iter().enumerate() {
+        let marker = elision_line(&items[index + 1..]);
+        if !fits(used + forms[0].len() + marker.len()) {
             break;
         }
+        used += forms[0].len();
+        layers[index] = Some(Layer::L0);
     }
-    let elided = items.len() - kept;
-    if elided > 0 {
-        out.push_str(&format!("… {elided} more items elided (budget)\n"));
+    let placed = layers.iter().take_while(|layer| layer.is_some()).count();
+    let mut marker = elision_line(&items[placed..]);
+    // Only reachable when not even the first name fits: fall back to the
+    // count, then to nothing rather than overrun the budget.
+    if !fits(used + marker.len()) {
+        marker = format!("… {} more items elided (budget)\n", items.len() - placed);
+        if !fits(used + marker.len()) {
+            marker.clear();
+        }
     }
-    FitResult {
-        text: out,
-        layer: Layer::L0,
-        elided_items: elided,
+    for (from, to) in [(Layer::L0, Layer::L1), (Layer::L1, Layer::L2)] {
+        if to > max_layer {
+            break;
+        }
+        for (layer, forms) in layers.iter_mut().zip(&rendered) {
+            if *layer != Some(from) {
+                continue;
+            }
+            let raised = used - forms[from as usize].len() + forms[to as usize].len();
+            if fits(raised + marker.len()) {
+                used = raised;
+                *layer = Some(to);
+            }
+        }
     }
+    let mut text = String::with_capacity(used + marker.len());
+    for (layer, forms) in layers.iter().zip(&rendered) {
+        if let Some(layer) = layer {
+            text.push_str(&forms[*layer as usize]);
+        }
+    }
+    text.push_str(&marker);
+    ItemsFit { text, layers }
 }
 
 #[cfg(test)]
@@ -270,6 +309,7 @@ mod tests {
             end_line: 10 + snippet_lines as u32,
             sig: format!("fn {name}(input: &str) -> Result<Output, Error>"),
             crux: Vec::new(),
+            snippet_cut: false,
             snippet: (0..snippet_lines)
                 .map(|i| format!("    let step_{i} = process(input); // long body line {i}"))
                 .collect::<Vec<_>>()
@@ -277,32 +317,160 @@ mod tests {
         }
     }
 
+    fn tokens_of(parts: &[String]) -> usize {
+        estimate_tokens(&parts.concat())
+    }
+
+    fn line(item: &ContextItem, layer: Layer) -> String {
+        render(std::slice::from_ref(item), layer)
+    }
+
     #[test]
-    fn layer_degradation_under_budget() {
-        let items: Vec<ContextItem> = (0..5)
+    fn fit_items_should_raise_items_in_priority_order_when_only_some_signatures_fit() {
+        let items: Vec<ContextItem> = (0..3)
             .map(|i| item(&format!("handler_{i}"), &format!("src/mod_{i}.rs"), 12))
             .collect();
+        // Room for every name plus exactly one signature: the first item gets it.
+        let budget = tokens_of(&[
+            line(&items[0], Layer::L1),
+            line(&items[1], Layer::L0),
+            line(&items[2], Layer::L0),
+        ]);
+        let fit = fit_items(&items, budget, Layer::L2);
+        assert_eq!(
+            fit.layers,
+            vec![Some(Layer::L1), Some(Layer::L0), Some(Layer::L0)]
+        );
+        assert_eq!(
+            fit.text,
+            format!(
+                "{}{}{}",
+                line(&items[0], Layer::L1),
+                line(&items[1], Layer::L0),
+                line(&items[2], Layer::L0)
+            )
+        );
+        assert_eq!(fit.omitted(), 0);
+    }
 
-        let l2_tokens = estimate_tokens(&render(&items, Layer::L2));
-        let l1_tokens = estimate_tokens(&render(&items, Layer::L1));
-        let l0_tokens = estimate_tokens(&render(&items, Layer::L0));
-        assert!(l0_tokens < l1_tokens && l1_tokens < l2_tokens);
+    #[test]
+    fn fit_items_should_keep_several_bodies_when_the_budget_holds_them() {
+        let items = vec![item("alpha", "src/a.rs", 3), item("beta", "src/b.rs", 3)];
+        let both = tokens_of(&[line(&items[0], Layer::L2), line(&items[1], Layer::L2)]);
+        let fit = fit_items(&items, both, Layer::L2);
+        assert_eq!(fit.layers, vec![Some(Layer::L2), Some(Layer::L2)]);
+        assert!(fit.text.contains("let step_0") && fit.text.matches("let step_0").count() == 2);
+        // One body short: the first keeps its body, the second its signature.
+        let one = tokens_of(&[line(&items[0], Layer::L2), line(&items[1], Layer::L1)]);
+        let fit = fit_items(&items, one, Layer::L2);
+        assert_eq!(fit.layers, vec![Some(Layer::L2), Some(Layer::L1)]);
+        // A cap at L1 never renders a body, whatever the budget.
+        let fit = fit_items(&items, both * 4, Layer::L1);
+        assert_eq!(fit.layers, vec![Some(Layer::L1), Some(Layer::L1)]);
+        assert!(!fit.text.contains("let step_0"));
+        // A cap at L0 renders names only.
+        let fit = fit_items(&items, both * 4, Layer::L0);
+        assert_eq!(fit.layers, vec![Some(Layer::L0), Some(Layer::L0)]);
+    }
 
-        // Budget fits L1 but not L2 → degrades to L1 (has sigs, no snippets).
-        let fitted = fit_to_budget(&items, l1_tokens, Layer::L2);
-        assert_eq!(fitted, render(&items, Layer::L1));
-        assert!(fitted.contains("— fn handler_0"));
-        assert!(!fitted.contains("let step_0"));
+    #[test]
+    fn fit_items_should_raise_the_next_item_when_one_is_too_large_to_raise() {
+        let mut wide = item("wide", "src/w.rs", 2);
+        wide.sig = format!("fn wide({})", "arg: Value, ".repeat(40));
+        let items = vec![wide, item("small", "src/s.rs", 2)];
+        let budget = tokens_of(&[line(&items[0], Layer::L0), line(&items[1], Layer::L1)]);
+        let fit = fit_items(&items, budget, Layer::L2);
+        assert_eq!(fit.layers, vec![Some(Layer::L0), Some(Layer::L1)]);
+    }
 
-        // Budget below even L0 → truncated L0 with elision marker.
-        let tiny = fit_to_budget(&items, l0_tokens - 5, Layer::L2);
-        assert!(tiny.contains("more items elided (budget)"));
-        assert!(estimate_tokens(&tiny) <= l0_tokens - 5);
-        assert!(tiny.starts_with("src/mod_0.rs:"));
+    #[test]
+    fn fit_items_should_name_what_it_omits_within_the_budget() {
+        let items: Vec<ContextItem> = (0..4)
+            .map(|i| item(&format!("h{i}"), &format!("src/m{i}.rs"), 2))
+            .collect();
+        let marker = "… 2 more items elided (budget): h2 src/m2.rs:10, h3 src/m3.rs:10\n";
+        let kept = [line(&items[0], Layer::L0), line(&items[1], Layer::L0)];
+        let budget = tokens_of(&[kept[0].clone(), kept[1].clone(), marker.to_owned()]);
+        let fit = fit_items(&items, budget, Layer::L0);
+        assert_eq!(
+            fit.layers,
+            vec![Some(Layer::L0), Some(Layer::L0), None, None]
+        );
+        assert_eq!(fit.omitted(), 2);
+        assert_eq!(fit.text, format!("{}{}{marker}", kept[0], kept[1]));
+        assert!(estimate_tokens(&fit.text) <= budget);
+    }
 
-        let detailed = fit_to_budget_detailed(&items, l1_tokens, Layer::L2);
-        assert_eq!(detailed.layer, Layer::L1);
-        assert_eq!(detailed.elided_items, 0);
+    #[test]
+    fn fit_items_should_count_beyond_five_named_omissions() {
+        let items: Vec<ContextItem> = (0..8)
+            .map(|i| item(&format!("h{i}"), &format!("src/m{i}.rs"), 2))
+            .collect();
+        let named = "… 8 more items elided (budget): h0 src/m0.rs:10, h1 src/m1.rs:10, \
+                     h2 src/m2.rs:10, h3 src/m3.rs:10, h4 src/m4.rs:10, +3 more\n";
+        let fit = fit_items(&items, estimate_tokens(named), Layer::L2);
+        assert_eq!(fit.layers, vec![None; 8]);
+        assert_eq!(fit.text, named);
+    }
+
+    #[test]
+    fn fit_items_should_shorten_then_drop_the_elision_line_rather_than_overrun() {
+        let items: Vec<ContextItem> = (0..8)
+            .map(|i| item(&format!("h{i}"), &format!("src/m{i}.rs"), 2))
+            .collect();
+        let count = "… 8 more items elided (budget)\n";
+        let fit = fit_items(&items, estimate_tokens(count), Layer::L2);
+        assert_eq!((fit.text.as_str(), fit.omitted()), (count, 8));
+        let fit = fit_items(&items, estimate_tokens(count) - 1, Layer::L2);
+        assert_eq!((fit.text.as_str(), fit.omitted()), ("", 8));
+    }
+
+    #[test]
+    fn fit_items_should_place_an_item_at_the_exact_budget_and_not_one_token_under() {
+        // Grow the signature until the L1 line is a whole number of tokens,
+        // so one token less cannot hold it.
+        let mut exact = item("alpha", "src/a.rs", 2);
+        while !line(&exact, Layer::L1).len().is_multiple_of(4) {
+            exact.sig.push('x');
+        }
+        let budget = line(&exact, Layer::L1).len() / 4;
+        let items = vec![exact];
+        assert_eq!(
+            fit_items(&items, budget, Layer::L1).layers,
+            vec![Some(Layer::L1)]
+        );
+        assert_eq!(
+            fit_items(&items, budget - 1, Layer::L1).layers,
+            vec![Some(Layer::L0)]
+        );
+    }
+
+    #[test]
+    fn fit_items_should_return_nothing_for_no_items() {
+        let fit = fit_items(&[], 100, Layer::L2);
+        assert_eq!(
+            fit,
+            ItemsFit {
+                text: String::new(),
+                layers: Vec::new()
+            }
+        );
+    }
+
+    #[test]
+    fn render_should_declare_a_cut_body_and_where_the_full_one_is() {
+        let mut cut = item("long_fn", "src/long.rs", 3);
+        cut.end_line = 200;
+        cut.snippet_cut = true;
+        let text = render(std::slice::from_ref(&cut), Layer::L2);
+        assert!(
+            text.ends_with("    … body cut after line 12; full body: src/long.rs:10-200\n"),
+            "{text}"
+        );
+        // Only a body rendering carries the marker.
+        assert!(!render(std::slice::from_ref(&cut), Layer::L1).contains("body cut"));
+        cut.snippet_cut = false;
+        assert!(!render(std::slice::from_ref(&cut), Layer::L2).contains("body cut"));
     }
 
     #[test]

@@ -60,6 +60,13 @@ const MAX_CONTEXT_ITEMS: usize = 41;
 const MAX_CONTEXT_SOURCE_BYTES: usize = 262_144; // 256 KiB
 const MAX_TARGET_SNIPPET_BYTES: usize = 32_768; // 32 KiB
 const MAX_NEIGHBOR_SNIPPET_BYTES: usize = 4_096; // 4 KiB
+/// The longest `context_layer` label `bridge::render_context` can return
+/// (crux target, neighbours at both signature and name), reserved before
+/// the text is fitted.
+const WIDEST_CONTEXT_LAYER: &str = "L1+crux+L1/L0";
+/// Refits of the context text after measuring its escaped JSON size; the
+/// second one lands in practice, the rest bound a pathological case.
+const CONTEXT_REFIT_ATTEMPTS: usize = 4;
 
 /// Hard cap so `map` on a pathological repo stays bounded; the flag
 /// surfaces in the output so a truncated map is never passed off as
@@ -1726,7 +1733,9 @@ impl Service {
             if !seen_context.insert(symbol_id) {
                 continue;
             }
-            if items.len() >= MAX_CONTEXT_ITEMS || source_remaining == 0 {
+            // Past the source allowance a neighbour still gets its name and
+            // signature (an empty, cut snippet); only the item cap drops one.
+            if items.len() >= MAX_CONTEXT_ITEMS {
                 source_elided_items += 1;
                 continue;
             }
@@ -1796,27 +1805,55 @@ impl Service {
             }
         }
 
-        let overhead = value_tokens(&response);
-        let (mut text, layer, fit_elided_items) =
-            bridge::render_context(&items, budget.saturating_sub(overhead));
+        // Reserve the two fields the rendering fills in at their widest, so
+        // the text never has to be clipped afterwards to make room for them.
+        let mut reserved = Vec::new();
         for (key, value) in [
-            ("context_layer", json!(layer)),
+            ("context_layer", json!(WIDEST_CONTEXT_LAYER)),
             (
                 "elided_items",
-                json!(source_elided_items.saturating_add(fit_elided_items)),
+                json!(source_elided_items.saturating_add(items.len())),
             ),
         ] {
             let mut candidate = response.clone();
             candidate[key] = value;
             if value_tokens(&candidate) <= budget {
                 response = candidate;
+                reserved.push(key);
             } else {
                 response["truncated"] = json!(true);
             }
         }
-        if layer != "L2" || fit_elided_items > 0 {
+        // The text is fitted to what is left, then refitted by the excess
+        // its JSON escaping adds, so items are dropped whole (and named)
+        // rather than the text clipped mid-line by the safety loop below.
+        let mut text_budget = budget.saturating_sub(value_tokens(&response));
+        let mut rendered = bridge::render_context(&items, text_budget);
+        for _ in 0..CONTEXT_REFIT_ATTEMPTS {
+            let mut probe = response.clone();
+            probe["text"] = json!(rendered.text);
+            probe["rendered_tokens"] = json!(estimate_tokens(&rendered.text));
+            let excess = value_tokens(&probe).saturating_sub(budget);
+            if excess == 0 || text_budget == 0 {
+                break;
+            }
+            // Shrink from what the text used, not from the budget it had:
+            // slack left by the last fit would otherwise absorb the cut.
+            text_budget = estimate_tokens(&rendered.text)
+                .min(text_budget)
+                .saturating_sub(excess);
+            rendered = bridge::render_context(&items, text_budget);
+        }
+        if reserved.contains(&"context_layer") {
+            response["context_layer"] = json!(rendered.layer);
+        }
+        if reserved.contains(&"elided_items") {
+            response["elided_items"] = json!(source_elided_items.saturating_add(rendered.omitted));
+        }
+        if rendered.layer != "L2" || rendered.omitted > 0 || rendered.target_condensed {
             response["truncated"] = json!(true);
         }
+        let mut text = rendered.text;
         loop {
             response["text"] = json!(text);
             response["rendered_tokens"] = json!(estimate_tokens(
@@ -3874,7 +3911,8 @@ fn context_item(
     crux: &[(u32, String)],
 ) -> bridge::Item {
     let path = files.get(&s.file_id).cloned().unwrap_or_default();
-    let snippet = read_snippet(source, s.start_line, s.end_line, 60, max_snippet_bytes);
+    let (snippet, snippet_cut) =
+        read_snippet(source, s.start_line, s.end_line, 60, max_snippet_bytes);
     bridge::Item {
         name: s.name.clone(),
         kind: s.kind.as_str().to_string(),
@@ -3883,6 +3921,7 @@ fn context_item(
         end_line: s.end_line,
         sig: s.sig.clone(),
         snippet,
+        snippet_cut,
         // Storage keeps body-relative lines for stable fingerprints. Rendering
         // uses file coordinates, just like the symbol header and source excerpt.
         // Reject invalid/overflowing offsets rather than inventing a location.
@@ -3942,7 +3981,7 @@ mod context_crux_coordinate_tests {
             for (line, text) in &item.crux {
                 assert_eq!(source.lines().nth(*line as usize - 1).unwrap().trim(), text);
             }
-            let (rendered, _, _) = bridge::render_context(&[item], 2000);
+            let rendered = bridge::render_context(&[item], 2000).text;
             assert!(rendered.contains(&format!("crux:{} if flag {{", padding + 2)));
             assert!(rendered.contains(&format!("crux:{} return 1;", padding + 3)));
         }
@@ -4046,23 +4085,23 @@ mod context_crux_coordinate_tests {
     }
 }
 
+/// Source lines `start_line..=end_line`, at most `max_lines` lines and
+/// `max_bytes` bytes, and whether that excerpt stops short of the span.
 fn read_snippet(
     source: &str,
     start_line: u32,
     end_line: u32,
     max_lines: usize,
     max_bytes: usize,
-) -> String {
-    if max_bytes == 0 {
-        return String::new();
-    }
+) -> (String, bool) {
     let start = start_line.saturating_sub(1) as usize;
+    let span = (end_line as usize).saturating_sub(start).max(1);
+    if max_bytes == 0 {
+        return (String::new(), true);
+    }
     let mut snippet = String::new();
-    for line in source.lines().skip(start).take(
-        ((end_line as usize).saturating_sub(start))
-            .min(max_lines)
-            .max(1),
-    ) {
+    let mut whole_lines = 0usize;
+    for line in source.lines().skip(start).take(span.min(max_lines)) {
         let separator = usize::from(!snippet.is_empty());
         let remaining = max_bytes.saturating_sub(snippet.len() + separator);
         if remaining == 0 {
@@ -4073,6 +4112,7 @@ fn read_snippet(
         }
         if line.len() <= remaining {
             snippet.push_str(line);
+            whole_lines += 1;
             continue;
         }
         let mut end = remaining;
@@ -4082,7 +4122,7 @@ fn read_snippet(
         snippet.push_str(&line[..end]);
         break;
     }
-    snippet
+    (snippet, whole_lines < span)
 }
 
 /// Default share of indexed files above which a drifted graph is rebuilt
@@ -4232,6 +4272,7 @@ mod bridge {
     use std::path::Path;
 
     /// Neutral mirror of `pixel_context::ContextItem`.
+    #[derive(Clone)]
     pub struct Item {
         pub name: String,
         pub kind: String,
@@ -4243,6 +4284,8 @@ mod bridge {
         /// Content-anchored crux lines, each `(line_number, trimmed_text)`
         /// (P2·3). Empty when none were extracted.
         pub crux: Vec<(u32, String)>,
+        /// True when `snippet` stops before `end_line`.
+        pub snippet_cut: bool,
     }
 
     pub fn build_graph(root: &Path, db: &Path) -> Result<Value, String> {
@@ -4412,9 +4455,38 @@ mod bridge {
             .map_err(es)
     }
 
-    /// Budget-fitted text rendering via pixel-context; empty on any miss.
-    pub fn render_context(items: &[Item], budget_tokens: usize) -> (String, &'static str, usize) {
-        use pixel_context::{ContextItem, Layer, fit_to_budget_detailed, render};
+    /// A budget-fitted context rendering and how much of it was kept.
+    #[derive(Debug, Default)]
+    pub struct Rendered {
+        pub text: String,
+        /// The target's form, then the layers its neighbours got
+        /// (`L2+L1/L0`: target body, neighbours mixing signatures and names).
+        pub layer: String,
+        /// Items the budget could not hold even as a name.
+        pub omitted: usize,
+        /// True when the target's body is not shown whole: cut excerpt,
+        /// crux lines instead of the body, or no body at all.
+        pub target_condensed: bool,
+    }
+
+    /// `target` followed by the distinct layers the neighbours got, richest first.
+    fn layer_label(target: &str, neighbors: &[Option<pixel_context::Layer>]) -> String {
+        let mut present: Vec<pixel_context::Layer> = neighbors.iter().flatten().copied().collect();
+        present.sort_unstable_by(|a, b| b.cmp(a));
+        present.dedup();
+        if present.is_empty() {
+            return target.to_owned();
+        }
+        let names: Vec<&str> = present.iter().map(|layer| layer.as_str()).collect();
+        format!("{target}+{}", names.join("/"))
+    }
+
+    /// Budget-fitted text rendering via pixel-context: the target's body
+    /// first, else its crux lines, else everything by priority without
+    /// bodies; neighbours each get the richest layer the rest holds, up to
+    /// a signature, and the ones left out are named.
+    pub fn render_context(items: &[Item], budget_tokens: usize) -> Rendered {
+        use pixel_context::{ContextItem, Layer, estimate_tokens, fit_items, render, render_crux};
         let mapped: Vec<ContextItem> = items
             .iter()
             .map(|i| ContextItem {
@@ -4426,64 +4498,55 @@ mod bridge {
                 sig: i.sig.clone(),
                 snippet: i.snippet.clone(),
                 crux: i.crux.clone(),
+                snippet_cut: i.snippet_cut,
             })
             .collect();
-        if let Some((target, neighbors)) = mapped.split_first() {
-            let target_text = render(std::slice::from_ref(target), Layer::L2);
-            let target_tokens = pixel_context::estimate_tokens(&target_text);
-            if target_tokens <= budget_tokens {
-                let neighbors_fit =
-                    fit_to_budget_detailed(neighbors, budget_tokens - target_tokens, Layer::L1);
-                let layer = if neighbors_fit.text.is_empty() {
-                    "L2"
-                } else if neighbors_fit.layer == Layer::L1 {
-                    "L2+L1"
-                } else {
-                    "L2+L0"
+        let Some((target, neighbors)) = mapped.split_first() else {
+            return Rendered::default();
+        };
+        let body = render(std::slice::from_ref(target), Layer::L2);
+        let body_tokens = estimate_tokens(&body);
+        if body_tokens <= budget_tokens {
+            let fit = fit_items(neighbors, budget_tokens - body_tokens, Layer::L1);
+            return Rendered {
+                layer: layer_label("L2", &fit.layers),
+                omitted: fit.omitted(),
+                text: format!("{body}{}", fit.text),
+                target_condensed: target.snippet_cut,
+            };
+        }
+        // P2·3 distilled-body fallback: when the target's L2 body exceeds
+        // the budget, its crux lines (guards, mutations, early bails —
+        // content-anchored, so still right when the file moved) carry the
+        // logic at a fraction of the span's cost. Try sig + crux before
+        // degrading to signatures-only.
+        if !target.crux.is_empty() {
+            let mut distilled = render(std::slice::from_ref(target), Layer::L1);
+            let crux: Vec<(u32, &str)> = target
+                .crux
+                .iter()
+                .map(|(line, text)| (*line, text.as_str()))
+                .collect();
+            render_crux(&mut distilled, &crux);
+            let distilled_tokens = estimate_tokens(&distilled);
+            if distilled_tokens <= budget_tokens {
+                let fit = fit_items(neighbors, budget_tokens - distilled_tokens, Layer::L1);
+                return Rendered {
+                    layer: layer_label("L1+crux", &fit.layers),
+                    omitted: fit.omitted(),
+                    text: format!("{distilled}{}", fit.text),
+                    target_condensed: true,
                 };
-                return (
-                    format!("{target_text}{}", neighbors_fit.text),
-                    layer,
-                    neighbors_fit.elided_items,
-                );
-            }
-            // P2·3 distilled-body fallback: when the target's L2 body exceeds
-            // the budget, its crux lines (guards, mutations, early bails —
-            // content-anchored, so still right when the file moved) carry the
-            // logic at a fraction of the span's cost. Try sig + crux before
-            // degrading to signatures-only.
-            if !target.crux.is_empty() {
-                let mut distilled = render(std::slice::from_ref(target), Layer::L1);
-                let crux: Vec<(u32, &str)> = target
-                    .crux
-                    .iter()
-                    .map(|(line, text)| (*line, text.as_str()))
-                    .collect();
-                pixel_context::render_crux(&mut distilled, &crux);
-                let distilled_tokens = pixel_context::estimate_tokens(&distilled);
-                if distilled_tokens <= budget_tokens {
-                    let neighbors_fit = fit_to_budget_detailed(
-                        neighbors,
-                        budget_tokens - distilled_tokens,
-                        Layer::L1,
-                    );
-                    let layer = if neighbors_fit.text.is_empty() {
-                        "L1+crux"
-                    } else if neighbors_fit.layer == Layer::L1 {
-                        "L1+crux+L1"
-                    } else {
-                        "L1+crux+L0"
-                    };
-                    return (
-                        format!("{distilled}{}", neighbors_fit.text),
-                        layer,
-                        neighbors_fit.elided_items,
-                    );
-                }
             }
         }
-        let fitted = fit_to_budget_detailed(&mapped, budget_tokens, Layer::L2);
-        (fitted.text, fitted.layer.as_str(), fitted.elided_items)
+        let fit = fit_items(&mapped, budget_tokens, Layer::L1);
+        let target_layer = fit.layers[0].map_or("elided", Layer::as_str);
+        Rendered {
+            layer: layer_label(target_layer, &fit.layers[1..]),
+            omitted: fit.omitted(),
+            text: fit.text,
+            target_condensed: true,
+        }
     }
 }
 
@@ -8096,6 +8159,188 @@ mod tests {
         assert!(
             line.starts_with("2 match(es)"),
             "expected cap to name the count: {line:?}"
+        );
+    }
+
+    fn context_fixture(tag: &str, source: &str) -> (PathBuf, Service) {
+        let root = tmpdir(tag);
+        std::fs::write(root.join("sample.rs"), source).unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+        let svc = Service::open(&root).unwrap();
+        (root, svc)
+    }
+
+    fn context_of(svc: &mut Service, uid: &str, budget: usize) -> Value {
+        let resp = svc.handle(Request::Context {
+            uid: uid.to_owned(),
+            budget_tokens: Some(budget),
+        });
+        assert!(resp.ok, "context: {resp:?}");
+        resp.data().clone()
+    }
+
+    #[test]
+    fn context_should_declare_a_cut_target_body_when_it_runs_past_the_line_cap() {
+        let mut source = String::from("pub fn long_fn(x: i32) -> i32 {\n");
+        for i in 0..78 {
+            source.push_str(&format!("    let v{i} = x + {i};\n"));
+        }
+        source.push_str("    x\n}\n\npub fn short_fn(x: i32) -> i32 {\n    x + 1\n}\n");
+        let (root, mut svc) = context_fixture("ctx-cut", &source);
+
+        let long = context_of(&mut svc, "long_fn", 4000);
+        let text = long["text"].as_str().unwrap();
+        assert!(
+            text.contains("    … body cut after line 60; full body: sample.rs:1-81\n"),
+            "{text}"
+        );
+        // The excerpt stops at line 60; later lines only appear as crux lines.
+        assert!(text.contains("        let v58 = x + 58;\n"));
+        assert!(!text.contains("        let v59 = x + 59;\n"));
+        assert_eq!(long["context_layer"], "L2");
+        assert_eq!(
+            long["truncated"], true,
+            "a cut body is not the whole answer"
+        );
+
+        let short = context_of(&mut svc, "short_fn", 4000);
+        assert!(!short["text"].as_str().unwrap().contains("body cut"));
+        assert_eq!(short["context_layer"], "L2");
+        assert_eq!(short["truncated"], false);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn context_should_name_every_neighbour_it_cannot_show_at_any_budget() {
+        let mut source = String::from("pub fn target(x: i32) -> i32 {\n    x\n}\n");
+        let callers: Vec<String> = (0..8).map(|i| format!("caller_number_{i}")).collect();
+        for name in &callers {
+            source.push_str(&format!(
+                "\npub fn {name}(first_argument: i32, second_argument: &str) -> Result<i32, String> {{\n    Ok(target(first_argument))\n}}\n"
+            ));
+        }
+        let (root, mut svc) = context_fixture("ctx-named", &source);
+        let mut mixed = 0;
+        let mut omitting = 0;
+        for budget in (300..1400).step_by(25) {
+            let data = context_of(&mut svc, "target", budget);
+            let text = data["text"].as_str().unwrap();
+            assert!(
+                pixel_context::estimate_tokens(&serde_json::to_string(&data).unwrap()) <= budget,
+                "budget {budget} exceeded"
+            );
+            assert!(
+                text.is_empty() || text.ends_with('\n'),
+                "budget {budget}: text clipped mid-line: {text:?}"
+            );
+            // When not even an elision line fits, the header's edge list names them.
+            let edges = data["incoming"].to_string();
+            let marker = text.lines().find(|line| line.starts_with("… "));
+            for name in &callers {
+                let shown = text
+                    .lines()
+                    .any(|line| line.contains(&format!(" {name}")) && !line.starts_with("… "));
+                let named = marker.is_some_and(|line| line.contains(&format!("{name} sample.rs:")));
+                let counted =
+                    marker.is_some_and(|line| line.contains(" more\n") || line.ends_with(" more"));
+                let listed = edges.contains(&format!("\"{name}\""));
+                assert!(
+                    shown || named || counted || listed,
+                    "budget {budget}: {name} vanished: {data}"
+                );
+            }
+            let layer = data["context_layer"].as_str().unwrap_or_default();
+            mixed += usize::from(layer.ends_with("+L1/L0"));
+            omitting += usize::from(marker.is_some());
+        }
+        assert!(mixed > 0, "no budget mixed signatures and names");
+        assert!(
+            omitting > 0,
+            "no budget was tight enough to omit a neighbour"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn read_snippet_should_report_a_cut_when_a_line_or_byte_cap_stops_it() {
+        let source = "a1\nb22\nc333\nd4444\n";
+        assert_eq!(
+            read_snippet(source, 1, 4, 60, 1000),
+            ("a1\nb22\nc333\nd4444".to_owned(), false)
+        );
+        assert_eq!(
+            read_snippet(source, 2, 3, 60, 1000),
+            ("b22\nc333".to_owned(), false)
+        );
+        assert_eq!(
+            read_snippet(source, 1, 4, 2, 1000),
+            ("a1\nb22".to_owned(), true)
+        );
+        // Exactly enough bytes for two lines and their separator: not cut.
+        assert_eq!(
+            read_snippet(source, 1, 2, 60, 6),
+            ("a1\nb22".to_owned(), false)
+        );
+        assert_eq!(
+            read_snippet(source, 1, 2, 60, 5),
+            ("a1\nb2".to_owned(), true)
+        );
+        assert_eq!(read_snippet(source, 1, 3, 60, 3), ("a1".to_owned(), true));
+        assert_eq!(read_snippet(source, 1, 4, 60, 0), (String::new(), true));
+        // A multi-byte character is never split.
+        assert_eq!(read_snippet("é\n", 1, 1, 60, 1), (String::new(), true));
+    }
+
+    #[test]
+    fn render_context_should_label_each_fallback_and_say_when_the_body_is_condensed() {
+        let item = |name: &str, snippet: &str, crux: Vec<(u32, String)>| bridge::Item {
+            name: name.to_owned(),
+            kind: "function".to_owned(),
+            path: "src/a.rs".to_owned(),
+            start_line: 1,
+            end_line: 40,
+            sig: format!("pub fn {name}(input: &str) -> Result<(), Error>"),
+            snippet: snippet.to_owned(),
+            crux,
+            snippet_cut: false,
+        };
+        let body = "let step = parse(input)?;\n".repeat(30);
+        let crux = vec![(3, "if input.is_empty() {".to_owned())];
+        let items = vec![
+            item("target", &body, crux),
+            item("neighbour", "x", Vec::new()),
+        ];
+
+        let whole = bridge::render_context(&items, 5000);
+        assert_eq!(whole.layer, "L2+L1");
+        assert!(!whole.target_condensed);
+        assert_eq!(whole.omitted, 0);
+
+        let mut cut = items.clone();
+        cut[0].snippet_cut = true;
+        assert!(bridge::render_context(&cut, 5000).target_condensed);
+
+        let distilled = bridge::render_context(&items, 60);
+        assert_eq!(distilled.layer, "L1+crux+L1");
+        assert!(distilled.target_condensed);
+        assert!(distilled.text.contains("crux:3 if input.is_empty() {"));
+
+        let mut no_crux = items.clone();
+        no_crux[0].crux.clear();
+        let bare = bridge::render_context(&no_crux, 60);
+        assert_eq!(bare.layer, "L1+L1");
+        assert!(bare.target_condensed);
+
+        let starved = bridge::render_context(&items, 0);
+        assert_eq!(starved.layer, "elided");
+        assert_eq!(starved.omitted, 2);
+
+        let empty = bridge::render_context(&[], 100);
+        assert_eq!(
+            (empty.text.as_str(), empty.layer.as_str(), empty.omitted),
+            ("", "", 0)
         );
     }
 }
