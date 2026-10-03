@@ -43,6 +43,7 @@ pub(crate) const DEVIN_PIXEL_GUIDANCE: &str = concat!(
     "Make that the first tool action: do not start with `ls`, `command -v`, `pixel status`, native grep/rg/glob/find, or a native file read. ",
     "Do not merely mention Pixel or answer from another retrieval tool before calling it. ",
     "Supported shell grep/rg/cat/ls/find retrieval is silently rewritten to Pixel; use its result. ",
+    "When Pixel serves a path with a line, read only that region (`sed -n '<line>,+40p' <path>`), not the whole file. ",
     "Native retrieval remains available for bounded follow-up and unsupported or out-of-index files after the Pixel attempt. ",
     "If Pixel or the index is unavailable, continue normally with native tools; never block the task."
 );
@@ -51,6 +52,7 @@ const CODEX_PIXEL_GUIDANCE: &str = concat!(
     "Pixel-first retrieval (non-blocking): for this repository prompt, run a Pixel retrieval command before answering from memory. ",
     "Use `pixel search-content -F '<identifier>'` for a known name, or `pixel find-code '<concept>'` for behavior-described code. ",
     "Do not answer from memory, a generic web search, or a native repository read before that retrieval attempt. ",
+    "When Pixel serves a path with a line, read only that region (`sed -n '<line>,+40p' <path>`), not the whole file. ",
     "If Pixel or its index is unavailable, say so and continue with the best available evidence; never block the task."
 );
 
@@ -58,6 +60,7 @@ const CLAUDE_PIXEL_GUIDANCE: &str = concat!(
     "Pixel-first retrieval (non-blocking): this is a pixel-indexed repository, so before a native search or file read to find code, ",
     "run `pixel search-content -F '<identifier>'` for a known name or `pixel find-code '<concept>'` for behavior. ",
     "Make Pixel the retrieval attempt, not native grep/rg/cat or a plain file read; keep native tools for what Pixel does not cover. ",
+    "When Pixel serves a path with a line, read only that region (`sed -n '<line>,+40p' <path>`), not the whole file. ",
     "If Pixel or its index is unavailable, continue normally with native tools; never block the task."
 );
 
@@ -855,6 +858,10 @@ mod tests {
         assert!(
             context.contains("Do not merely mention Pixel or answer from another retrieval tool")
         );
+        assert!(
+            context.contains("read only that region"),
+            "a served path:line ends the retrieval; no whole-file read after it"
+        );
         assert!(context.contains("If Pixel or the index is unavailable, continue normally with native tools; never block the task."));
         assert!(context.ends_with("task targets"));
     }
@@ -865,6 +872,10 @@ mod tests {
         assert!(context.starts_with("Pixel-first retrieval"));
         assert!(context.contains("for this repository prompt"));
         assert!(context.contains("Do not answer from memory, a generic web search"));
+        assert!(
+            context.contains("read only that region"),
+            "a served path:line ends the retrieval; no whole-file read after it"
+        );
         assert!(
             context.contains("never block the task"),
             "the guidance fails open, like Devin's"
@@ -883,6 +894,10 @@ mod tests {
         assert!(
             context.contains("Make Pixel the retrieval attempt"),
             "{context}"
+        );
+        assert!(
+            context.contains("read only that region"),
+            "a served path:line ends the retrieval; no whole-file read after it"
         );
         assert!(
             context.contains("never block the task"),

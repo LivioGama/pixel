@@ -48,6 +48,10 @@ result is a normal outcome, not an error to work around.
 
 ## Reading results
 
+- A hit is the retrieval. When Pixel serves `path:line`, read that region
+  only (`sed -n '<line>,+40p' <path>`); reading the whole file after Pixel
+  pinpointed the location wastes the result and the context. Read the whole
+  file only when the task genuinely spans it.
 - Result markers: `complete` = nothing truncated; `capped` = more may exist,
   narrow the query; `unresolved` = nothing found — try `pixel find-code` or
   fall back to grep.
