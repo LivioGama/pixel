@@ -109,6 +109,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel web-search` | Deterministic web lookup for terms the index cannot know — the refine step of a gated `pixel plan`. SearXNG alone when `PIXEL_WEB_SEARCH_URL` is set; otherwise DuckDuckGo, then Wikipedia while the hits are fewer than `--limit`. No LLM, no daemon |
 | `pixel repo-state` | Show repo state: HEAD, branch, dirty files, fingerprints; `--include-clean` adds the capped tracked-clean list |
 | `pixel review-changes` | Review working-tree changes (staged, unstaged, untracked, conflicted) |
+| `pixel review-gate` | Deterministic pre-review: `what-changed` plus the mechanical rules — credential-shaped added lines, and changed symbols whose callers were not themselves changed — each finding carrying its witness; the caps it fired ride the epistemics envelope |
 | `pixel commit-history` | Commit history with detail levels and byte caps |
 | `pixel diff` | Structured diff between two refs (or ref → working tree) |
 | `pixel commit` | Stage files, commit, and optionally push (crash-safe, idempotent) |

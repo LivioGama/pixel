@@ -937,6 +937,7 @@ impl Service {
                 offset,
                 include_tests,
             } => self.op_changes(base.as_deref(), offset, include_tests),
+            Request::ReviewGate { base } => self.op_review_gate(base.as_deref()),
             Request::Graph { if_stale } => self.op_graph(if_stale),
             Request::Status {} => self.op_status(),
             Request::Reindex {} => self.op_reindex(),
@@ -2364,6 +2365,22 @@ impl Service {
         Ok(out)
     }
 
+    /// The deterministic pre-review: the full `changes` verdict (uncovered,
+    /// suggested tests, risk, lower bound) plus the two extra passes that
+    /// need the raw diff — credential-shaped added lines, and the changed
+    /// symbols' callers outside the change set. Envelope handling is the
+    /// same as `op_changes`: the graph build for this answer is merged so
+    /// epistemics can read a 0 ms staleness signal, and the caps the pass
+    /// fired ride the `caps` array up to `derive_epistemics`.
+    fn op_review_gate(&mut self, base: Option<&str>) -> Result<Value, String> {
+        let built = self.ensure_graph()?;
+        let root = self.root.clone();
+        let store = self.graph.as_ref().unwrap();
+        let mut out = bridge::review(store, &root, base)?;
+        merge_build_info(&mut out, built);
+        Ok(out)
+    }
+
     fn op_status(&mut self) -> Result<Value, String> {
         let s = self.index.read().expect("index lock poisoned").status();
         let db = self.graph_db_path();
@@ -3309,6 +3326,7 @@ pub const RETRIEVAL_OPS: &[&str] = &[
     "uses",
     "trace",
     "changes",
+    "review-gate",
     "context",
     "symbol",
     "processes",
@@ -3419,7 +3437,7 @@ fn derive_epistemics(op_name: &str, v: &Value) -> (Epistemics, Vec<Warning>) {
     let source = match op_name {
         "search" => "text index",
         "targets" | "resolve" => "text index + code graph",
-        "changes" => "code graph + working-tree diff",
+        "changes" | "review-gate" => "code graph + working-tree diff",
         _ => "code graph",
     };
     let mut basis = String::from(source);
@@ -4310,6 +4328,14 @@ mod bridge {
         include_tests: bool,
     ) -> Result<Value, String> {
         pixel_graph::changes::detect(store, root, base, include_tests)
+            .map(to_val)
+            .map_err(es)
+    }
+
+    /// The deterministic review verdict, findings included, exact same
+    /// pass-through as `changes`: pixel-graph owns the rule semantics.
+    pub fn review(store: &GraphStore, root: &Path, base: Option<&str>) -> Result<Value, String> {
+        pixel_graph::review::review(store, root, base)
             .map(to_val)
             .map_err(es)
     }
@@ -6620,6 +6646,7 @@ mod tests {
                     include_tests: false,
                 },
             ),
+            ("review-gate", Request::ReviewGate { base: None }),
             (
                 "context",
                 Request::Context {

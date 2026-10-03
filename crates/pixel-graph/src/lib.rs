@@ -23,6 +23,7 @@ pub mod predicate;
 pub mod process;
 pub mod rename;
 pub mod resolve;
+pub mod review;
 pub mod store;
 pub mod targets;
 pub mod trace;

@@ -771,6 +771,20 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Deterministic pre-review: `what-changed` plus the mechanical rules
+    /// (credential-shaped added lines, changed symbols whose callers were
+    /// not themselves changed), each finding carrying the witness that
+    /// established it. Feed the output to a real review as the narrowed
+    /// context it starts from.
+    ReviewGate {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        /// Base ref to diff against (default HEAD).
+        #[arg(long)]
+        base: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Commit history with detail levels and byte caps.
     #[command(alias = "history")]
     CommitHistory {
@@ -5515,6 +5529,11 @@ fn run_command(
                 },
                 false,
             )?;
+            finish_graph_cmd(data, json, |_| None)?;
+            Ok(())
+        }
+        Command::ReviewGate { path, base, json } => {
+            let data = execute(&path, Request::ReviewGate { base }, false)?;
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }

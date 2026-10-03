@@ -187,19 +187,22 @@ pub struct ChangesReport {
 }
 
 #[derive(Debug, PartialEq)]
-enum FileStatus {
+pub(crate) enum FileStatus {
     Added,
     Deleted,
     Modified,
 }
 
+/// One changed file's mapping. Field visibility is `pub(crate)` because the
+/// `review` pass re-reads the same parsed diff for its own two walks
+/// (added-line secret scan, caller containment); it changes nothing here.
 #[derive(Debug)]
-struct FileDiff {
-    path: String,
+pub(crate) struct FileDiff {
+    pub(crate) path: String,
     /// Where the file's base content lives, which a rename moves: the old
     /// side of the diff is read from this path, not from `path`.
     old_path: String,
-    status: FileStatus,
+    pub(crate) status: FileStatus,
     /// Changed line ranges in the NEW file's coordinates (inclusive),
     /// including the one-line anchor a pure deletion leaves behind so an
     /// adjacent symbol is still reported as changed.
@@ -208,13 +211,13 @@ struct FileDiff {
     /// of the new side is computed from these, so a deletion's anchor —
     /// which points at a line the hunk did not write — never turns into an
     /// uncovered addition.
-    added_ranges: Vec<(u32, u32)>,
+    pub(crate) added_ranges: Vec<(u32, u32)>,
     /// Removed line ranges in the OLD file's coordinates (inclusive). Empty
     /// for a pure addition.
     old_ranges: Vec<(u32, u32)>,
     /// False when git described the change without a text hunk: a binary
     /// patch, or a mode-only change. Both are `non_text_change`.
-    text: bool,
+    pub(crate) text: bool,
 }
 
 impl FileDiff {
@@ -275,7 +278,7 @@ fn hunk_range(spec: &str) -> Option<(u32, u32)> {
 /// kept as a `text: false` entry. Without it such a file is invisible to
 /// change detection, which would let a report claim to cover a change it
 /// never saw.
-fn parse_diff(output: &str) -> Vec<FileDiff> {
+pub(crate) fn parse_diff(output: &str) -> Vec<FileDiff> {
     let mut files: Vec<FileDiff> = Vec::new();
     let mut old_path: Option<String> = None;
     // The header being read, and whether it has produced a text hunk yet.

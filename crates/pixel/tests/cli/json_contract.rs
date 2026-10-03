@@ -608,6 +608,59 @@ fn big_untracked_tree_keeps_json_answers_structured() {
     std::fs::remove_dir_all(&dir).ok();
 }
 
+/// `review-gate` is a retrieval-class answer: one JSON document, an
+/// array of findings each carrying its witness, epistemics and snapshot in
+/// the envelope, and no secret echoed back in the finding's text.
+#[test]
+fn review_gate_json_contract_is_an_enveloped_finding_list() {
+    let dir = fixture("review-gate");
+    // Change `login_user` and append a credential-shaped line in the same
+    // file. `src/caller.rs` — which calls `login_user` — is untouched, so
+    // the divergence rule must name it.
+    std::fs::write(
+        dir.join("src/login.rs"),
+        "pub fn login_user(name: &str) -> bool {\n    name.len() > 0\n}\nconst LEAK: &str = \"ghp_1234567890abcdef\";\n",
+    )
+    .unwrap();
+
+    let out = pixel(&dir, &["review-gate", ".", "--json"][..]);
+    assert!(out.status.success(), "review-gate: {out:?}");
+    let doc = &parse_stdout_lines(&out, "review-gate")[0];
+    assert!(
+        out.stdout.len() < 4096,
+        "review-gate output must stay bounded"
+    );
+    // The CLI prints the envelope's `result` payload, envelope metadata
+    // folded in: the caps array (empty here), the graph build, and the
+    // freshest signal the graph side can attest.
+    assert!(doc["snapshot"]["head"].is_string(), "{doc}");
+
+    let findings = doc["findings"].as_array().expect("findings array");
+    let divergence: Vec<&serde_json::Value> = findings
+        .iter()
+        .filter(|f| f["rule"] == "producer-reader-divergence")
+        .collect();
+    assert_eq!(divergence.len(), 1, "{doc}");
+    assert_eq!(divergence[0]["file"], "src/caller.rs", "{doc}");
+    assert_eq!(divergence[0]["severity"], "MEDIUM", "{doc}");
+
+    let secret: Vec<&serde_json::Value> = findings
+        .iter()
+        .filter(|f| f["rule"] == "possible-secret")
+        .collect();
+    assert_eq!(secret.len(), 1, "{doc}");
+    assert_eq!(secret[0]["severity"], "CRITICAL", "{doc}");
+    assert!(
+        !secret[0]["evidence"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("ghp_"),
+        "the finding must not echo the matched credential: {doc}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
 /// `repo-state` is the Phase-1 freshness answer: the tracked-clean file list
 /// is the bulk of it on a clean tree and no consumer reads it. The default
 /// answer keeps the exact counts, `--files` keeps restricting them, and
