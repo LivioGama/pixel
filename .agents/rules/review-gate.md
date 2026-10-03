@@ -20,6 +20,12 @@ Before every `git push` of a feature branch, in this order:
    ones, record why the rest stay.
 4. Re-run until no `BLOCKER` or `CONCERN` remains, then push.
 
+`risk-climb` and `unresolved-callers-lower-bound` are SUGGESTION on purpose:
+they describe what the change touches (a hub's blast radius, a name defined
+twice), no edit clears them, and at CONCERN they alone refused 7 of the last 12
+merged pull requests on that alone (#555). Read them as "review this part
+as a whole", and say in the pull request that you did.
+
 The tracked pre-push hook enforces both halves: it fetches the remote
 default and refuses a push whose merge-base is behind it, then runs
 `pixel review-gate . --fail-on concern` and refuses the push on any BLOCKER

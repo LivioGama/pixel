@@ -215,11 +215,12 @@ fn graph_findings(report: &ChangesReport, caps: &mut Vec<String>) -> Vec<ReviewF
     // The envelope note is built by `detect` from the same-name site list;
     // its prefix is the stable marker that lower-bound sites exist. The
     // finding stays change-set-level: the report carries the count of
-    // affected names, not their paths.
+    // affected names, not their paths. MEDIUM like `risk-climb`: it names
+    // where to look, and no edit of the change can clear it (#555).
     if report.envelope_note.starts_with("lower bound:") {
         out.push(ReviewFinding {
             rule: "unresolved-callers-lower-bound".into(),
-            severity: "HIGH".into(),
+            severity: REPORT_LEVEL_SEVERITY.into(),
             file: None,
             line: None,
             evidence: report.envelope_note.clone(),
@@ -292,12 +293,20 @@ fn graph_findings(report: &ChangesReport, caps: &mut Vec<String>) -> Vec<ReviewF
     out
 }
 
+/// Severity of the change-set-level findings (`risk-climb`,
+/// `unresolved-callers-lower-bound`): a SUGGESTION, never a CONCERN. They
+/// describe what the change touches (the blast radius of a hub such as the
+/// CLI's `run`, a name defined twice), so no edit of the change can clear
+/// them; at CONCERN the pre-push gate (`--fail-on concern`) refused every
+/// push touching such a symbol and left `--no-verify` as the only way
+/// through (#555). The level they reached stays in the evidence.
+const REPORT_LEVEL_SEVERITY: &str = "MEDIUM";
+
 /// The risk climb a change set reaches, as a finding: `HIGH` and above only,
 /// so a quiet change set emits nothing.
 fn risk_finding(risk: &str) -> Option<ReviewFinding> {
     match risk {
-        "CRITICAL" => Some(report_level("risk-climb", "CRITICAL", risk)),
-        "HIGH" => Some(report_level("risk-climb", "HIGH", risk)),
+        "CRITICAL" | "HIGH" => Some(report_level("risk-climb", REPORT_LEVEL_SEVERITY, risk)),
         _ => None,
     }
 }
@@ -619,10 +628,12 @@ mod tests {
         assert_eq!(risk_finding("LOW"), None);
         assert_eq!(risk_finding("MEDIUM"), None);
         let high = risk_finding("HIGH").expect("HIGH fires");
-        assert_eq!(high.severity, "HIGH");
+        assert_eq!(high.severity, "MEDIUM");
+        assert_eq!(high.evidence, "change-set risk reached HIGH");
         assert_eq!(high.file, None);
         let critical = risk_finding("CRITICAL").expect("CRITICAL fires");
-        assert_eq!(critical.severity, "CRITICAL");
+        assert_eq!(critical.severity, "MEDIUM");
+        assert_eq!(critical.evidence, "change-set risk reached CRITICAL");
     }
 
     #[test]
@@ -834,7 +845,7 @@ mod tests {
 
     /// Two same-named definitions plus an importless call site is an
     /// unresolved same-name site: the lower-bound cap must surface as a
-    /// HIGH change-set finding, not be silently ranked HIGH.
+    /// change-set finding, at SUGGESTION level since no edit clears it.
     #[test]
     fn review_surfaces_an_unresolved_same_name_lower_bound() {
         let dir = tmpdir("lower-bound");
@@ -869,7 +880,7 @@ mod tests {
             1,
             "unresolved `produce` must be surfaced: {report:?}"
         );
-        assert_eq!(lb[0].severity, "HIGH", "{report:?}");
+        assert_eq!(lb[0].severity, "MEDIUM", "{report:?}");
         assert_eq!(lb[0].file, None, "{report:?}");
         assert!(
             lb[0].evidence.contains("produce"),
