@@ -2277,6 +2277,7 @@ impl Service {
     ) -> Result<Value, String> {
         const SYMBOL_LIMIT: usize = 20;
         const PROCESS_LIMIT: usize = 20;
+        const CONSUMER_LIMIT: usize = 20;
         const PROCESSES_PER_SYMBOL_LIMIT: usize = 10;
         let offset = offset.unwrap_or(0);
         let built = self.ensure_graph()?;
@@ -2316,10 +2317,19 @@ impl Service {
             let end = start.saturating_add(PROCESS_LIMIT).min(processes.len());
             *processes = processes.drain(start..end).collect();
         }
+        // Already sorted by (of, path, line) in the report.
+        let consumers_total = out["consumers"].as_array().map_or(0, Vec::len);
+        if let Some(consumers) = out["consumers"].as_array_mut() {
+            let start = offset.min(consumers.len());
+            let end = start.saturating_add(CONSUMER_LIMIT).min(consumers.len());
+            *consumers = consumers.drain(start..end).collect();
+        }
         let returned_symbols = out["symbols"].as_array().map_or(0, Vec::len);
         let returned_processes = out["affected_processes"].as_array().map_or(0, Vec::len);
+        let returned_consumers = out["consumers"].as_array().map_or(0, Vec::len);
         let has_more = offset.saturating_add(returned_symbols) < symbols_total
-            || offset.saturating_add(returned_processes) < affected_processes_total;
+            || offset.saturating_add(returned_processes) < affected_processes_total
+            || offset.saturating_add(returned_consumers) < consumers_total;
         if let Some(object) = out.as_object_mut() {
             object.insert("symbols_total".into(), json!(symbols_total));
             object.insert("returned_symbols".into(), json!(returned_symbols));
@@ -2328,8 +2338,13 @@ impl Service {
             object.insert(
                 "next_offset".into(),
                 json!(
-                    has_more
-                        .then_some(offset.saturating_add(returned_symbols.max(returned_processes)))
+                    has_more.then_some(
+                        offset.saturating_add(
+                            returned_symbols
+                                .max(returned_processes)
+                                .max(returned_consumers)
+                        )
+                    )
                 ),
             );
             object.insert(
@@ -2341,6 +2356,9 @@ impl Service {
                 "returned_affected_processes".into(),
                 json!(returned_processes),
             );
+            object.insert("consumers_total".into(), json!(consumers_total));
+            object.insert("consumer_limit".into(), json!(CONSUMER_LIMIT));
+            object.insert("returned_consumers".into(), json!(returned_consumers));
             object.insert(
                 "truncated".into(),
                 json!(has_more || nested_processes_truncated),
@@ -8369,5 +8387,67 @@ mod tests {
             (empty.text.as_str(), empty.layer.as_str(), empty.omitted),
             ("", "", 0)
         );
+    }
+
+    #[test]
+    fn changes_should_page_consumers_with_the_shared_offset() {
+        let root = tmpdir("changes-consumers");
+        std::fs::write(
+            root.join("lib.ts"),
+            "export function target(x: number): number { return x + 1 }\n",
+        )
+        .unwrap();
+        let callers: String = (0..25)
+            .map(|index| {
+                format!(
+                    "export function caller{index:02}(x: number): number {{ return target(x) }}\n"
+                )
+            })
+            .collect();
+        std::fs::write(
+            root.join("use.ts"),
+            format!("import {{ target }} from './lib'\n{callers}"),
+        )
+        .unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "baseline"]);
+        std::fs::write(
+            root.join("lib.ts"),
+            "export function target(x: number): number { return x + 2 }\n",
+        )
+        .unwrap();
+
+        let mut svc = Service::open(&root).unwrap();
+        let mut page = |offset| {
+            let resp = svc.handle(Request::Changes {
+                base: None,
+                offset: Some(offset),
+                include_tests: false,
+            });
+            assert!(resp.ok, "{resp:?}");
+            resp.data().clone()
+        };
+        let first = page(0);
+        let second = page(20);
+        let lines = |data: &Value| {
+            data["consumers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["line"].as_u64().unwrap())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lines(&first), (2..22).collect::<Vec<u64>>());
+        assert_eq!(lines(&second), (22..27).collect::<Vec<u64>>());
+        assert_eq!(first["consumers_total"], 25);
+        assert_eq!(first["returned_consumers"], 20);
+        assert_eq!(first["consumer_limit"], 20);
+        assert_eq!(first["next_offset"], 20);
+        assert_eq!(first["truncated"], true);
+        assert!(second["next_offset"].is_null(), "{second}");
+        assert_eq!(second["returned_consumers"], 5);
+        assert_eq!(second["base"], "index");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
