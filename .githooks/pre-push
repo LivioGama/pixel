@@ -5,4 +5,22 @@
 set -eu
 
 repo=$(git rev-parse --show-toplevel) || exit 0
-exec "$repo/scripts/mutants-preflight.sh" --check
+"$repo/scripts/mutants-preflight.sh" --check
+
+# review-gate: the branch must sit on the freshest remote default and the
+# deterministic review must hold no BLOCKER or CONCERN finding. Skipped when
+# the installed pixel predates the command.
+if command -v pixel >/dev/null 2>&1 && pixel review-gate --help >/dev/null 2>&1; then
+    remote_default=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)
+    git fetch --quiet origin "${remote_default#origin/}" 2>/dev/null || true
+    tip=$(git rev-parse --verify --quiet "$remote_default" || true)
+    if [ -n "$tip" ] && [ "$(git merge-base HEAD "$remote_default")" != "$tip" ]; then
+        echo "pre-push: HEAD is not rebased on the freshest $remote_default:"
+        echo "  git fetch origin && git rebase $remote_default"
+        exit 1
+    fi
+    if ! pixel review-gate . --fail-on concern; then
+        echo "pre-push: review-gate findings at CONCERN or above — fix them, or push --no-verify"
+        exit 1
+    fi
+fi

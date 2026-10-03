@@ -128,6 +128,37 @@ enum FailOn {
     Red,
 }
 
+/// `pixel review-gate --fail-on`: the lowest finding severity that exits 1.
+/// The names are the code-review vocabulary the human render prints.
+#[derive(Copy, Clone, ValueEnum)]
+enum ReviewFailOn {
+    Blocker,
+    Concern,
+    Suggestion,
+    Nit,
+}
+
+impl ReviewFailOn {
+    /// The severity rank (LOW 1 .. CRITICAL 4) at or above which the gate fails.
+    fn threshold(self) -> u8 {
+        match self {
+            Self::Blocker => 4,
+            Self::Concern => 3,
+            Self::Suggestion => 2,
+            Self::Nit => 1,
+        }
+    }
+}
+
+fn review_severity_rank(severity: &str) -> u8 {
+    match severity {
+        "CRITICAL" => 4,
+        "HIGH" => 3,
+        "MEDIUM" => 2,
+        _ => 1,
+    }
+}
+
 impl FailOn {
     fn threshold(self) -> pixel_install::doctor::CheckStatus {
         match self {
@@ -779,9 +810,14 @@ enum Command {
     ReviewGate {
         #[arg(default_value = ".")]
         path: PathBuf,
-        /// Base ref to diff against (default HEAD).
+        /// Base ref to diff against (default: the uncommitted diff, or the
+        /// branch's merge-base with the remote default when the tree is clean).
         #[arg(long)]
         base: Option<String>,
+        /// Lowest finding level that makes the command exit 1 — the pre-push
+        /// gate sets it, a plain review leaves it off.
+        #[arg(long, value_enum)]
+        fail_on: Option<ReviewFailOn>,
         #[arg(long)]
         json: bool,
     },
@@ -5593,8 +5629,27 @@ fn run_command(
             finish_graph_cmd(data, json, |_| None)?;
             Ok(())
         }
-        Command::ReviewGate { path, base, json } => {
+        Command::ReviewGate {
+            path,
+            base,
+            fail_on,
+            json,
+        } => {
             let data = execute(&path, Request::ReviewGate { base }, false)?;
+            if let Some(fail_on) = fail_on {
+                let worst = data
+                    .get("findings")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|f| f.get("severity").and_then(Value::as_str))
+                    .map(review_severity_rank)
+                    .max()
+                    .unwrap_or(0);
+                if worst >= fail_on.threshold() {
+                    owned_exit.set(Some(1));
+                }
+            }
             finish_graph_cmd(data, json, pretty_review_gate)?;
             Ok(())
         }
