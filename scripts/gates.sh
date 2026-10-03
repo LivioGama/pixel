@@ -49,8 +49,11 @@ rust_affecting() {
 # Prints "run" when a gate could change outcome, "skip" when none can. Any
 # git failure prints "run" (fail open).
 gate_decision() {
-    base="$(git merge-base main HEAD 2>/dev/null)" \
-        || base="$(git merge-base origin/main HEAD 2>/dev/null)" \
+    # Prefer the fetched remote default. A local `main` may be stale while
+    # HEAD already contains newer upstream Rust changes, which would make a
+    # scripts-only branch recompile the workspace for someone else's diff.
+    base="$(git merge-base origin/main HEAD 2>/dev/null)" \
+        || base="$(git merge-base main HEAD 2>/dev/null)" \
         || { echo run; return; }
     committed="$(git diff --name-only "$base" HEAD 2>/dev/null)" || { echo run; return; }
     dirty="$(git status --porcelain --untracked-files=all 2>/dev/null | cut -c4-)" || { echo run; return; }
@@ -99,6 +102,7 @@ step() {
 step "release prepare contract" python3 scripts/test-prepare.py
 step "gate runner contract" python3 scripts/test-gates.py
 step "mutants config contract" python3 scripts/test-mutants-config.py
+step "mutants gate host contract" sh scripts/test-mutants-gate-host.sh
 step "clean contract" python3 scripts/test-clean.py
 step "harness recorder contract" python3 scripts/test-harness-recorder.py
 
