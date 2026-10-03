@@ -470,9 +470,11 @@ fn parse_criteria(pairs: &[String], labels: &[String]) -> Result<BTreeMap<String
 }
 
 fn criterion_error(got: &str, labels: &[String]) -> String {
+    // Quoting the whole `label=description` pair keeps a spaced label one shell
+    // argument, copy-pasteable as is.
     let example = labels.first().map_or_else(
-        || r#"--criterion <label>="<description>""#.to_string(),
-        |l| format!(r#"--criterion {l}="one bounded edit""#),
+        || r#"--criterion "<label>=<description>""#.to_string(),
+        |l| format!(r#"--criterion "{l}=one bounded edit""#),
     );
     format!(
         "--criterion needs <label>=<description>, got {got:?}; declared labels: {}; example: {example}",
@@ -1291,7 +1293,14 @@ mod tests {
             err,
             "--criterion needs <label>=<description>, got \"missing-eq\"; \
              declared labels: trivial, deep; \
-             example: --criterion trivial=\"one bounded edit\""
+             example: --criterion \"trivial=one bounded edit\""
+        );
+        // A spaced label stays one shell argument inside the example's quotes.
+        let spaced = parse_criteria(&["missing-eq".to_string()], &labels(&["one edit", "deep"]))
+            .unwrap_err();
+        assert!(
+            spaced.contains(r#"example: --criterion "one edit=one bounded edit""#),
+            "{spaced}"
         );
     }
 
