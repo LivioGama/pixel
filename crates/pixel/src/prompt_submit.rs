@@ -88,6 +88,7 @@ struct PromptSubmitPayload {
 /// Entry point for `pixel run-hook prompt-submit`. Reads the hook payload from stdin.
 /// Never returns an `Err` as exit 1 — every failure path is a silent exit 0
 /// (prompt proceeds normally).
+#[cfg_attr(test, mutants::skip)] // stdin + process::exit boundary; every rendering decision lives in the `render_*_context` helpers
 pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     // Suppress stderr panics in hook mode so unexpected edge cases cleanly exit 0.
     std::panic::set_hook(Box::new(|_| {}));
