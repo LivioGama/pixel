@@ -455,10 +455,15 @@ fn added_secret_findings(
                 // Fixture strings legitimately match the patterns; a live
                 // key in a test file is still a leak, so the finding is
                 // kept but drops a rung: CRITICAL→MEDIUM, MEDIUM→LOW.
-                // A bare quoted literal (`"ghp_abc",`) is a pattern table
-                // entry, not an assignment — same downgrade.
+                // A bare literal (`"ghp_abc",`, `("github-token", &[…])`,
+                // `&["sk-proj-", …]`) is a pattern-table entry, not an
+                // assignment — same downgrade.
                 let trimmed = line.trim_start();
-                let bare_literal = trimmed.starts_with('"') && !trimmed.contains('=');
+                let bare_literal = !trimmed.contains('=')
+                    && trimmed
+                        .chars()
+                        .next()
+                        .is_some_and(|c| matches!(c, '"' | '(' | '&'));
                 let test_fixture = test_fixture_path
                     || bare_literal
                     || test_region_start.is_some_and(|t| start + i as u32 >= t);
