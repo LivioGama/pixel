@@ -410,7 +410,7 @@ fn build_graph_with(
     let snapshot_signature = input_signature(&inputs);
     phases.collect_ms = millis(t0.elapsed());
     let clock = Instant::now();
-    let mut extracted: Vec<Extracted> = inputs
+    let extracted: Vec<Extracted> = inputs
         .into_par_iter()
         .filter_map(|(rel, content)| {
             let fx = extract_file(&rel, &content)?;
@@ -446,13 +446,84 @@ fn build_graph_with(
         store.remove_file(path)?;
     }
 
-    // Pass 1: files + symbols (need every file id before import resolution).
-    let mut path_to_id: HashMap<String, i64> = HashMap::new();
-    let mut sym_ids: Vec<Vec<i64>> = Vec::with_capacity(extracted.len());
+    let stored = store_batch(&mut store, extracted, &all_paths)?;
+    phases.store_ms = millis(stored.stored_at.duration_since(clock));
+    phases.concepts_ms = millis(stored.concepts);
+    phases.imports_ms = millis(stored.imports);
+    let clock = Instant::now();
+    resolve_calls(&store, &stored.calls)?;
+    phases.resolve_calls_ms = millis(clock.elapsed());
+    let clock = Instant::now();
+    resolve_references(&store, &stored.references)?;
+    phases.resolve_references_ms = millis(clock.elapsed());
+    let clock = Instant::now();
+
+    // Bind freshness to the exact bytes parsed above. If the source tree moved
+    // during extraction/storage, publishing this graph as fresh would attach
+    // old symbols to a new filesystem signature.
+    let current_signature = signature_now(root);
+    phases.verify_ms = millis(clock.elapsed());
+    if current_signature != snapshot_signature {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted,
+            "source changed during graph build; graph was not published as fresh",
+        )
+        .into());
+    }
+    store.meta_set(EXTRACTOR_VERSION_KEY, EXTRACTOR_VERSION)?;
+    // Before the signature on purpose: a crash between the two leaves the
+    // graph unsigned, and an unsigned graph is refused rather than read, so
+    // no evaluation can see a cap that belongs to a half-written build.
+    store.meta_set(GRAPH_FILE_CAP_KEY, &graph_file_cap_value(graph_file_cap()))?;
+    store.meta_set(FRESHNESS_KEY, &snapshot_signature)?;
+    store.commit_write()?;
+
+    let (files, symbols, edges, unresolved) = store.counts()?;
+    Ok(GraphStats {
+        files,
+        symbols,
+        edges,
+        unresolved,
+        elapsed_ms: t0.elapsed().as_millis(),
+        phases,
+    })
+}
+
+/// What [`store_batch`] leaves to its caller: the calls and references of
+/// every stored file, waiting for resolution, and the time each pass took.
+struct StoredBatch {
+    calls: Vec<FileCalls>,
+    references: Vec<FileReferences>,
+    /// When pass 1, the concept pass included, ended: a caller times its
+    /// store phase from wherever its own setup started.
+    stored_at: Instant,
+    /// The concept pass alone.
+    concepts: Duration,
+    /// Pass 2.
+    imports: Duration,
+}
+
+/// Stores a batch of extracted files, for the full build and the
+/// incremental update alike, so both write the same rows for the same file.
+///
+/// Pass 1 writes each file's row, symbols, crux lines, concepts and JSX
+/// elements, then frees its bytes. Pass 2 runs once every file of the batch
+/// has a row, because an import may target a file stored later in the same
+/// batch: it writes the imports and collects the calls and references left
+/// to resolve.
+///
+/// `all_paths` is every file the graph holds once the batch is stored, in
+/// the order import resolution scans them: a Go package import resolves to
+/// the first of the package's files in that order.
+fn store_batch(
+    store: &mut GraphStore,
+    mut files: Vec<Extracted>,
+    all_paths: &[String],
+) -> Result<StoredBatch, BoxErr> {
     let mut concepts = Duration::ZERO;
-    for (i, e) in extracted.iter_mut().enumerate() {
+    let mut stored_ids: Vec<(i64, Vec<i64>)> = Vec::with_capacity(files.len());
+    for e in &mut files {
         let file_id = store.replace_file(&e.rel, &e.blob_oid, e.fx.lang)?;
-        path_to_id.insert(e.rel.clone(), file_id);
         let mut ids = Vec::with_capacity(e.fx.symbols.len());
         let mut lines = Vec::with_capacity(e.fx.symbols.len());
         // Decoded and split once per file, not once per symbol: the crux
@@ -494,10 +565,9 @@ fn build_graph_with(
             let crux = extract_crux(&body, 3);
             store.set_symbol_crux(id, &crux)?;
         }
-        sym_ids.push(ids);
         // Engine 1: concept pass alongside symbol extraction with O(1) content access.
         let concept_clock = Instant::now();
-        insert_concepts(&store, file_id, &e.rel, &e.content, &sym_ids[i], &lines)?;
+        insert_concepts(store, file_id, &e.rel, &e.content, &ids, &lines)?;
         concepts += concept_clock.elapsed();
         // Plan pass: persist JSX elements for dead-interactive queries.
         for jsx in &e.fx.jsx_elements {
@@ -512,19 +582,18 @@ fn build_graph_with(
         }
         e.content.clear();
         e.content.shrink_to_fit();
+        stored_ids.push((file_id, ids));
     }
-    phases.store_ms = millis(clock.elapsed());
-    phases.concepts_ms = millis(concepts);
-    let clock = Instant::now();
+    let stored_at = Instant::now();
 
-    // Pass 2: imports (resolved against the full file list) + pending calls
-    // and references.
-    let mut pending: Vec<FileCalls> = Vec::with_capacity(extracted.len());
-    let mut pending_refs: Vec<FileReferences> = Vec::with_capacity(extracted.len());
-    for (i, e) in extracted.iter().enumerate() {
-        let file_id = path_to_id[&e.rel];
+    let path_to_id: HashMap<String, i64> =
+        store.files()?.into_iter().map(|f| (f.path, f.id)).collect();
+    let mut calls: Vec<FileCalls> = Vec::with_capacity(files.len());
+    let mut references: Vec<FileReferences> = Vec::with_capacity(files.len());
+    for (e, (file_id, symbol_ids)) in files.iter().zip(&stored_ids) {
+        let file_id = *file_id;
         for imp in &e.fx.imports {
-            let resolved = resolve_import(&imp.path, &e.rel, &all_paths)
+            let resolved = resolve_import(&imp.path, &e.rel, all_paths)
                 .and_then(|p| path_to_id.get(&p).copied());
             store.insert_import_at(
                 file_id,
@@ -535,70 +604,41 @@ fn build_graph_with(
                 &imp.scope,
             )?;
         }
-        let calls =
+        let file_calls =
             e.fx.calls
                 .iter()
                 .map(|c| PendingCall {
                     callee_name: c.callee_name.clone(),
-                    enclosing_symbol_id: c.enclosing_index.map(|ix| sym_ids[i][ix]),
+                    enclosing_symbol_id: c.enclosing_index.map(|ix| symbol_ids[ix]),
                     site_line: c.site_line,
                     receiver: c.receiver.clone(),
                 })
                 .collect();
-        pending.push(FileCalls { file_id, calls });
-        let references =
+        calls.push(FileCalls {
+            file_id,
+            calls: file_calls,
+        });
+        let file_references =
             e.fx.references
                 .iter()
                 .map(|r| PendingReference {
                     name: r.name.clone(),
-                    enclosing_symbol_id: r.enclosing_index.map(|ix| sym_ids[i][ix]),
+                    enclosing_symbol_id: r.enclosing_index.map(|ix| symbol_ids[ix]),
                     site_line: r.site_line,
                     arg_of: r.arg_of.clone(),
                 })
                 .collect();
-        pending_refs.push(FileReferences {
+        references.push(FileReferences {
             file_id,
-            references,
+            references: file_references,
         });
     }
-
-    phases.imports_ms = millis(clock.elapsed());
-    let clock = Instant::now();
-    resolve_calls(&store, &pending)?;
-    phases.resolve_calls_ms = millis(clock.elapsed());
-    let clock = Instant::now();
-    resolve_references(&store, &pending_refs)?;
-    phases.resolve_references_ms = millis(clock.elapsed());
-    let clock = Instant::now();
-
-    // Bind freshness to the exact bytes parsed above. If the source tree moved
-    // during extraction/storage, publishing this graph as fresh would attach
-    // old symbols to a new filesystem signature.
-    let current_signature = signature_now(root);
-    phases.verify_ms = millis(clock.elapsed());
-    if current_signature != snapshot_signature {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted,
-            "source changed during graph build; graph was not published as fresh",
-        )
-        .into());
-    }
-    store.meta_set(EXTRACTOR_VERSION_KEY, EXTRACTOR_VERSION)?;
-    // Before the signature on purpose: a crash between the two leaves the
-    // graph unsigned, and an unsigned graph is refused rather than read, so
-    // no evaluation can see a cap that belongs to a half-written build.
-    store.meta_set(GRAPH_FILE_CAP_KEY, &graph_file_cap_value(graph_file_cap()))?;
-    store.meta_set(FRESHNESS_KEY, &snapshot_signature)?;
-    store.commit_write()?;
-
-    let (files, symbols, edges, unresolved) = store.counts()?;
-    Ok(GraphStats {
-        files,
-        symbols,
-        edges,
-        unresolved,
-        elapsed_ms: t0.elapsed().as_millis(),
-        phases,
+    Ok(StoredBatch {
+        calls,
+        references,
+        stored_at,
+        concepts,
+        imports: stored_at.elapsed(),
     })
 }
 
@@ -1064,23 +1104,10 @@ fn update_files_in_one_transaction(
 /// signature: the caller decides which one (if any) describes the tree it
 /// just synchronised to.
 fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Result<(), BoxErr> {
-    /// A changed file after pass 1: its row and symbols are in the store,
-    /// its imports and calls wait for every file of the batch to exist.
-    struct Staged {
-        rel: String,
-        file_id: i64,
-        fx: FileExtraction,
-        symbol_ids: Vec<i64>,
-    }
-
     let mut all_changed_names: HashSet<String> = HashSet::new();
     let known_before: HashSet<String> = store.files()?.into_iter().map(|f| f.path).collect();
 
-    let mut staged: Vec<Staged> = Vec::with_capacity(files.len());
-
-    // Pass 1: files + symbols + concepts. Same split as `build_graph`: an
-    // import from file A to file B added in the same batch can only
-    // resolve once B has a row, so nothing here touches imports or calls.
+    let mut extracted: Vec<Extracted> = Vec::with_capacity(files.len());
     for &(rel, removed) in files {
         let abs = root.join(rel);
 
@@ -1150,127 +1177,35 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         for s in &fx.symbols {
             all_changed_names.insert(s.name.clone());
         }
-
-        let blob_oid = content_oid(&content);
-        let file_id = store.replace_file(rel, &blob_oid, fx.lang)?;
-
-        let mut ids = Vec::with_capacity(fx.symbols.len());
-        let mut lines = Vec::with_capacity(fx.symbols.len());
-        // Decoded and split once per file, not once per symbol: the crux
-        // below slices every symbol's body out of the same lines.
-        let body_str = String::from_utf8_lossy(&content);
-        let all_lines: Vec<&str> = body_str.lines().collect();
-        for s in &fx.symbols {
-            let uid = format!("{rel}#{}#{}", s.qualified, s.kind.as_str());
-            let id = store.insert_symbol(
-                file_id,
-                &uid,
-                &s.name,
-                &s.qualified,
-                s.kind,
-                s.start_line,
-                s.end_line,
-                &s.sig,
-            )?;
-            if s.trait_impl {
-                store.mark_trait_impl(id)?;
-            }
-            if s.module_decl {
-                store.mark_module_decl(id)?;
-            }
-            ids.push(id);
-            lines.push((s.start_line, s.end_line));
-
-            // P2·3: content-anchored crux for the incremental re-index path.
-            let start = (s.start_line.saturating_sub(1) as usize).min(all_lines.len());
-            let end = (s.end_line.saturating_sub(1) as usize).min(all_lines.len());
-            let body = if end > start {
-                all_lines[start..end].join("\n")
-            } else {
-                String::new()
-            };
-            let crux = extract_crux(&body, 3);
-            store.set_symbol_crux(id, &crux)?;
-        }
-        insert_concepts(store, file_id, rel, &content, &ids, &lines)?;
-        for jsx in &fx.jsx_elements {
-            store.insert_jsx_element(
-                file_id,
-                &jsx.tag,
-                jsx.has_handler,
-                &jsx.text_content,
-                jsx.start_line,
-                jsx.end_line,
-            )?;
-        }
-        staged.push(Staged {
+        extracted.push(Extracted {
             rel: rel.to_string(),
-            file_id,
+            blob_oid: content_oid(&content),
+            content,
             fx,
-            symbol_ids: ids,
         });
     }
 
-    // The file list as it stands AFTER pass 1: added files included,
-    // removed ones gone.
-    let files_now = store.files()?;
-    let all_paths: Vec<String> = files_now.iter().map(|f| f.path.clone()).collect();
-    let path_to_id: HashMap<String, i64> = files_now.into_iter().map(|f| (f.path, f.id)).collect();
-
-    // Pass 2: imports + pending calls/references of the changed files.
-    let mut pending_calls: Vec<FileCalls> = Vec::with_capacity(staged.len());
-    let mut pending_refs: Vec<FileReferences> = Vec::with_capacity(staged.len());
-    for st in &staged {
-        for imp in &st.fx.imports {
-            let resolved = resolve_import(&imp.path, &st.rel, &all_paths)
-                .and_then(|p| path_to_id.get(&p).copied());
-            store.insert_import_at(
-                st.file_id,
-                &imp.spec,
-                &imp.path,
-                resolved,
-                &imp.bindings,
-                &imp.scope,
-            )?;
-        }
-        let calls = st
-            .fx
-            .calls
+    // The file list as it stands once the batch is stored, in the order the
+    // store lists it: kept files, then the batch's new ones as they are
+    // inserted.
+    let mut all_paths: Vec<String> = store.files()?.into_iter().map(|f| f.path).collect();
+    let present: HashSet<String> = all_paths.iter().cloned().collect();
+    all_paths.extend(
+        extracted
             .iter()
-            .map(|c| PendingCall {
-                callee_name: c.callee_name.clone(),
-                enclosing_symbol_id: c.enclosing_index.map(|ix| st.symbol_ids[ix]),
-                site_line: c.site_line,
-                receiver: c.receiver.clone(),
-            })
-            .collect();
-        pending_calls.push(FileCalls {
-            file_id: st.file_id,
-            calls,
-        });
-        let references = st
-            .fx
-            .references
-            .iter()
-            .map(|r| PendingReference {
-                name: r.name.clone(),
-                enclosing_symbol_id: r.enclosing_index.map(|ix| st.symbol_ids[ix]),
-                site_line: r.site_line,
-                arg_of: r.arg_of.clone(),
-            })
-            .collect();
-        pending_refs.push(FileReferences {
-            file_id: st.file_id,
-            references,
-        });
-    }
+            .filter(|e| !present.contains(&e.rel))
+            .map(|e| e.rel.clone()),
+    );
+    let added_any = extracted.iter().any(|e| !known_before.contains(&e.rel));
+    let stored = store_batch(store, extracted, &all_paths)?;
 
     // A file that appeared in this batch may be the target of imports that
     // UNCHANGED files could never resolve before (`import x from "./new"`
     // written ahead of the file). Re-resolve every dangling import against
     // the new file list so the resolver's import tier sees them.
-    let added_any = staged.iter().any(|st| !known_before.contains(&st.rel));
     if added_any {
+        let path_to_id: HashMap<String, i64> =
+            store.files()?.into_iter().map(|f| (f.path, f.id)).collect();
         let dangling: Vec<(i64, String, String)> = {
             let mut stmt = store.conn().prepare(
                 "SELECT i.id, i.path, f.path FROM imports i
@@ -1292,11 +1227,11 @@ fn write_rows(root: &Path, store: &mut GraphStore, files: &[(&str, bool)]) -> Re
         }
     }
 
-    if !pending_calls.is_empty() {
-        resolve_calls(store, &pending_calls)?;
+    if !stored.calls.is_empty() {
+        resolve_calls(store, &stored.calls)?;
     }
-    if !pending_refs.is_empty() {
-        resolve_references(store, &pending_refs)?;
+    if !stored.references.is_empty() {
+        resolve_references(store, &stored.references)?;
     }
 
     // Any changed definition can invalidate a previously unique target.
@@ -3506,5 +3441,217 @@ mod tests {
     fn the_recorded_cap_value_should_spell_a_disabled_cap_distinctly() {
         assert_eq!(graph_file_cap_value(None), "none");
         assert_eq!(graph_file_cap_value(Some(50_000)), "50000");
+    }
+
+    /// The files every equivalence scenario below writes: a Rust `use` with
+    /// an alias and a group, a module path call, a literal environment read
+    /// (a concept) behind a guard (a crux line), a relative TS import, a
+    /// function passed as a value (a reference), a JSX handler, and Ruby calls
+    /// without receiver or parentheses.
+    const EQUIVALENCE_TREE: &[(&str, &str)] = &[
+        (
+            "src/lib.rs",
+            "pub mod push;\npub mod other;\npub mod ship;\npub mod cfg;\n",
+        ),
+        ("src/push.rs", "pub fn push() {}\npub fn pull() {}\n"),
+        ("src/other.rs", "pub fn push() {}\n"),
+        (
+            "src/ship.rs",
+            "use crate::push::push as leased;\nuse crate::{push::pull, other};\n\
+             pub fn ship() { leased(); pull(); other::push(); }\npub fn stray() { push(); }\n",
+        ),
+        (
+            "src/cfg.rs",
+            "pub fn dir() -> String {\n    if let Ok(d) = std::env::var(\"PIXEL_FLOW_DIR\") {\n        \
+             return d;\n    }\n    String::new()\n}\n",
+        ),
+        (
+            "web/a.ts",
+            "import { helper } from \"./b\";\nexport function work() { return helper() }\n\
+             export function setup(schema: any) { schema.plugin(helper); }\n",
+        ),
+        ("web/b.ts", "export function helper() { return 1 }\n"),
+        (
+            "web/view.tsx",
+            "import { helper } from \"./b\";\n\
+             export function View() { return <button onClick={() => helper()}>Go</button> }\n",
+        ),
+        (
+            "app/svc.rb",
+            "class Svc\n  def target\n    1\n  end\n  def bare\n    target\n  end\n  \
+             def chained\n    @ids ||= target.to_set\n  end\nend\n",
+        ),
+    ];
+
+    fn write_tree(root: &Path, files: &[(&str, &str)]) {
+        for (rel, body) in files {
+            let path = root.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+    }
+
+    /// Every row the build writes, with each id replaced by what it names
+    /// (a path, a symbol uid), so two graphs of the same tree compare equal
+    /// whatever order their rows were inserted in.
+    fn graph_rows(db: &Path) -> Vec<(&'static str, Vec<String>)> {
+        const TABLES: &[(&str, &str)] = &[
+            ("files", "SELECT path, blob_oid, lang FROM files"),
+            (
+                "symbols",
+                "SELECT s.uid, f.path, s.name, s.qualified, s.kind, s.start_line, s.end_line, \
+                 s.sig, s.trait_impl, s.module_decl FROM symbols s JOIN files f ON f.id = s.file_id",
+            ),
+            (
+                "symbol_crux",
+                "SELECT s.uid, c.line, c.text, c.fingerprint FROM symbol_crux c \
+                 LEFT JOIN symbols s ON s.id = c.symbol_id",
+            ),
+            (
+                "imports",
+                "SELECT f.path, i.spec, i.path, t.path, i.bindings, i.scope FROM imports i \
+                 LEFT JOIN files f ON f.id = i.file_id LEFT JOIN files t ON t.id = i.resolved_file_id",
+            ),
+            (
+                "edges",
+                "SELECT a.uid, b.uid, e.kind, e.tier, e.site_line, e.receiver, e.callee FROM edges e \
+                 LEFT JOIN symbols a ON a.id = e.src_id LEFT JOIN symbols b ON b.id = e.dst_id",
+            ),
+            (
+                "unresolved_calls",
+                "SELECT f.path, u.name, s.uid, u.site_line, u.receiver, u.kind FROM unresolved_calls u \
+                 LEFT JOIN files f ON f.id = u.file_id LEFT JOIN symbols s ON s.id = u.enclosing_symbol_id",
+            ),
+            (
+                "concepts",
+                "SELECT f.path, c.kind, c.raw, c.norm, c.detail, c.start_line, c.end_line, s.uid \
+                 FROM concepts c LEFT JOIN files f ON f.id = c.file_id \
+                 LEFT JOIN symbols s ON s.id = c.owner_symbol_id",
+            ),
+            (
+                "concept_words",
+                "SELECT w.word, f.path, c.kind, c.raw, c.start_line FROM concept_words w \
+                 LEFT JOIN concepts c ON c.id = w.concept_id LEFT JOIN files f ON f.id = c.file_id",
+            ),
+            (
+                "jsx_elements",
+                "SELECT f.path, j.tag, j.has_handler, j.text_content, j.start_line, j.end_line \
+                 FROM jsx_elements j LEFT JOIN files f ON f.id = j.file_id",
+            ),
+        ];
+        let store = GraphStore::open(db).unwrap();
+        TABLES
+            .iter()
+            .map(|&(table, sql)| {
+                let mut stmt = store.conn().prepare(sql).unwrap();
+                let width = stmt.column_count();
+                let mut rows: Vec<String> = stmt
+                    .query_map([], |r| {
+                        (0..width)
+                            .map(|i| {
+                                r.get::<_, rusqlite::types::Value>(i)
+                                    .map(|v| format!("{v:?}"))
+                            })
+                            .collect::<rusqlite::Result<Vec<_>>>()
+                            .map(|cells| cells.join(" | "))
+                    })
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                rows.sort();
+                (table, rows)
+            })
+            .collect()
+    }
+
+    fn assert_same_graph(label: &str, got: &[(&str, Vec<String>)], want: &[(&str, Vec<String>)]) {
+        for ((table, got_rows), (_, want_rows)) in got.iter().zip(want) {
+            assert_eq!(
+                got_rows, want_rows,
+                "{label}: `{table}` differs from a full build"
+            );
+        }
+    }
+
+    /// The full build and the incremental update store the same tree the
+    /// same way. `graph-resolver.md` makes every resolution change hold on
+    /// both; this pins the rows they share, table by table, so a change to
+    /// one path that the other misses fails here instead of in a user's
+    /// graph after its first edit.
+    #[test]
+    fn an_incremental_update_should_store_what_a_full_build_stores() {
+        let reference = tmpdir("equiv-full");
+        write_tree(&reference, EQUIVALENCE_TREE);
+        let reference_db = reference.join(".pixel").join("graph.db");
+        build_graph(&reference, &reference_db).unwrap();
+        let want = graph_rows(&reference_db);
+        for (table, rows) in &want {
+            assert!(!rows.is_empty(), "the fixture must exercise `{table}`");
+        }
+        let edges = &want.iter().find(|(t, _)| *t == "edges").unwrap().1;
+        assert!(
+            edges.iter().any(|e| e.starts_with(
+                "Text(\"src/ship.rs#ship#function\") | Text(\"src/push.rs#push#function\") | Text(\"calls\") | Text(\"exact\")"
+            )),
+            "the aliased `use` must give an Exact edge in the reference ({edges:#?})"
+        );
+        assert!(
+            edges.iter().any(|e| e.starts_with(
+                "Text(\"web/a.ts#setup#function\") | Text(\"web/b.ts#helper#function\") | Text(\"references\")"
+            )),
+            "`schema.plugin(helper)` must give a references edge in the reference ({edges:#?})"
+        );
+
+        let all: Vec<(&str, bool)> = EQUIVALENCE_TREE
+            .iter()
+            .map(|(rel, _)| (*rel, false))
+            .collect();
+
+        // One batch holding every file, on top of an empty graph.
+        let batch = tmpdir("equiv-batch");
+        let batch_db = batch.join(".pixel").join("graph.db");
+        build_graph(&batch, &batch_db).unwrap();
+        write_tree(&batch, EQUIVALENCE_TREE);
+        update_files(&batch, &batch_db, &all).unwrap();
+        assert_same_graph("one batch", &graph_rows(&batch_db), &want);
+
+        // One file at a time, each importer before what it imports, so
+        // every import dangles first and is re-resolved when its file lands.
+        let single = tmpdir("equiv-single");
+        let single_db = single.join(".pixel").join("graph.db");
+        build_graph(&single, &single_db).unwrap();
+        write_tree(&single, EQUIVALENCE_TREE);
+        for (rel, _) in EQUIVALENCE_TREE.iter().rev() {
+            update_file(&single, &single_db, rel).unwrap();
+        }
+        assert_same_graph("one file at a time", &graph_rows(&single_db), &want);
+
+        // An edit of a call target and of an imported file, then the revert:
+        // their incoming edges are demoted and must come back as they were.
+        let edited = tmpdir("equiv-edit");
+        write_tree(&edited, EQUIVALENCE_TREE);
+        let edited_db = edited.join(".pixel").join("graph.db");
+        build_graph(&edited, &edited_db).unwrap();
+        write_tree(
+            &edited,
+            &[
+                ("src/push.rs", "pub fn pull() {}\n"),
+                ("web/b.ts", "export function other() { return 2 }\n"),
+            ],
+        );
+        update_files(
+            &edited,
+            &edited_db,
+            &[("src/push.rs", false), ("web/b.ts", false)],
+        )
+        .unwrap();
+        write_tree(&edited, EQUIVALENCE_TREE);
+        update_file(&edited, &edited_db, "src/push.rs").unwrap();
+        update_file(&edited, &edited_db, "web/b.ts").unwrap();
+        assert_same_graph("edit then revert", &graph_rows(&edited_db), &want);
+
+        for dir in [reference, batch, single, edited] {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
