@@ -94,9 +94,9 @@ pub(crate) fn route(
         .map_err(error)?
         .iter()
         .any(|event| event.id == attempt_id);
+    // Policy always includes Investigate and Recover, so there are at least two routes.
     let prediction = if enabled
         && !attempted
-        && labels.len() > 1
         && crate::classify_setup::local_permitted(engine.as_deref())
         && crate::classify_setup::server_reachable_within(&base, Duration::from_millis(15))
     {

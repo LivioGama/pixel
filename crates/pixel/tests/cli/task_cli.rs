@@ -155,6 +155,31 @@ fn task_should_verify_and_finish_an_unborn_repository() {
 }
 
 #[test]
+fn review_should_reject_staged_and_unstaged_whitespace_errors_independently() {
+    for staged in [false, true] {
+        let root = repo(if staged {
+            "staged-whitespace"
+        } else {
+            "unstaged-whitespace"
+        });
+        git(&root, &["config", "core.whitespace", "blank-at-eol"]);
+        std::fs::write(root.join("source.txt"), "correct \n").unwrap();
+        if staged {
+            git(&root, &["add", "source.txt"]);
+        }
+        let id = begin(&root);
+        good(&root, &["task", "prepare", &id, "--json"]);
+        let reviewed = good(&root, &["task", "review", &id, "--json"]);
+        assert_eq!(reviewed["review"]["passed"], false, "staged={staged}");
+        assert_eq!(
+            reviewed["review"]["findings"],
+            json!(["git diff --check failed"]),
+            "staged={staged}"
+        );
+    }
+}
+
+#[test]
 fn read_only_prompts_should_stay_free_and_mutation_fallback_should_retain_the_objective() {
     let root = repo("intent");
     for (session, prompt) in [
