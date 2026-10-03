@@ -156,6 +156,7 @@ flowchart TD
 - Red is the LLM — reasoning, meaning, edits
 - Orange is `pixel classify` — a model system one like Jev
 - Green is Pixel-CLI — deterministic
+- Yellow is `stop` — never commit unprompted
 
 ## More
 
