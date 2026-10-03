@@ -179,6 +179,10 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
         "---\nname: pixel\ndescription: >-\n  Deterministic code retrieval: indexed search, concept resolve, impact\n  analysis, caller/callee tracing, task targets, plan generation, and git\n  history archaeology via the `pixel` CLI.\n---\n\n{AGENT_PROMPT_ASSET}"
     );
     let guard_cmd = format!("'{}' run-hook guard --provider antigravity", exe.display());
+    let metrics_cmd = format!(
+        "'{}' run-hook metrics --provider antigravity",
+        exe.display()
+    );
     let plugin_hooks = json!({
         "pixel-guard": {
             "enabled": true,
@@ -198,6 +202,13 @@ pub fn deploy_plugin_assets(home: &Path, exe: &Path, dry_run: bool) -> Result<In
                 {
                     "type": "command",
                     "command": guard_cmd,
+                    "timeout": 10
+                }
+            ],
+            "PostToolUse": [
+                {
+                    "type": "command",
+                    "command": metrics_cmd,
                     "timeout": 10
                 }
             ]
@@ -280,6 +291,10 @@ pub fn enable_plugin_in_config(home: &Path, dry_run: bool) -> Result<InstallStep
 pub fn install_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<InstallStep> {
     let h_path = hooks_path(home);
     let guard_cmd = format!("'{}' run-hook guard --provider antigravity", exe.display());
+    let metrics_cmd = format!(
+        "'{}' run-hook metrics --provider antigravity",
+        exe.display()
+    );
 
     if dry_run {
         return Ok(InstallStep {
@@ -318,6 +333,13 @@ pub fn install_global_hooks(home: &Path, exe: &Path, dry_run: bool) -> Result<In
             {
                 "type": "command",
                 "command": guard_cmd,
+                "timeout": 10
+            }
+        ],
+        "PostToolUse": [
+            {
+                "type": "command",
+                "command": metrics_cmd,
                 "timeout": 10
             }
         ]
@@ -642,6 +664,10 @@ mod tests {
             assert_eq!(
                 installed["pixel-guard"]["PreInvocation"],
                 json!([{"type": "command", "command": expected_command, "timeout": 10}])
+            );
+            assert_eq!(
+                installed["pixel-guard"]["PostToolUse"],
+                json!([{"type": "command", "command": "'/usr/local/bin/pixel' run-hook metrics --provider antigravity", "timeout": 10}])
             );
             for defect in ["missing", "wrong-command", "wrong-type", "disabled"] {
                 let mut broken = installed.clone();
