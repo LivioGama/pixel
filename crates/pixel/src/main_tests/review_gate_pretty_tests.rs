@@ -58,7 +58,7 @@ fn caps_are_listed_after_the_findings() {
     let out = pretty_review_gate(&r).unwrap();
     assert_eq!(
         out,
-        "clean — 0 findings (feat/x @ abc1234)\n\
+        "incomplete — 0 findings (feat/x @ abc1234)\n\
          cap: findings truncated at 64; lower-severity tail not listed\n"
     );
 }
