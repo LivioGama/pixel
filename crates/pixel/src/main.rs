@@ -2611,6 +2611,67 @@ fn symbol_line(s: &Value) -> String {
     )
 }
 
+/// Findings list for `review-gate`: severity, anchor, rule, witness, fix —
+/// the code review's problems and where they are, nothing else.
+fn pretty_review_gate(d: &Value) -> Option<String> {
+    let findings = d.get("findings")?.as_array()?;
+    let snapshot = d.get("snapshot");
+    let anchor = snapshot
+        .map(|s| {
+            format!(
+                "{} @ {}",
+                s.get("branch").and_then(Value::as_str).unwrap_or("?"),
+                s.get("head")
+                    .and_then(Value::as_str)
+                    .map_or("?", |h| &h[..h.len().min(7)]),
+            )
+        })
+        .unwrap_or_default();
+    let mut output = String::new();
+    if findings.is_empty() {
+        output.push_str(&format!("clean — 0 findings ({anchor})\n"));
+    } else {
+        for f in findings {
+            let file = f.get("file").and_then(Value::as_str);
+            let line = f.get("line").and_then(Value::as_u64);
+            let at = match (file, line) {
+                (Some(file), Some(line)) => format!("{file}:{line}"),
+                (Some(file), None) => file.to_string(),
+                _ => "repo-wide".to_string(),
+            };
+            let severity = match f.get("severity").and_then(Value::as_str).unwrap_or("?") {
+                "CRITICAL" => "BLOCKER",
+                "HIGH" => "CONCERN",
+                "MEDIUM" => "SUGGESTION",
+                "LOW" => "NIT",
+                other => other,
+            };
+            output.push_str(&format!(
+                "{:<10} {}  {}\n",
+                severity,
+                at,
+                f.get("rule").and_then(Value::as_str).unwrap_or("?"),
+            ));
+            let evidence = f.get("evidence").and_then(Value::as_str).unwrap_or("");
+            if !evidence.is_empty() {
+                output.push_str(&format!("          {evidence}\n"));
+            }
+            let hint = f.get("fix_hint").and_then(Value::as_str).unwrap_or("");
+            if !hint.is_empty() {
+                output.push_str(&format!("          fix: {hint}\n"));
+            }
+            output.push('\n');
+        }
+        output.push_str(&format!("{} finding(s) ({anchor})\n", findings.len()));
+    }
+    if let Some(caps) = d.get("caps").and_then(Value::as_array) {
+        for cap in caps {
+            output.push_str(&format!("cap: {}\n", cap.as_str().unwrap_or("?")));
+        }
+    }
+    Some(output)
+}
+
 /// Tiered pretty rendering for `targets`.
 fn pretty_targets(d: &Value) -> Option<String> {
     let targets = d.get("targets")?.as_array()?;
@@ -5534,7 +5595,7 @@ fn run_command(
         }
         Command::ReviewGate { path, base, json } => {
             let data = execute(&path, Request::ReviewGate { base }, false)?;
-            finish_graph_cmd(data, json, |_| None)?;
+            finish_graph_cmd(data, json, pretty_review_gate)?;
             Ok(())
         }
         Command::RebuildGraph { path, json } => {
@@ -9037,3 +9098,7 @@ mod classify_setup_prompt_tests;
 #[cfg(test)]
 #[path = "main_tests/commit_message_tests.rs"]
 mod commit_message_tests;
+
+#[cfg(test)]
+#[path = "main_tests/review_gate_pretty_tests.rs"]
+mod review_gate_pretty_tests;

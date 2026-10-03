@@ -98,9 +98,34 @@ pub struct ReviewFinding {
 pub struct ReviewReport {
     /// Findings, CRITICAL first, then by file/line/rule.
     pub findings: Vec<ReviewFinding>,
+    /// The ref the diff ran against: `None` means the working tree's
+    /// uncommitted diff against the index/HEAD; `Some(oid)` on a clean
+    /// feature branch is the merge-base with the remote default branch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
     /// Named caps the pass fired; the daemon mirrors them into
     /// `epistemics.lower_bound` and a `RESULT_CAPPED` envelope warning.
     pub caps: Vec<String>,
+}
+
+/// A clean tree on a non-default branch means "review the branch": the
+/// merge-base of HEAD with the remote default (`origin/HEAD`, falling back
+/// to `origin/main`). `None` on the default branch itself, in detached
+/// HEAD, or when no remote default resolves.
+fn branch_merge_base(runner: &GitRunner) -> Option<String> {
+    let branch = runner.current_branch()?;
+    let remote_default = runner
+        .run_opt(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "origin/main".to_string());
+    if branch == remote_default || Some(branch.as_str()) == remote_default.strip_prefix("origin/") {
+        return None;
+    }
+    runner
+        .run_opt(&["merge-base", "HEAD", &remote_default])
+        .map(|o| String::from_utf8_lossy(&o).trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Run the deterministic review of the working tree against `base_ref`
@@ -113,11 +138,23 @@ pub fn review(
     base_ref: Option<&str>,
 ) -> Result<ReviewReport, BoxError> {
     let runner = GitRunner::new(root);
-    let diff_bytes = runner.diff_unified0(base_ref).unwrap_or_default();
+    // No explicit base: a dirty tree reviews the uncommitted diff; a clean
+    // tree on a feature branch reviews the whole branch diff.
+    let mut base = base_ref.map(str::to_string);
+    let mut diff_bytes = runner.diff_unified0(base.as_deref()).unwrap_or_default();
+    if base_ref.is_none() && diff_bytes.is_empty() {
+        if let Some(merge_base) = branch_merge_base(&runner) {
+            let branch_diff = runner.diff_unified0(Some(&merge_base)).unwrap_or_default();
+            if !branch_diff.is_empty() {
+                base = Some(merge_base);
+                diff_bytes = branch_diff;
+            }
+        }
+    }
     let diff = String::from_utf8_lossy(&diff_bytes).into_owned();
     let file_diffs = parse_diff(&diff);
     let changed_paths: BTreeSet<String> = file_diffs.iter().map(|fd| fd.path.clone()).collect();
-    let report = crate::changes::detect(store, root, base_ref, true)?;
+    let report = crate::changes::detect(store, root, base.as_deref(), true)?;
 
     let mut findings = Vec::new();
     let mut caps = Vec::new();
@@ -155,7 +192,11 @@ pub fn review(
         findings.truncate(MAX_FINDINGS);
     }
 
-    Ok(ReviewReport { findings, caps })
+    Ok(ReviewReport {
+        findings,
+        base,
+        caps,
+    })
 }
 
 /// Findings that are the `detect` report re-stated as a review vocabulary,
