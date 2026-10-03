@@ -867,4 +867,71 @@ mod tests {
                 .starts_with("session-")
         );
     }
+
+    #[test]
+    fn record_host_should_keep_tool_names_and_finalize_coverage() {
+        let root = Scratch::new();
+        let store = Store::open(&root.0).unwrap();
+        let contract = serde_json::from_value(json!({
+            "version":1,"objective":"fix source","checks":[],"criteria":[]
+        }))
+        .unwrap();
+        let task = store.begin(contract, "pi", Some("s"), "begin").unwrap();
+
+        for (name, expected) in [("Bash", "Bash"), ("", "unknown")] {
+            record_host(
+                &store,
+                &task,
+                "pre-tool-use",
+                &json!({"tool_use_id":format!("call-{expected}"),"tool_name":name}),
+                &format!("requested-{expected}"),
+            )
+            .unwrap();
+        }
+        for event in ["stop", "session-end", "subagent-stop"] {
+            record_host(
+                &store,
+                &task,
+                event,
+                &json!({"child_spans":["child-1"]}),
+                event,
+            )
+            .unwrap();
+        }
+
+        let events = store.events(&task.task_id).unwrap();
+        let telemetry: Vec<TelemetryEvent> = telemetry(&events).unwrap();
+        let mut tools: Vec<&str> = telemetry
+            .iter()
+            .filter_map(|event| match &event.observation {
+                Observation::ToolRequested { tool, .. } => Some(tool.as_str()),
+                _ => None,
+            })
+            .collect();
+        tools.sort_unstable();
+        assert_eq!(tools, ["Bash", "unknown"]);
+
+        let coverage: Vec<&TelemetryEvent> = telemetry
+            .iter()
+            .filter(|event| matches!(event.observation, Observation::Coverage { .. }))
+            .collect();
+        assert_eq!(coverage.len(), 3);
+        for event in coverage {
+            let Observation::Coverage {
+                complete,
+                child_spans,
+                missing,
+            } = &event.observation
+            else {
+                unreachable!()
+            };
+            assert!(!complete);
+            assert_eq!(child_spans, &["child-1".to_string()]);
+            assert_eq!(
+                missing,
+                &["native hooks do not establish full model and child request coverage"
+                    .to_string()]
+            );
+        }
+    }
 }
