@@ -24,11 +24,10 @@ concurrency:
 
 jobs:
   sync:
-    # The metadata-only a2 runner: this job never checks out the PR's code
-    # (one gh api call against the project), so pull_request_target on a
-    # self-hosted runner stays safe, and a lifecycle event costs no
-    # Blacksmith minutes.
-    runs-on: a2
+    # A standard GitHub-hosted runner: this job never checks out the PR's
+    # code (one gh api call against the project), so pull_request_target
+    # stays safe, and there is no self-hosted runner to keep healthy.
+    runs-on: ubuntu-latest
     steps:
       - name: Sync project 3 status with the PR lifecycle
         env:
