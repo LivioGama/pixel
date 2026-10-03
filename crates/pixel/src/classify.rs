@@ -455,16 +455,29 @@ pub enum EngineChoice {
     Ollaya,
 }
 
-/// Parse `--criterion label=description` pairs.
-fn parse_criteria(pairs: &[String]) -> Result<BTreeMap<String, String>, String> {
+/// Parse `--criterion label=description` pairs, keeping the strict contract
+/// but naming the declared labels and a valid invocation in the error so the
+/// fix is one copy-paste away.
+fn parse_criteria(pairs: &[String], labels: &[String]) -> Result<BTreeMap<String, String>, String> {
     pairs
         .iter()
         .map(|p| {
             p.split_once('=')
                 .map(|(k, v)| (k.to_string(), v.to_string()))
-                .ok_or_else(|| format!("--criterion needs label=description, got {p:?}"))
+                .ok_or_else(|| criterion_error(p, labels))
         })
         .collect()
+}
+
+fn criterion_error(got: &str, labels: &[String]) -> String {
+    let example = labels.first().map_or_else(
+        || r#"--criterion <label>="<description>""#.to_string(),
+        |l| format!(r#"--criterion {l}="one bounded edit""#),
+    );
+    format!(
+        "--criterion needs <label>=<description>, got {got:?}; declared labels: {}; example: {example}",
+        labels.join(", ")
+    )
 }
 
 /// The `Spec` a one-shot invocation asks for. Separate from `run` so the
@@ -483,7 +496,7 @@ fn one_shot_spec(opts: &ClassifyOptions) -> Result<Spec, String> {
         text.to_string(),
         opts.context.clone().unwrap_or_default(),
         opts.labels.clone(),
-        parse_criteria(&opts.criteria)?,
+        parse_criteria(&opts.criteria, &opts.labels)?,
     )
 }
 
@@ -1263,10 +1276,23 @@ mod tests {
         assert!(ollaya.decide_battery("state").is_err());
     }
 
+    /// A criterion missing its `label=` prefix is rejected with the declared
+    /// labels and a complete valid invocation; a well-formed pair parses and
+    /// keeps everything after the first `=` in the description.
     #[test]
     fn parse_criteria_requires_key_value_pairs() {
-        assert!(parse_criteria(&["a=desc".to_string()]).is_ok());
-        assert!(parse_criteria(&["missing-eq".to_string()]).is_err());
+        let labels = |v: &[&str]| v.iter().map(ToString::to_string).collect::<Vec<_>>();
+        assert!(parse_criteria(&["a=desc".to_string()], &labels(&["a"])).is_ok());
+        let ok = parse_criteria(&["a=one bounded = edit".to_string()], &labels(&["a"])).unwrap();
+        assert_eq!(ok["a"], "one bounded = edit");
+        let err =
+            parse_criteria(&["missing-eq".to_string()], &labels(&["trivial", "deep"])).unwrap_err();
+        assert_eq!(
+            err,
+            "--criterion needs <label>=<description>, got \"missing-eq\"; \
+             declared labels: trivial, deep; \
+             example: --criterion trivial=\"one bounded edit\""
+        );
     }
 
     #[test]
@@ -1315,7 +1341,8 @@ mod tests {
         let e = one_shot_spec(&opts(Some("t"), &["a"], &[])).unwrap_err();
         assert!(e.contains("at least two labels"), "{e}");
         let e = one_shot_spec(&opts(Some("t"), &["a", "b"], &["no-equals"])).unwrap_err();
-        assert!(e.contains("label=description"), "{e}");
+        assert!(e.contains("needs <label>=<description>"), "{e}");
+        assert!(e.contains("declared labels: a, b"), "{e}");
 
         let s = one_shot_spec(&opts(Some("t"), &["a", "b"], &["a=desc"])).unwrap();
         assert_eq!(s.text, "t");
