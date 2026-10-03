@@ -72,7 +72,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-26.04
           - target: aarch64-apple-darwin
-            os: blacksmith-6vcpu-macos-latest
+            os: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -280,7 +280,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-26.04-arm
           - target: aarch64-apple-darwin
-            os: blacksmith-6vcpu-macos-latest
+            os: macos-latest
     env:
       GH_TOKEN: ${{ github.token }}
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
