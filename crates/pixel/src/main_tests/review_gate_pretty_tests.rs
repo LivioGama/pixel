@@ -74,13 +74,25 @@ fn fail_on_thresholds_rank_blocker_above_all() {
     assert!(ReviewFailOn::Suggestion.threshold() > ReviewFailOn::Nit.threshold());
 }
 
+/// `--fail-on` compares its threshold with the rank `pixel_graph::review`
+/// gives a finding's severity: each level must name the same severity the
+/// render prints for it, or `--fail-on concern` would block on a SUGGESTION.
 #[test]
-fn review_severity_rank_orders_critical_first() {
-    assert_eq!(review_severity_rank("CRITICAL"), 4);
-    assert_eq!(review_severity_rank("HIGH"), 3);
-    assert_eq!(review_severity_rank("MEDIUM"), 2);
-    assert_eq!(review_severity_rank("LOW"), 1);
-    assert_eq!(review_severity_rank("anything-else"), 1);
+fn each_fail_on_level_matches_the_severity_it_prints_as() {
+    for (level, severity) in [
+        (ReviewFailOn::Blocker, "CRITICAL"),
+        (ReviewFailOn::Concern, "HIGH"),
+        (ReviewFailOn::Suggestion, "MEDIUM"),
+        (ReviewFailOn::Nit, "LOW"),
+    ] {
+        assert_eq!(
+            level.threshold(),
+            pixel_graph::review::severity_rank(severity),
+            "{severity} ({})",
+            pixel_graph::review::severity_label(severity)
+        );
+    }
+    assert_eq!(pixel_graph::review::severity_rank("anything-else"), 1);
 }
 
 /// A finding anchored to a file but no line prints the path bare — deleting
