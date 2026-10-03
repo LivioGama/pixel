@@ -117,9 +117,19 @@ jobs:
   # only costs a minute.
   changes:
     outputs:
-      cargo: ${{ steps.diff.outputs.cargo }}
-      scripts: ${{ steps.diff.outputs.scripts }}
-      deps: ${{ steps.diff.outputs.deps }}
+      # On a duplicate (below) every flag is forced false: an identical tree
+      # cannot classify differently, so every lane skips. The long form
+      # instead of `cond && a || b` because the string 'false' is truthy in
+      # GitHub expressions -- the short form would pass 'false' through as
+      # truthy and defeat the override.
+      cargo: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.cargo || 'false' }}
+      scripts: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.scripts || 'false' }}
+      deps: ${{ steps.dup.outputs.duplicate != 'true' && steps.diff.outputs.deps || 'false' }}
+      # The skip guard's finding for this tree, and the key it is stored
+      # under (the `verdict` job saves it; #590).
+      duplicate: ${{ steps.dup.outputs.duplicate }}
+      tree: ${{ steps.key.outputs.tree }}
+      day: ${{ steps.key.outputs.day }}
     runs-on: ubuntu-26.04
     steps:
       # Full history so the merge base with the target branch is available.
@@ -127,6 +137,53 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+
+      # The skip-guard key: the tree of the commit this run checks out (the
+      # merge commit on a pull request, the pushed commit on main). Two runs
+      # of one tree run byte-identical jobs -- the workflow file, the
+      # toolchain config and the tests are all in the tree -- so a green
+      # verdict for one is a green verdict for the other. The UTC day in the
+      # key bounds the reuse: the stable toolchain floats, and a verdict
+      # from another day re-proves itself on today's (#590).
+      - name: Merge-commit tree and UTC day
+        id: key
+        run: |
+          echo "tree=$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
+          echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      # A completed green run left a marker under ci-verdict-<tree>-<day>
+      # (the verdict job below). A repush with no content change -- an
+      # amend, a rebase that moved no file, a close/reopen -- restores it
+      # and skips every lane instead of re-running them. The Actions cache
+      # makes the key a fact: an entry exists only if a green run of this
+      # exact tree wrote it, and an entry is immutable. A repush while a
+      # run is still in flight finds no verdict (none was recorded yet) and
+      # re-runs: the guard skips what is already judged, it does not
+      # resurrect a cancelled run.
+      - name: Restore a green verdict for this exact tree
+        id: verdict
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/verdict
+          key: ci-verdict-${{ steps.key.outputs.tree }}-${{ steps.key.outputs.day }}
+
+      - name: Skip when the tree already has a green verdict
+        id: dup
+        if: steps.verdict.outputs.cache-hit == 'true'
+        run: |
+          if [ ! -f "$RUNNER_TEMP/verdict/green" ]; then
+            echo "the restored cache holds no marker; running"
+            exit 0
+          fi
+          echo "duplicate=true" >> "$GITHUB_OUTPUT"
+          run_url=$(cat "$RUNNER_TEMP/verdict/green")
+          echo "verdict_run=$run_url" >> "$GITHUB_OUTPUT"
+          {
+            echo "### CI skipped: this merge tree already has a green verdict"
+            echo
+            echo "Recorded by $run_url (same UTC day). Nothing re-ran; the next content change re-runs everything."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Classify the diff
         id: diff
@@ -202,7 +259,7 @@ jobs:
   linux-install:
     name: install.sh (${{ matrix.target }})
     needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.scripts == 'true'
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.scripts == 'true' && needs.changes.outputs.duplicate != 'true'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -234,7 +291,7 @@ jobs:
   test:
     name: Test + Format
     needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true'
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.duplicate != 'true'
     # GitHub's image by default. PIXEL_RUNNER_LABELS moves the jobs that compile
     # Rust to a self-hosted runner without a second edit: set it to a JSON array of
     # labels, e.g. ["self-hosted","linux","arm64","pixel-local"], and a push or a
@@ -426,7 +483,7 @@ jobs:
   lint:
     name: Lint (Clippy + feature lanes)
     needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true'
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true' && needs.changes.outputs.duplicate != 'true'
     runs-on: ubuntu-26.04
     steps:
       - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
@@ -470,7 +527,7 @@ jobs:
   msrv:
     name: MSRV (rust-version in Cargo.toml)
     needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true'
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true' && needs.changes.outputs.duplicate != 'true'
     # Compiles Rust, so it follows the test job's self-hosted switch (pull
     # requests stay on GitHub's image, as there).
     runs-on: ${{ github.event_name != 'pull_request' && vars.PIXEL_RUNNER_LABELS && fromJSON(vars.PIXEL_RUNNER_LABELS) || 'ubuntu-26.04' }}
@@ -529,7 +586,7 @@ jobs:
   ranking:
     name: Ranking gates (NDCG@10)
     needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true'
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true' && needs.changes.outputs.duplicate != 'true'
     # Compiles Rust, so it follows the test job's self-hosted switch (pull
     # requests stay on GitHub's image, as there).
     runs-on: ${{ github.event_name != 'pull_request' && vars.PIXEL_RUNNER_LABELS && fromJSON(vars.PIXEL_RUNNER_LABELS) || 'ubuntu-26.04' }}
@@ -578,7 +635,7 @@ jobs:
   deny:
     name: Dependency policy (cargo-deny)
     needs: [scope, changes]
-    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.deps == 'true'
+    if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.deps == 'true' && needs.changes.outputs.duplicate != 'true'
     runs-on: ubuntu-26.04
     steps:
       - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
@@ -606,3 +663,34 @@ jobs:
       # advisory database is fetched by cargo-deny itself.
       - name: cargo deny check
         run: cargo deny check
+
+  # The green verdict the changes job's skip guard reads (#590): every lane
+  # above ran green on this exact tree, so the tree is recorded in the cache
+  # under ci-verdict-<tree>-<day> and an identical repush skips instead of
+  # re-running. Needs every lane so a failure or a cancellation records
+  # nothing; always() with !failure() && !cancelled() lets the lanes a
+  # diff legitimately skips stay skipped while the ones that ran were green.
+  # Pushes to main record too: their caches are readable by every pull
+  # request, and a pull request whose merge tree equals a merged tree is the
+  # same content the push run judged.
+  verdict:
+    name: Record the green verdict
+    needs: [scope, changes, linux-install, test, lint, msrv, ranking, deny]
+    if: >-
+      always() &&
+      needs.scope.outputs.release-prepare != 'true' &&
+      needs.changes.outputs.duplicate != 'true' &&
+      needs.test.result == 'success' &&
+      !failure() && !cancelled()
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Write the marker
+        run: |
+          mkdir -p "$RUNNER_TEMP/verdict"
+          printf '%s\n' "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > "$RUNNER_TEMP/verdict/green"
+
+      - name: Save the verdict under the tree-and-day key
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/verdict
+          key: ci-verdict-${{ needs.changes.outputs.tree }}-${{ needs.changes.outputs.day }}
