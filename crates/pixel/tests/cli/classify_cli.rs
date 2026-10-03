@@ -66,7 +66,9 @@ fn classify_rejects_bad_criterion_after_outer_dispatch_without_opening_model() {
     assert!(!out.status.success());
     assert_eq!(
         String::from_utf8_lossy(&out.stderr).trim(),
-        "pixel: --criterion needs label=description, got \"missing-equals\""
+        "pixel: --criterion needs <label>=<description>, got \"missing-equals\"; \
+         declared labels: yes, no; \
+         example: --criterion \"yes=one bounded edit\""
     );
 }
 
