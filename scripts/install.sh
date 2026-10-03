@@ -127,11 +127,33 @@ if [ ! -f "$BINARY" ]; then
     # Fallback: some archives may not have the version-prefixed dir
     BINARY="${TMPDIR}/bin/pixel"
 fi
+if [ ! -f "$BINARY" ]; then
+    echo "Archive ${ARCHIVE} has no bin/pixel." >&2
+    exit 1
+fi
 DEST="${INSTALL_DIR}/pixel"
 TMP_DEST="${INSTALL_DIR}/.pixel.tmp.$$"
 cp "$BINARY" "$TMP_DEST"
 chmod +x "$TMP_DEST"
+
+# Prove the file we are about to put on PATH actually starts. stdin is not a
+# terminal, and the update check is off, so this cannot prompt to upgrade.
+# A failure leaves the previous install in place.
+echo "Checking that the binary runs..."
+if PIXEL_NO_UPDATE_CHECK=1 "$TMP_DEST" --version </dev/null; then
+    :
+else
+    rm -f "$TMP_DEST"
+    echo "The downloaded binary did not run." >&2
+    exit 1
+fi
 mv -f "$TMP_DEST" "$DEST"
+
+# GitHub Actions reads GITHUB_PATH after the step. Appending here makes the
+# one-liner enough: later steps see pixel without a second command.
+if [ -n "${GITHUB_PATH:-}" ]; then
+    echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+fi
 
 echo "Installed pixel to ${INSTALL_DIR}/pixel"
 echo "Add ${INSTALL_DIR} to your PATH if it's not already there."

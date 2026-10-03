@@ -13,7 +13,15 @@ Pixel is a single binary for macOS and Linux. The install script is one line:
 curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
 ```
 
-It runs [`scripts/install.sh`](https://github.com/Pixel-CLI/pixel/blob/main/scripts/install.sh), which every release publishes as an asset: one POSIX `sh` file, no `sudo`. It downloads the latest release for your platform, refuses the archive unless its SHA-256 matches the release's checksum, and writes a single file into `$PIXEL_INSTALL_DIR` (default `~/.local/bin`). It edits no shell profile. To read it before it runs:
+It runs [`scripts/install.sh`](https://github.com/Pixel-CLI/pixel/blob/main/scripts/install.sh), which every release publishes as an asset: one POSIX `sh` file, no `sudo`. It picks the archive for the machine it is running on, refuses that archive unless its SHA-256 matches the release's checksum, runs the binary once, and writes a single file into `$PIXEL_INSTALL_DIR` (default `~/.local/bin`). It edits no shell profile.
+
+| Machine | Archive the script downloads |
+| --- | --- |
+| Linux x86_64 (`ubuntu-latest`) | `pixel-<tag>-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64 | `pixel-<tag>-aarch64-unknown-linux-musl.tar.gz` |
+| Apple Silicon | `pixel-<tag>-aarch64-apple-darwin.tar.gz` |
+
+To read it before it runs:
 
 ```bash
 curl -fsSL -o install.sh https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh
@@ -21,68 +29,18 @@ less install.sh    # every line it will run
 sh install.sh
 ```
 
-### Linux binary
-
-The same release publishes the static archives the script downloads. Use them when the host should not pipe a script into a shell. Each archive is `pixel-<tag>-<target>.tar.gz` with a `.sha256` beside it.
-
-| Machine | Target |
-| --- | --- |
-| Linux x86_64 | `x86_64-unknown-linux-musl` |
-| Linux arm64 | `aarch64-unknown-linux-musl` |
-| Apple Silicon | `aarch64-apple-darwin` |
-
-```bash
-tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/Pixel-CLI/pixel/releases/latest)
-tag=${tag##*/}
-case "$(uname -s)-$(uname -m)" in
-  Linux-x86_64|Linux-amd64) target=x86_64-unknown-linux-musl ;;
-  Linux-aarch64|Linux-arm64) target=aarch64-unknown-linux-musl ;;
-  Darwin-arm64|Darwin-aarch64) target=aarch64-apple-darwin ;;
-  *) echo "No prebuilt binary for $(uname -s) $(uname -m)" >&2; exit 1 ;;
-esac
-archive="pixel-${tag}-${target}.tar.gz"
-curl -fsSL -o "$archive" "https://github.com/Pixel-CLI/pixel/releases/download/${tag}/${archive}"
-curl -fsSL -o "$archive.sha256" "https://github.com/Pixel-CLI/pixel/releases/download/${tag}/${archive}.sha256"
-if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "$archive.sha256"; else shasum -a 256 -c "$archive.sha256"; fi
-tar xzf "$archive"
-mkdir -p "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}"
-mv "pixel-${tag}-${target}/bin/pixel" "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}/pixel"
-chmod +x "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}/pixel"
-```
-
 ### GitHub Actions
 
-On a runner, the script is the same one-liner. Add `~/.local/bin` to `GITHUB_PATH` so later steps see `pixel`.
+The same script. The second line puts `~/.local/bin` on `PATH` for the later steps of the job. The script also appends its install directory when `GITHUB_PATH` is set, which is what covers a custom `PIXEL_INSTALL_DIR`.
 
 ```yaml
 - name: Install Pixel
   run: |
     curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
-    echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+    echo "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}" >> "$GITHUB_PATH"
 ```
 
-The classic Linux binary, with no script. `ubuntu-latest` is x86_64; an arm64 runner selects `aarch64-unknown-linux-musl`:
-
-```yaml
-- name: Install the Pixel Linux binary
-  run: |
-    tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/Pixel-CLI/pixel/releases/latest)
-    tag=${tag##*/}
-    case "$(uname -m)" in
-      aarch64|arm64) target=aarch64-unknown-linux-musl ;;
-      *) target=x86_64-unknown-linux-musl ;;
-    esac
-    archive="pixel-${tag}-${target}.tar.gz"
-    curl -fsSL -o "$archive" "https://github.com/Pixel-CLI/pixel/releases/download/${tag}/${archive}"
-    curl -fsSL -o "$archive.sha256" "https://github.com/Pixel-CLI/pixel/releases/download/${tag}/${archive}.sha256"
-    sha256sum -c "$archive.sha256"
-    tar xzf "$archive"
-    mkdir -p "$HOME/.local/bin"
-    mv "pixel-${tag}-${target}/bin/pixel" "$HOME/.local/bin/pixel"
-    echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-```
-
-An install that already came from Homebrew still updates with `brew update && brew upgrade LivioGama/tap/pixel`. New installs use the script or the archive above.
+An install that already came from Homebrew still updates with `brew update && brew upgrade LivioGama/tap/pixel`. New installs use the script.
 
 To build from source, see [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/CONTRIBUTING.md).
 

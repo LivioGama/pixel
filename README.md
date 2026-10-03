@@ -88,15 +88,13 @@ pixel doctor .     # optional health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
-The one-liner runs [`scripts/install.sh`](scripts/install.sh), which every release publishes as an asset: one POSIX `sh` file, no `sudo`. It downloads the release archive for your platform (macOS on Apple Silicon, Linux x86_64 or arm64), refuses it unless its SHA-256 matches the release's checksum, and writes a single file, `~/.local/bin/pixel` (`PIXEL_INSTALL_DIR` moves it). It edits no shell profile; if that directory is not on your `PATH`, it says so. To read it before it runs:
+The one-liner runs [`scripts/install.sh`](scripts/install.sh), which every release publishes as an asset: one POSIX `sh` file, no `sudo`. It downloads the release archive for the machine it is running on (macOS on Apple Silicon, Linux x86_64 or arm64), refuses it unless its SHA-256 matches the release's checksum, runs the binary once, and writes a single file, `~/.local/bin/pixel` (`PIXEL_INSTALL_DIR` moves it). When `GITHUB_PATH` is set it appends that directory. It edits no shell profile; if that directory is not on your `PATH`, it says so. To read it before it runs:
 
 ```bash
 curl -fsSL -o install.sh https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh
 less install.sh    # every line it will run
 sh install.sh
 ```
-
-The release also publishes those archives on their own (`pixel-<tag>-x86_64-unknown-linux-musl.tar.gz`, `pixel-<tag>-aarch64-unknown-linux-musl.tar.gz`, and `pixel-<tag>-aarch64-apple-darwin.tar.gz`), each with a `.sha256`. A GitHub Actions job, or any host that should not pipe a script, downloads the archive, checks the checksum, and moves `bin/pixel` to `~/.local/bin`. The commands are in the [docs](https://pixel-cli.dev/docs/#linux-binary).
 
 An install that already came from Homebrew still updates with `brew update && brew upgrade LivioGama/tap/pixel`.
 
@@ -121,7 +119,7 @@ Looking for something specific? [`llms.txt`](https://pixel-cli.dev/llms.txt) map
 If you are an LLM reading this to set Pixel up for a user, do this, in order:
 
 1. **Check first.** `command -v pixel && pixel --version`. If it prints a version, skip to step 3.
-2. **Install the binary** (macOS or Linux). Run `curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh`. It installs into `~/.local/bin` (override with `PIXEL_INSTALL_DIR`); make sure that directory is on `PATH`. On a Linux runner that must not pipe a script, download the static archive instead (`pixel-<tag>-x86_64-unknown-linux-musl.tar.gz` or `pixel-<tag>-aarch64-unknown-linux-musl.tar.gz`), check its `.sha256`, and move `bin/pixel` to `~/.local/bin`. The exact commands, including a GitHub Actions step, are in the docs under [Linux binary](https://pixel-cli.dev/docs/#linux-binary).
+2. **Install the binary** (macOS or Linux, including a GitHub Actions runner). Run `curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh`. It installs into `~/.local/bin` (override with `PIXEL_INSTALL_DIR`); make sure that directory is on `PATH`. On GitHub Actions, also run `echo "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}" >> "$GITHUB_PATH"`.
 3. **Wire the agents.** Tell the user it writes to their home configuration (`~/.local/share/pixel/`, `~/.claude/settings.json`, `~/.codex/config.toml`, `~/.pi/agent/APPEND_SYSTEM.md`), then run `pixel install`. It is idempotent: running it again only refreshes what it wrote.
 4. **Index the current repository** (optional, speeds up the first queries): `pixel prepare-repo .`
 5. **Verify:** `pixel doctor . --json`. Report every check that is not green, with its message; do not claim success otherwise.

@@ -1,1 +1,1 @@
-**install:** releases are fetched from https://github.com/Pixel-CLI/pixel. Install instructions lead with the curl script and the static Linux archives, including a GitHub Actions step, instead of Homebrew.
+**install:** releases are fetched from https://github.com/Pixel-CLI/pixel. `install.sh` is the install path for macOS and Linux, including GitHub Actions: it selects the archive, checks SHA-256, runs the binary, and appends to `GITHUB_PATH` when that variable is set.
