@@ -178,7 +178,7 @@ const uniqRead = (args: string[]): boolean => {
 const mayMutate = (tool: string, input: any): boolean => {
   if (EDIT_TOOLS.has(tool)) return true;
   if (tool === "pixel" || tool === "pixel_project") return !["scope_task", "list_areas", "search_content", "find_code", "impact", "pack_context", "what_changed", "review_changes"].includes(input?.action);
-  if (!["Bash", "bash", "shell", "local_shell", "unified_exec", "exec_command"].includes(tool)) return !["Read", "read", "Glob", "glob", "Grep", "grep", "WebSearch", "web_search", "WebFetch", "web_fetch", "AskUserQuestion"].includes(tool);
+  if (!["Bash", "bash", "shell", "local_shell", "unified_exec", "exec_command"].includes(tool)) return !["Read", "read", "Glob", "glob", "Grep", "grep", "WebSearch", "web_search", "WebFetch", "web_fetch", "AskUserQuestion", "ls", "find", "list_dir", "grep_search", "file_search", "view_file"].includes(tool);
   const command = String(input?.command ?? input?.cmd ?? "");
   const segments = splitShellSegments(command);
   if (!segments || segments.slice(1).some((segment) => !segment.piped)) return true;

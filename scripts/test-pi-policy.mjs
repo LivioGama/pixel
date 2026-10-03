@@ -554,6 +554,13 @@ switch (args[0]) {
     assert.equal(gate.continue, false);
     assert.match(gate.entries[0].content, /task state is unavailable/);
   });
+  await check("known discovery aliases remain available when task state is unavailable", async () => {
+    const h = await host("off");
+    configure({ fail: ["run-hook"] });
+    for (const toolName of ["ls", "find", "list_dir", "grep_search", "file_search", "view_file"]) {
+      assert.equal(await h.emit("tool_call", { toolName, toolCallId: `read-${toolName}`, input: { path: "src/lib.rs" } }), undefined, toolName);
+    }
+  });
   await check("write-capable read flags, config setters and unknown tools require task state", async () => {
     const h = await host("off");
     configure({ fail: ["run-hook"] });

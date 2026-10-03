@@ -691,6 +691,60 @@ mod tests {
     }
 
     #[test]
+    fn missing_session_should_block_stop_independently_of_mutation() {
+        let root = Scratch::new();
+        for (event, mutation) in [("stop", false), ("pre-tool-use", true)] {
+            assert_eq!(
+                handle_hook(&root.0, "pi", event, &json!({"mutation":mutation})).unwrap_err(),
+                "host session identity is missing; task edits and completion require a stable session"
+            );
+        }
+        assert_eq!(
+            handle_hook(&root.0, "pi", "session-start", &json!({"mutation":false})).unwrap(),
+            json!({"decision":"observe","coverage":"unavailable"})
+        );
+    }
+
+    #[test]
+    fn retained_enforcement_requires_a_host_policy_with_true_enforcement() {
+        let root = Scratch::new();
+        let store = Store::open(&root.0).unwrap();
+        let contract = serde_json::from_value(json!({
+            "version":1,"objective":"fix source","checks":[],"criteria":[]
+        }))
+        .unwrap();
+        let task = store.begin(contract, "pi", Some("s"), "begin").unwrap();
+        assert!(!task_enforced(&store, &task).unwrap());
+        observe(
+            &store,
+            &task,
+            "unrelated",
+            "diagnostic",
+            json!({"enforce":true}),
+        )
+        .unwrap();
+        assert!(!task_enforced(&store, &task).unwrap());
+        observe(
+            &store,
+            &task,
+            "disabled",
+            "host_policy",
+            json!({"enforce":false}),
+        )
+        .unwrap();
+        assert!(!task_enforced(&store, &task).unwrap());
+        observe(
+            &store,
+            &task,
+            "enabled",
+            "host_policy",
+            json!({"enforce":true}),
+        )
+        .unwrap();
+        assert!(task_enforced(&store, &task).unwrap());
+    }
+
+    #[test]
     fn prompt_context_should_bound_content_preserve_sessions_and_report_corruption() {
         let root = Scratch::new();
         assert_eq!(
