@@ -28,9 +28,11 @@ missing from structural retrieval. An unavailable index or capped impact answer
 never proves that no dependencies exist. Without conservative checks, incomplete
 preparation remains unresolved. A repository without executable checks remains
 unconfigured; the agent can draft a contract without asking for approval of
-every task. `task.enforcement: off` is an operator setting for new tasks in
-observation mode. Existing enforced tasks keep their obligations when settings
-or evaluation policy change.
+every task. The default is advisory: tasks still bind, record and surface their
+verdicts, but nothing is denied. `task.enforcement: enforce` opts the
+repository into the hard gate; `off` is a synonym for the advisory default.
+Existing enforced tasks keep their obligations when settings or evaluation
+policy change.
 
 The contract combines these requirements with the objective and acceptance
 criteria, each mapped to one or more check IDs. Unmapped criteria stay unmet.
