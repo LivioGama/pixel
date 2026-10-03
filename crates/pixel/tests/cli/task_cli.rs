@@ -277,8 +277,8 @@ fn weakening_should_require_both_terminal_streams_and_the_exact_confirmation() {
         std::fs::write(root.join(".pixel/weaker.json"), weaker.to_string()).unwrap();
         let mut master = -1;
         let mut slave = -1;
-        // SAFETY: openpty initializes two owned descriptors; optional attributes are null.
         assert_eq!(
+            // SAFETY: openpty initializes two owned descriptors; optional attributes are null.
             unsafe {
                 libc::openpty(
                     &raw mut master,

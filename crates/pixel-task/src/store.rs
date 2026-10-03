@@ -301,7 +301,7 @@ impl Store {
                 }
                 if found
                     .as_ref()
-                    .is_none_or(|old| old.updated_ms < task.updated_ms)
+                    .is_none_or(|old| task.updated_ms.cmp(&old.updated_ms).is_gt())
                 {
                     found = Some(task);
                 }

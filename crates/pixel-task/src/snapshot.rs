@@ -377,11 +377,7 @@ fn materialize_with(
     let index_path = String::from_utf8(git(live_root, &["rev-parse", "--git-path", "index"])?)
         .map_err(|_| Error::Unavailable("non-UTF8 Git index path".into()))?;
     let index_path = live_root.join(index_path.trim());
-    let index_bytes = match fs::read(index_path) {
-        Ok(bytes) => Some(bytes),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-        Err(error) => return Err(error.into()),
-    };
+    let index_bytes = optional_index_bytes(fs::read(index_path))?;
     let refs = git_refs(live_root)?;
     // Copy object storage and history, without shared inodes or borrowed object
     // databases. Do not commit the captured worktree: its real diff is evidence.
@@ -478,6 +474,14 @@ fn materialize_with(
     Ok(directory)
 }
 
+fn optional_index_bytes(read: std::io::Result<Vec<u8>>) -> Result<Option<Vec<u8>>> {
+    match read {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Check captured source paths, and reject unexpected undeclared output files.
 pub fn unchanged(root: &Path, snapshot: &SourceSnapshot, contract: &TaskContract) -> Result<bool> {
     let current = capture(root, contract, true)?;
@@ -501,6 +505,22 @@ pub(crate) fn mutation_marker(root: &Path, snapshot: &SourceSnapshot) -> Result<
 mod tests {
     use super::*;
     use crate::test_support::{contract, git, repo};
+
+    #[test]
+    fn optional_index_read_preserves_bytes_and_only_accepts_not_found() {
+        assert_eq!(
+            optional_index_bytes(Ok(vec![1, 2, 3])).unwrap(),
+            Some(vec![1, 2, 3])
+        );
+        assert_eq!(
+            optional_index_bytes(Err(std::io::ErrorKind::NotFound.into())).unwrap(),
+            None
+        );
+        assert!(matches!(
+            optional_index_bytes(Err(std::io::ErrorKind::PermissionDenied.into())),
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::PermissionDenied
+        ));
+    }
 
     #[test]
     fn reserved_runtime_paths_are_exact_and_not_similarly_named_source() {
