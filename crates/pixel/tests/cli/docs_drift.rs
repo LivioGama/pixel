@@ -258,12 +258,40 @@ fn every_documented_pixel_command_exists() {
     );
 }
 
+/// The production part of a Rust file: everything before its first
+/// `#[cfg(test)]` whose next non-attribute line declares a `mod`. A
+/// `#[cfg(test)]` on a lone item (a `static` lock, a helper) does not end it.
+/// The cut is the one `pixel-git`'s boundary test makes, and its
+/// `test_modules_follow_every_production_item` keeps every file's test
+/// modules after its last production item, so nothing after it is
+/// production.
+fn production_part(source: &str) -> &str {
+    let lines: Vec<&str> = source.lines().collect();
+    let mut offset = 0;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim() == "#[cfg(test)]" {
+            let next = lines[i + 1..]
+                .iter()
+                .find(|l| !l.trim_start().starts_with("#["))
+                .map_or("", |l| l.trim_start());
+            let item = next
+                .trim_start_matches("pub(crate) ")
+                .trim_start_matches("pub ");
+            if item.starts_with("mod ") {
+                return &source[..offset];
+            }
+        }
+        offset += line.len() + 1;
+    }
+    source
+}
+
 /// Commands a runtime string tells the agent to run: `` `pixel <name>`` or
-/// `"pixel <name>` on a line of production code. Comments and everything
-/// from the first `#[cfg(test)]` on are skipped: tests name old spellings on
+/// `"pixel <name>` on a line of production code. Comments and the test
+/// modules ([`production_part`]) are skipped: tests name old spellings on
 /// purpose (alias and hook-compatibility fixtures).
 fn runtime_command_mentions(source: &str) -> BTreeSet<String> {
-    let production = source.split("#[cfg(test)]").next().unwrap_or_default();
+    let production = production_part(source);
     let code: String = production
         .lines()
         .filter(|l| !l.trim_start().starts_with("//"))
@@ -337,6 +365,24 @@ fn runtime_command_mentions_skip_comments_and_tests() {
     .join("\n");
     let got: Vec<String> = runtime_command_mentions(&source).into_iter().collect();
     assert_eq!(got, ["build-index", "rescue"]);
+
+    // A `#[cfg(test)]` on a lone item is not the start of the tests:
+    // `pixel/src/main.rs` opens on a `#[cfg(test)] static` lock, and cutting
+    // there hid the rest of the file from this check (#528).
+    let lone_item_first = [
+        "#[cfg(test)]",
+        "pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());",
+        "const HINT: &str = \"run `pixel find-symbol` next\";",
+        "#[cfg(test)]",
+        "#[path = \"cmd_tests.rs\"]",
+        "mod cmd_tests;",
+        "const AFTER: &str = \"run `pixel status` next\";",
+    ]
+    .join("\n");
+    let got: Vec<String> = runtime_command_mentions(&lone_item_first)
+        .into_iter()
+        .collect();
+    assert_eq!(got, ["find-symbol"]);
 }
 
 /// The body of ARCHITECTURE.md's `## <heading>` section, up to the next
