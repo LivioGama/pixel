@@ -814,11 +814,7 @@ fn configure_scoped(
             {
                 " --provider claude"
             }
-            "prompt-submit" => match provider {
-                Provider::Claude => " --provider claude",
-                Provider::Codex => " --provider codex",
-                Provider::Devin => " --provider devin",
-            },
+            "prompt-submit" if provider == Provider::Devin => " --provider devin",
             _ => "",
         };
         groups.push(hook_group(
