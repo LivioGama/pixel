@@ -37,17 +37,23 @@ jobs:
       - name: Shoot the four harnesses and publish the grid
         env:
           HARNESS_INTERACTIVE_MAX: "300"
+          PR: ${{ inputs.pr }}
+          PROMPT: ${{ inputs.prompt }}
         run: |
-          scripts/harness-sandbox-shoot.sh "${{ inputs.pr }}" "${{ inputs.prompt }}"
+          scripts/harness-sandbox-shoot.sh "$PR" "$PROMPT"
       - name: Post the run summary
         if: always()
         run: |
           echo "## Sandbox grid run" >> "$GITHUB_STEP_SUMMARY"
           for p in claude codex pi agy; do
-            meta="/Users/livio/Downloads/shoot4/meta-$p-rns.json"
+            meta="scripts/shoot4/meta-$p-rns.json"
             [ -s "$meta" ] || continue
-            python3 -c "
+            python3 - "$p" "$meta" >> "$GITHUB_STEP_SUMMARY" << 'PY'
           import json
-          m = json.load(open('$meta'))
-          print(f\"- **$p**: {m['pixel_calls']} pixel calls in {round(m['wall_ms']/1000)}s\")" >> "$GITHUB_STEP_SUMMARY"
+          import sys
+
+          provider, path = sys.argv[1], sys.argv[2]
+          m = json.load(open(path))
+          print(f"- **{provider}**: {m['pixel_calls']} pixel calls in {round(m['wall_ms'] / 1000)}s")
+          PY
           done
