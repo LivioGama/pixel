@@ -1521,6 +1521,66 @@ fn codex_prompt_submit_injects_pixel_first_guidance_on_every_repository_prompt()
     );
 }
 
+/// Claude Code's guidance is always-on, like Devin's and Codex's, but only
+/// on a real Claude host: a prompt-submit runs its task packet regardless, and
+/// the Pixel-first retrieval to attempt rides on every indexed-repository
+/// prompt. An imported Claude config (a Devin session reading
+/// `~/.claude/settings.json` verbatim) must not prepend a second guidance over
+/// Devin's own, so the host gate decides injection, not the provider alone.
+#[test]
+fn claude_prompt_submit_injects_pixel_first_guidance_on_a_real_claude_host() {
+    let dir = indexed_dir("claude-prompt-context");
+    let submit = |cwd: &Path| {
+        hook(
+            &["run-hook", "prompt-submit", "--provider", "claude"],
+            &json!({
+                "hook_event_name":"UserPromptSubmit",
+                // A plain coding prompt: nothing Pixel-named, still guided.
+                "prompt":"where is the foreign-denial precedence decided in the guard?",
+                "cwd":cwd
+            }),
+            &[],
+        )
+    };
+    let response = submit(dir.as_ref());
+    let context = response["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("a repository prompt carries the Claude Pixel guidance on a real Claude host");
+    assert!(context.starts_with("Pixel-first retrieval"), "{context}");
+    assert!(
+        context.contains("this is a pixel-indexed repository"),
+        "{context}"
+    );
+    assert!(context.contains("pixel search-content -F"), "{context}");
+    assert!(context.contains("pixel find-code"), "{context}");
+    assert!(context.contains("never block the task"), "{context}");
+    assert!(!response.get("decision").is_some(), "{response}");
+    let outside = Scratch::for_test("pixel-guard-policy", "claude-prompt-outside");
+    assert_eq!(
+        submit(outside.as_ref()),
+        Value::Null,
+        "outside a repository there is no index to point at"
+    );
+    // The Claude guidance is Claude's alone: an importing Devin host gets its
+    // own guidance, not a repeat of Claude's over it.
+    let devin = hook(
+        &["run-hook", "prompt-submit", "--provider", "devin"],
+        &json!({
+            "hook_event_name":"UserPromptSubmit",
+            "prompt":"explain the guard's precedence rules",
+            "cwd":dir.as_ref()
+        }),
+        &[],
+    );
+    let devin_context = devin["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("Devin keeps its own guidance");
+    assert!(
+        !devin_context.contains("this is a pixel-indexed repository"),
+        "{devin_context}"
+    );
+}
+
 /// Devin loads `~/.claude/settings.json` hooks verbatim, so the Claude entry
 /// `pixel install` wrote there runs inside a Devin session with its
 /// `--provider claude` argument intact. That argument names the install, not

@@ -54,6 +54,13 @@ const CODEX_PIXEL_GUIDANCE: &str = concat!(
     "If Pixel or its index is unavailable, say so and continue with the best available evidence; never block the task."
 );
 
+const CLAUDE_PIXEL_GUIDANCE: &str = concat!(
+    "Pixel-first retrieval (non-blocking): this is a pixel-indexed repository, so before a native search or file read to find code, ",
+    "run `pixel search-content -F '<identifier>'` for a known name or `pixel find-code '<concept>'` for behavior. ",
+    "Make Pixel the retrieval attempt, not native grep/rg/cat or a plain file read; keep native tools for what Pixel does not cover. ",
+    "If Pixel or its index is unavailable, continue normally with native tools; never block the task."
+);
+
 /// Commands in actions.jsonl that signal task completion, under their current
 /// names. Entries logged before the command rename (`publish`, `ship`) are
 /// canonicalised before the lookup.
@@ -194,6 +201,14 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     if matches!(provider, Some(crate::guard::Provider::Codex)) && indexed {
         context = render_codex_context(&context);
     }
+    // Claude Code reads no per-turn mandate of its own for this contract, so a
+    // real Claude host in an *indexed* repository carries the Pixel-first
+    // guidance like Devin and Codex do. The hosting gate keeps an imported
+    // Claude config (Devin reading `~/.claude/settings.json` verbatim) from
+    // prepending a second guidance over Devin's own.
+    if claude_host && indexed {
+        context = render_claude_context(&context);
+    }
     if !context.is_empty() {
         emit_context(&context, event_name);
     }
@@ -330,6 +345,14 @@ fn render_codex_context(context: &str) -> String {
         CODEX_PIXEL_GUIDANCE.to_string()
     } else {
         format!("{CODEX_PIXEL_GUIDANCE}\n\n{context}")
+    }
+}
+
+fn render_claude_context(context: &str) -> String {
+    if context.is_empty() {
+        CLAUDE_PIXEL_GUIDANCE.to_string()
+    } else {
+        format!("{CLAUDE_PIXEL_GUIDANCE}\n\n{context}")
     }
 }
 
@@ -832,6 +855,25 @@ mod tests {
         );
         assert!(context.ends_with("task targets"));
         assert_eq!(render_codex_context(""), CODEX_PIXEL_GUIDANCE.to_string());
+    }
+
+    #[test]
+    fn claude_context_requires_pixel_first_retrieval_on_every_indexed_prompt() {
+        let context = render_claude_context("task targets");
+        assert!(context.starts_with("Pixel-first retrieval"));
+        assert!(context.contains("this is a pixel-indexed repository"));
+        assert!(context.contains("pixel search-content -F"));
+        assert!(context.contains("pixel find-code"));
+        assert!(
+            context.contains("Make Pixel the retrieval attempt"),
+            "{context}"
+        );
+        assert!(
+            context.contains("never block the task"),
+            "the guidance fails open, like Devin's and Codex's"
+        );
+        assert!(context.ends_with("task targets"));
+        assert_eq!(render_claude_context(""), CLAUDE_PIXEL_GUIDANCE.to_string());
     }
     use std::process::Command;
 
