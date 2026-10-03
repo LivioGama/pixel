@@ -48,6 +48,7 @@ mod overview_intent;
 mod plan_cmd;
 mod plan_state;
 mod post_compaction;
+mod pixel_question;
 mod prompt_intent;
 mod prompt_key;
 mod prompt_submit;
