@@ -908,7 +908,7 @@ fn doctor_install_artifact_checks_red_and_green() {
     let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
     let mut edited = fs::read_to_string(&prompt_path).expect("agent-prompt deployed");
     assert!(
-        edited.contains("## Retrieval commands") && edited.contains("## Reading results"),
+        edited.contains("## The stopping rule") && edited.contains("## Retrieval commands"),
         "fixture: the edited prompt must still satisfy the old heuristic"
     );
     edited.push_str("\nOne extra rule the bundled prompt does not carry.\n");
@@ -2793,7 +2793,7 @@ fn doctor_codex_config_check_is_red_until_the_current_block_is_in_place() {
     let written = fs::read_to_string(codex_config_path(home)).unwrap();
     fs::write(
         codex_config_path(home),
-        written.replace("## Reading results", "## Reading output"),
+        written.replace("## Retrieval commands", "## Retrieval output"),
     )
     .unwrap();
     let check = status();
