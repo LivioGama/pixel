@@ -102,13 +102,22 @@ fn render_item(item: &ContextItem, layer: Layer, out: &mut String) {
         }
     }
     if layer == Layer::L2 && item.snippet_cut {
+        // The excerpt holds whole lines only, so its last one is complete.
         let shown = u32::try_from(item.snippet.lines().count()).unwrap_or(u32::MAX);
-        let last = item.start_line.saturating_add(shown).saturating_sub(1);
-        let _ = writeln!(
-            out,
-            "    … body cut after line {last}; full body: {}:{}-{}",
-            item.path, item.start_line, item.end_line
-        );
+        if shown == 0 {
+            let _ = writeln!(
+                out,
+                "    … body not shown (excerpt cap); full body: {}:{}-{}",
+                item.path, item.start_line, item.end_line
+            );
+        } else {
+            let last = item.start_line.saturating_add(shown - 1);
+            let _ = writeln!(
+                out,
+                "    … body cut after line {last}; full body: {}:{}-{}",
+                item.path, item.start_line, item.end_line
+            );
+        }
     }
     // P2·3: crux lines are the distilled body — at L2 they annotate the
     // shown body with the logic-bearing lines (`crux:LINE`), and they are
@@ -480,6 +489,13 @@ mod tests {
         assert!(
             text.ends_with("    … body cut after line 12; full body: src/long.rs:10-200\n"),
             "{text}"
+        );
+        // An empty excerpt says the body was not shown, not a line before it.
+        let mut empty = cut.clone();
+        empty.snippet = String::new();
+        assert!(
+            render(std::slice::from_ref(&empty), Layer::L2)
+                .ends_with("    … body not shown (excerpt cap); full body: src/long.rs:10-200\n")
         );
         // Only a body rendering carries the marker.
         assert!(!render(std::slice::from_ref(&cut), Layer::L1).contains("body cut"));

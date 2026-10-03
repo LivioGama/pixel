@@ -4085,8 +4085,10 @@ mod context_crux_coordinate_tests {
     }
 }
 
-/// Source lines `start_line..=end_line`, at most `max_lines` lines and
-/// `max_bytes` bytes, and whether that excerpt stops short of the span.
+/// Whole source lines `start_line..=end_line`, at most `max_lines` lines
+/// and `max_bytes` bytes, and whether that excerpt stops short of the span.
+/// A line that does not fit ends the excerpt rather than being cut, so the
+/// last line shown is always complete.
 fn read_snippet(
     source: &str,
     start_line: u32,
@@ -4096,31 +4098,18 @@ fn read_snippet(
 ) -> (String, bool) {
     let start = start_line.saturating_sub(1) as usize;
     let span = (end_line as usize).saturating_sub(start).max(1);
-    if max_bytes == 0 {
-        return (String::new(), true);
-    }
     let mut snippet = String::new();
     let mut whole_lines = 0usize;
     for line in source.lines().skip(start).take(span.min(max_lines)) {
-        let separator = usize::from(!snippet.is_empty());
-        let remaining = max_bytes.saturating_sub(snippet.len() + separator);
-        if remaining == 0 {
+        let separator = usize::from(whole_lines > 0);
+        if snippet.len() + separator + line.len() > max_bytes {
             break;
         }
         if separator == 1 {
             snippet.push('\n');
         }
-        if line.len() <= remaining {
-            snippet.push_str(line);
-            whole_lines += 1;
-            continue;
-        }
-        let mut end = remaining;
-        while end > 0 && !line.is_char_boundary(end) {
-            end -= 1;
-        }
-        snippet.push_str(&line[..end]);
-        break;
+        snippet.push_str(line);
+        whole_lines += 1;
     }
     (snippet, whole_lines < span)
 }
@@ -8291,10 +8280,8 @@ mod tests {
             read_snippet(source, 1, 2, 60, 6),
             ("a1\nb22".to_owned(), false)
         );
-        assert_eq!(
-            read_snippet(source, 1, 2, 60, 5),
-            ("a1\nb2".to_owned(), true)
-        );
+        // One byte short: the second line is left out whole, never cut.
+        assert_eq!(read_snippet(source, 1, 2, 60, 5), ("a1".to_owned(), true));
         assert_eq!(read_snippet(source, 1, 3, 60, 3), ("a1".to_owned(), true));
         assert_eq!(read_snippet(source, 1, 4, 60, 0), (String::new(), true));
         // A multi-byte character is never split.
