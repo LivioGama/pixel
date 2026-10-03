@@ -19,6 +19,9 @@ fastembed = ["pixel-recall/fastembed"]
 # Pure-Rust embeddings. No ONNX, no OpenSSL, no C++ — builds fine for musl,
 # so the Linux release keeps a working semantic channel without fastembed.
 model2vec = ["pixel-recall/model2vec"]
+# Dev tool excluded from the shipped binary (issue #602): `pixel
+# ai-cli-readify` probes and rewrites agents' CLI configs.
+readify = []
 
 [dependencies]
 mutants = { workspace = true }

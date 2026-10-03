@@ -2,6 +2,8 @@
 //! `tests/<name>.rs` is a module here, so cargo links one executable
 //! instead of one per file (linking dominated `cargo test -p pixel-cli`).
 
+// Compiled only with the `readify` feature, matching the gated command (issue #602).
+#[cfg(feature = "readify")]
 mod ai_cli_readify_cli;
 mod ask_contract;
 mod audit_cli;

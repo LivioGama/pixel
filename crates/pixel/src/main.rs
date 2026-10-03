@@ -26,6 +26,9 @@ macro_rules! eprintln {
 macro_rules! eprint {
     ($($arg:tt)*) => { crate::operation_metrics::print_error(format_args!($($arg)*)) };
 }
+// Dev tool behind the `readify` feature: probing and rewriting agents'
+// CLI configs is not part of the shipped binary (issue #602).
+#[cfg(feature = "readify")]
 mod ai_cli_readify;
 mod audit_cmd;
 mod call_guard;
@@ -414,6 +417,7 @@ enum Command {
     /// replace the working value — so the report names both exports instead.
     /// With `--approve`, the workspace named by `--workspace` has its
     /// startup gate cleared as well.
+    #[cfg(feature = "readify")]
     AiCliReadify {
         /// Also rewrite the agents' config files; without this flag the
         /// command only probes and verifies (safe to re-run).
@@ -4259,7 +4263,10 @@ fn logged_args(args: &[String]) -> String {
         .windows(2)
         .position(|pair| pair[0] == "config" && pair[1] == "remote-key")
         .map(|at| at + 3);
+    #[cfg(feature = "readify")]
     let url_name = ai_cli_readify::auth::AUTH_URL_VAR;
+    #[cfg(not(feature = "readify"))]
+    let url_name = "auth_url";
     let url_var = format!("{url_name}=");
     // Clap takes `--var auth_url=…` and `--var=auth_url=…` as the same
     // option, so the one-token spelling carries the same one-time
@@ -5050,6 +5057,7 @@ fn run_command(
             println!("fix forward: keep current code and fix the bug in place");
             Ok(())
         }
+        #[cfg(feature = "readify")]
         Command::AiCliReadify {
             apply,
             timeout,
