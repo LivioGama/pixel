@@ -865,5 +865,72 @@ mod tests {
             "nothing changed, nothing to flag: {report:?}"
         );
         assert!(report.caps.is_empty(), "{report:?}");
+        // No origin/HEAD and no merge-base fallback resolves: base stays the
+        // uncommitted-diff `None`.
+        assert_eq!(report.base, None, "{report:?}");
+    }
+
+    /// A clean tree on a feature branch reviews the whole branch diff: the
+    /// merge-base with the remote default becomes the report's base.
+    #[test]
+    fn review_on_a_clean_feature_branch_diffs_the_merge_base() {
+        let dir = tmpdir("branch-base");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.rs"), "pub fn produce() -> i32 { 1 }\n").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub mod a;\n").unwrap();
+        git(root, &["init", "-q"]);
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        let base_oid = {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        // The remote default branch, without a remote: a remote-tracking ref.
+        git(root, &["update-ref", "refs/remotes/origin/main", &base_oid]);
+        git(root, &["checkout", "-qb", "feat/x"]);
+        std::fs::write(root.join("src/a.rs"), "pub fn produce() -> i32 { 2 }\n").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "change"]);
+        let store = store_for(root);
+
+        let report = review(&store, root, None).expect("review runs on a clean branch");
+        assert_eq!(
+            report.base.as_deref(),
+            Some(base_oid.as_str()),
+            "{report:?}"
+        );
+        assert!(
+            !report.findings.is_empty(),
+            "the committed branch change is what gets reviewed: {report:?}"
+        );
+    }
+
+    #[test]
+    fn test_fixture_path_names_test_and_fixture_files() {
+        for yes in [
+            "crates/pixel/src/main_tests/x_tests.rs",
+            "src/foo_test.rs",
+            "src/foo.test.ts",
+            "test_helpers.rs",
+            "src/tests/unit.rs",
+            "src/fixtures/data.rs",
+            "scripts/fixture-gen.py",
+        ] {
+            assert!(test_fixture_path(yes), "{yes}");
+        }
+        for no in [
+            "src/lib.rs",
+            "crates/pixel/src/main.rs",
+            "src/latest.rs",
+            "src/attest.rs",
+        ] {
+            assert!(!test_fixture_path(no), "{no}");
+        }
     }
 }
