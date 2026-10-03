@@ -30,6 +30,8 @@ To install Pixel for a user, follow the six steps of "For AI agents" in the READ
 
 ## Docs
 
+- [Why Rust](https://pixel-cli.dev/why-rust/): architecture decision, build-time tradeoffs, exploratory language audit limitations, and possible boundaries for other languages; not a language benchmark
+
 - [Documentation](https://raw.githubusercontent.com/LivioGama/pixel/main/website/content/docs.md): install channels, what `pixel install` wires per agent, per-repository guards, updating, plugins, the workflow, commands by job, reading the answers, token savings
 - [Manual setup](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/manual-setup.md): wiring the prompt by hand into an agent `pixel install` does not cover (Cursor, Gemini CLI, Copilot…)
 - [Renamed commands](https://raw.githubusercontent.com/LivioGama/pixel/main/docs/renamed-commands.md): old command names and their verb-first replacements, accepted as aliases until 1.0

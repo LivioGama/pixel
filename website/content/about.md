@@ -22,6 +22,8 @@ An agent believes whatever it is told, so we hold ourselves to two rules:
 - **An answer says what it does not know.** A static call graph never sees every caller, so Pixel never claims it did.
 - **A number is only true with its source.** The [benchmarks](/benchmarks/) name the version and the command, and they say where another tool does better: GitNexus finds more Ruby callers, and semble has the right file in its top 10 more often.
 
+Read [why Pixel uses Rust](/why-rust/) for the engineering tradeoffs, the limits of our language audit, and where other languages could fit.
+
 ## Who we are
 
 Pixel has two co-founders, who share the project as equals:
