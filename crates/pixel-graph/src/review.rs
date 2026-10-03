@@ -1099,7 +1099,11 @@ mod tests {
             vec![2, 3],
             "the merge-base diff carries the committed and the uncommitted secret: {report:?}"
         );
-        assert_eq!(report.base.as_deref(), Some(base_oid.as_str()), "{report:?}");
+        assert_eq!(
+            report.base.as_deref(),
+            Some(base_oid.as_str()),
+            "{report:?}"
+        );
     }
 
     /// A changed symbol exercised by a suggested test is not flagged as
