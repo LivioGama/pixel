@@ -198,5 +198,11 @@ fn an_all_caps_name_should_reach_its_reads_before_a_lowercase_function() {
         Some(Tier::Ident),
         "a lowercase query still finds the function"
     );
+    let mixed = resolve(&store, "Codex_Home", &ResolveOptions::default()).unwrap();
+    assert_eq!(
+        mixed.tier,
+        Some(Tier::Ident),
+        "a mixed-case query retries in lowercase"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
