@@ -46,7 +46,7 @@ apply to:
 | `pr-swarm.md` | `scripts/pr-swarm.sh`, `.claude/settings.json` | the rmux pane-per-open-PR reconciler: the tool, the SessionStart watcher that replaces launchd (macOS TCC denies launchd any path under `~/Documents`), and the teardown rails that keep a merged PR's worktree when it is dirty, unpushed or the shared cache |
 
 `.claude/rules` is a symlink to that directory (Claude Code loads it by
-itself, honouring `paths:`), and `CLAUDE.md` is a symlink to this file. A
+itself, honouring `paths:`). A
 tool that does not auto-load a rules directory (Codex, pi, Devin) reads the
 files listed above before its first edit; the `paths:` front matter tells it
 which ones matter for the files it is about to touch. Add a rule as a new

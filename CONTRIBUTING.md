@@ -11,7 +11,7 @@ checklist as the contract for your pull request.
 - Agent rules for this repo, whatever the tool: [AGENTS.md](AGENTS.md) (the
   loops) and [`.agents/rules/`](.agents/rules/) (scoped rules: mutation-gate-proof
   code, test hygiene, long campaigns, the lint idioms) and [`.agents/skills/`](.agents/skills/)
-  (on-demand knowledge: the Microsoft Pragmatic Rust Guidelines); `CLAUDE.md`, `.claude/rules`
+  (on-demand knowledge: the Microsoft Pragmatic Rust Guidelines); `.claude/rules`
   and `.claude/skills` are symlinks to them
 - User-facing docs: [README.md](README.md), [docs/manual-setup.md](docs/manual-setup.md)
 

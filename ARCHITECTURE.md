@@ -6,7 +6,7 @@ takes from the CLI to an answer. It is the map a contributor (human or agent)
 should read before touching more than one crate.
 
 For what Pixel does and why, read `README.md`. For per-turn project rules,
-read `CLAUDE.md`.
+read `AGENTS.md`.
 
 ## One-screen summary
 
