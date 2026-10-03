@@ -597,7 +597,9 @@ mod tests {
             "Antigravity guidance must treat a Pixel hit as the retrieval"
         );
         assert!(
-            AGENT_PROMPT_ASSET.contains("the served window")
+            // The bundled phrase is line-wrapped in the asset ("the\nserved
+            // window"), so assert the contiguous run that is actually present.
+            AGENT_PROMPT_ASSET.contains("served window")
                 && AGENT_PROMPT_ASSET.contains("`sed -n '<line>,+40p' <path>`")
                 && AGENT_PROMPT_ASSET.contains("`offset=<line>, limit≈40` read"),
             "Antigravity guidance must give bounded scoped-read examples"
