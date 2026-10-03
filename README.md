@@ -125,8 +125,6 @@ flowchart TD
     class S,P det
 ```
 
-complete → cite and answer · capped → narrow and repeat · unresolved → `pixel search-meaning`. Old: `grep → read → grep → read`, N inference round-trips. New: contract → Pixel query → cited lines → answer, ~1–3 calls. Every answer carries its epistemics; absent from a snapshot is not "never".
-
 **Implement a feature** — "implement feature":
 
 ```mermaid
@@ -155,9 +153,9 @@ flowchart TD
     class X stop
 ```
 
-Red is the LLM — reasoning, meaning, edits; 
-Orange is `pixel classify` — a model system one like Jev
-Green is Pixel-CLI — deterministic.
+- Red is the LLM — reasoning, meaning, edits
+- Orange is `pixel classify` — a model system one like Jev
+- Green is Pixel-CLI — deterministic
 
 ## More
 
