@@ -47,7 +47,7 @@ jobs:
             meta="/Users/livio/Downloads/shoot4/meta-$p-rns.json"
             [ -s "$meta" ] || continue
             python3 -c "
-import json
-m = json.load(open('$meta'))
-print(f\"- **$p**: {m['pixel_calls']} pixel calls in {round(m['wall_ms']/1000)}s\")" >> "$GITHUB_STEP_SUMMARY"
+          import json
+          m = json.load(open('$meta'))
+          print(f\"- **$p**: {m['pixel_calls']} pixel calls in {round(m['wall_ms']/1000)}s\")" >> "$GITHUB_STEP_SUMMARY"
           done

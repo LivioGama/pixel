@@ -2032,6 +2032,7 @@ name = "pixel-cli"
 version = "0.6.1"
 dependencies = [
  "clap",
+ "fs2",
  "globset",
  "ignore",
  "libc",
@@ -2050,6 +2051,7 @@ dependencies = [
  "pixel-recall",
  "pixel-release",
  "pixel-session",
+ "pixel-task",
  "pixel-ultraflow",
  "regex",
  "serde",
@@ -2269,6 +2271,24 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+]
+
+[[package]]
+name = "pixel-task"
+version = "0.6.1"
+dependencies = [
+ "fs2",
+ "hex",
+ "libc",
+ "pixel-git",
+ "pixel-ops",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]

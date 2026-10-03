@@ -174,6 +174,7 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
                 "metrics --provider devin",
             ]
             .contains(verb)
+                || task_hook_verb(verb)
                 || verb
                     .strip_prefix("composed-guard --provider codex --backup ")
                     .is_some_and(|backup| !backup.is_empty()))
@@ -186,6 +187,118 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
 /// which executables count as pixel's.
 pub(crate) fn is_pixel_hook(command: &str, exe: &Path) -> bool {
     pixel_hook_verb(command, exe).is_some()
+}
+
+/// Supported native boundaries; Codex has no PostToolUseFailure event.
+pub(crate) const TASK_HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "session-start"),
+    ("UserPromptSubmit", "prompt-submit"),
+    ("PreToolUse", "pre-tool-use"),
+    ("PostToolUse", "post-tool-use"),
+    ("Stop", "stop"),
+    ("SessionEnd", "session-end"),
+    ("SubagentStart", "subagent-start"),
+    ("SubagentStop", "subagent-stop"),
+];
+
+fn task_hook_verb(verb: &str) -> bool {
+    let words: Vec<_> = verb.split_whitespace().collect();
+    matches!(words.as_slice(), ["task-event", "--provider", "claude" | "codex" | "pi", "--event", event]
+        if TASK_HOOK_EVENTS.iter().any(|(_, name)| name == event)
+            || matches!(*event, "tool-failure" | "interrupt" | "model-response" | "user-bash"))
+}
+
+/// Replace only Pixel task registrations, preserving foreign hooks and trust.
+pub(crate) fn merge_task_hooks(
+    hooks: &mut Map<String, Value>,
+    provider: Provider,
+    exe: &Path,
+) -> Result<(), String> {
+    for groups in hooks.values_mut().filter_map(Value::as_array_mut) {
+        for group in groups.iter_mut() {
+            if let Some(inner) = group.get_mut("hooks").and_then(Value::as_array_mut) {
+                inner.retain(|hook| {
+                    !hook
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .and_then(|command| pixel_hook_verb(command, exe))
+                        .is_some_and(task_hook_verb)
+                });
+            }
+        }
+        groups.retain(|group| {
+            group
+                .get("hooks")
+                .and_then(Value::as_array)
+                .is_none_or(|inner| !inner.is_empty())
+        });
+    }
+    let extra = if provider == Provider::Claude {
+        ("PostToolUseFailure", "tool-failure")
+    } else {
+        ("Interrupt", "interrupt")
+    };
+    for &(event, name) in TASK_HOOK_EVENTS.iter().chain(std::iter::once(&extra)) {
+        let groups = hooks
+            .entry(event)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| format!("{event} is not an array"))?;
+        let mut group = hook_group(
+            format!(
+                "{} run-hook task-event --provider {} --event {name}",
+                quoted_executable(exe),
+                provider.name()
+            ),
+            None,
+        );
+        group["hooks"][0]["timeout"] = json!(if matches!(event, "SessionEnd" | "Interrupt") {
+            3
+        } else {
+            10
+        });
+        groups.push(group);
+    }
+    Ok(())
+}
+
+pub(crate) fn task_hooks_registered(value: &Value, provider: Provider, exe: &Path) -> bool {
+    let extra = if provider == Provider::Claude {
+        ("PostToolUseFailure", "tool-failure")
+    } else {
+        ("Interrupt", "interrupt")
+    };
+    TASK_HOOK_EVENTS
+        .iter()
+        .chain(std::iter::once(&extra))
+        .all(|(event, name)| {
+            let expected = format!("task-event --provider {} --event {name}", provider.name());
+            value
+                .get("hooks")
+                .and_then(|hooks| hooks.get(*event))
+                .and_then(Value::as_array)
+                .is_some_and(|groups| {
+                    groups.iter().any(|group| {
+                        group
+                            .get("matcher")
+                            .and_then(Value::as_str)
+                            .is_none_or(|matcher| matches!(matcher, "" | "*" | ".*"))
+                            && group
+                                .get("hooks")
+                                .and_then(Value::as_array)
+                                .is_some_and(|inner| {
+                                    inner.iter().any(|hook| {
+                                        hook.get("async").and_then(Value::as_bool) != Some(true)
+                                            && hook
+                                                .get("command")
+                                                .and_then(Value::as_str)
+                                                .and_then(|command| pixel_hook_verb(command, exe))
+                                                == Some(expected.as_str())
+                                    })
+                                })
+                    })
+                })
+        })
 }
 
 /// Preserve outer matchers and co-located foreign/security hooks.
@@ -545,6 +658,14 @@ fn configure(
 /// shell call, or it is one of the known observers that never rewrite one.
 fn coexists_with_guard(group: &Value, provider: Provider) -> bool {
     !shell_overlap(group, provider)
+        // Task gates can deny but never rewrite the tool's input.
+        || group.get("hooks").and_then(Value::as_array).is_some_and(|hooks| {
+            !hooks.is_empty() && hooks.iter().all(|hook| {
+                hook.get("command").and_then(Value::as_str)
+                    .and_then(|command| pixel_hook_verb(command, Path::new("pixel")))
+                    == Some(format!("task-event --provider {} --event pre-tool-use", provider.name()).as_str())
+            })
+        })
         || passive_vibe_claude_bridge(group, provider)
         || passive_gitnexus_claude_hook(group, provider)
         || passive_cmux_codex_feed(group, provider)
@@ -694,6 +815,7 @@ fn configure_scoped(
             .as_array_mut()
             .ok_or("PostToolUse is not an array")?
             .push(metrics_relay_group(exe, provider));
+        merge_task_hooks(hooks, provider, exe)?;
     }
     Ok((enabled, adopted))
 }
@@ -1556,6 +1678,43 @@ pub(crate) fn install_project_devin_at(
 mod tests {
     use super::*;
 
+    #[test]
+    fn task_hooks_should_replace_only_owned_entries_and_cover_native_boundaries() {
+        let exe = Path::new("/tmp/pixel");
+        for provider in [Provider::Claude, Provider::Codex] {
+            let foreign =
+                json!({"type":"command","command":"security-check","trusted_hash":"keep"});
+            let mut value = json!({"hooks":{"PreToolUse":[{"matcher":"Edit","hooks":[foreign.clone(),{"command":"pixel run-hook task-event --provider claude --event pre-tool-use"}]}]}});
+            merge_task_hooks(value["hooks"].as_object_mut().unwrap(), provider, exe).unwrap();
+            assert_eq!(
+                value["hooks"]["PreToolUse"][0]["hooks"],
+                json!([foreign.clone()])
+            );
+            assert!(task_hooks_registered(&value, provider, exe));
+            let first = value.clone();
+            merge_task_hooks(value["hooks"].as_object_mut().unwrap(), provider, exe).unwrap();
+            assert_eq!(value, first);
+            assert!(stacked_pixel_hooks(&value, exe).is_empty());
+            let mut restricted = value.clone();
+            restricted["hooks"]["PreToolUse"][1]["matcher"] = json!("Read");
+            assert!(!task_hooks_registered(&restricted, provider, exe));
+            value["hooks"]["Stop"][0]["hooks"][0]["async"] = json!(true);
+            assert!(!task_hooks_registered(&value, provider, exe));
+            remove_pixel_hooks(value["hooks"].as_object_mut().unwrap(), exe);
+            assert_eq!(
+                value,
+                json!({"hooks":{"PreToolUse":[{"matcher":"Edit","hooks":[foreign]}]}})
+            );
+        }
+        for command in [
+            "foreign run-hook task-event --provider codex --event stop",
+            "pixel run-hook task-event --provider codex --event stop && security-check",
+            "pixel run-hook task-event --provider unknown --event stop",
+        ] {
+            assert!(!is_pixel_hook(command, exe), "{command}");
+        }
+    }
+
     /// A release build's executable: every release installs it as `pixel`.
     fn release() -> &'static Path {
         Path::new("/usr/local/bin/pixel")
@@ -1763,6 +1922,13 @@ mod tests {
             (vec![security.clone()], false),
             (vec![rtk_group()], false),
             (vec![write.clone()], true),
+            (
+                vec![hook_group(
+                    "pixel run-hook task-event --provider claude --event pre-tool-use".into(),
+                    None,
+                )],
+                true,
+            ),
             (vec![gitnexus], true),
             (Vec::new(), true),
         ] {
@@ -1815,7 +1981,7 @@ mod tests {
             );
             assert!(value["hooks"][provider.compact()].is_array());
             let prompt = value["hooks"]["UserPromptSubmit"].as_array().unwrap();
-            let prompt_command = prompt.last().unwrap()["hooks"][0]["command"]
+            let prompt_command = prompt.first().unwrap()["hooks"][0]["command"]
                 .as_str()
                 .unwrap();
             if provider == Provider::Claude {
@@ -2078,7 +2244,12 @@ mod tests {
             configure(&mut value, Provider::Claude, Path::new("/tmp/pixel"), &[]).unwrap();
         assert!(!enabled);
         assert!(adopted.is_empty());
-        assert_eq!(value["hooks"]["PreToolUse"], json!([security]));
+        assert_eq!(value["hooks"]["PreToolUse"][0], security);
+        assert_eq!(value["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            value["hooks"]["PreToolUse"][1]["hooks"][0]["command"],
+            "'/tmp/pixel' run-hook task-event --provider claude --event pre-tool-use"
+        );
     }
 
     #[test]
@@ -2359,7 +2530,12 @@ mod tests {
     fn global_install_should_restore_a_delegated_rtk_and_retire_its_backup() {
         let home = home_with_backup(&[delegate_guard()]);
         let settings = global_install(home.path(), false);
-        assert_eq!(settings["hooks"]["PreToolUse"], json!([rtk_group()]));
+        assert_eq!(settings["hooks"]["PreToolUse"][0], rtk_group());
+        assert_eq!(settings["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            settings["hooks"]["PreToolUse"][1]["hooks"][0]["command"],
+            "'/p/pixel' run-hook task-event --provider claude --event pre-tool-use"
+        );
         assert!(!home.path().join(RTK_BACKUP).exists());
     }
 

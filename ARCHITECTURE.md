@@ -50,6 +50,7 @@ MCP server. `pixel install` registers no MCP server with any agent.
 | `pixel-recall` | Machine-wide LLM transcript retrieval: ingests Claude Code, Codex, opencode, pi, Devin, Cursor, zcode, and Gemini transcript stores into one SQLite corpus, then serves lexical and semantic search. Demand-driven: nothing scans transcripts until a recall query runs — the in-process path then catches up per agent (last week cold, since-last-ingest warm, capped at 30 days; `recall index` for the full history). Owns the embedding backends (`fastembed` ONNX and pure-Rust `model2vec`, both behind features) and the `search-meaning` code chunker, which reuses the graph's tree-sitter extraction. | graph, index, rank |
 | `pixel-session` | One-look error capture: every error from every layer lands at throw time in one structured local SQLite sink, queryable in one call. | git |
 | `pixel-actionlog` | Append-only local JSONL invocation records: measured command/outcome/duration/output volume plus versioned workflow estimates; backwards-compatible `pixel action-log` and `pixel token-savings` reporting. | none |
+| `pixel-task` | Durable completion contracts, deterministic workflow gates, source manifests, private verification receipts, measured task trajectories, pure policy replay, and explicit controlled evaluation. | git, ops |
 | `pixel-release` | `pixel check-release`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. | none |
 | `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`. Global install: the bundled prompts, Claude Code lifecycle hooks (removing the retired `claude()` shell wrapper), the Codex `developer_instructions` key and metrics hook, the Pi `APPEND_SYSTEM.md` block, and, when their config exists, the OpenCode `AGENTS.md` block, the Antigravity plugin and hooks, Devin's own lifecycle hooks (`~/.config/devin/config.json` — Devin imports Claude's hooks, so without them its sessions get the imported Claude text instead of its own protocol), and the zcode guard. `--repo`: project guards for Claude, Codex, Devin and Pi, and the Pixel-first `AGENTS.md` rule (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups and ends on a `backups` step listing them with the quoted `rm --` command that drops them. | proto, daemon, index, facts, git |
@@ -130,7 +131,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel doctor` | Health check: install state, daemon, index/graph/facts freshness |
 | `pixel run-hook` | Hook entrypoints (guard, session-start, metrics relay) invoked by agent hooks |
 | `pixel config` | Show effective settings and their sources; `setup` offers guided terminal configuration (also offered on interactive global install); `classify on\|off` controls the global classify kill switch (disabled by default); `edit [--repo]` opens commented YAML in `$VISUAL`/`$EDITOR`. Global `~/.pixel/config.yaml`, repository `.pixel/config.yaml`; legacy JSON remains supported. |
-| `pixel task-state` | Inspect or reset Claude Code's local Pixel task-runtime packet |
+| `pixel task-state` | Alias `task`: begin, contract, prepare, verify, review, finish, status, events, route, replay, evaluate, cancel and recover a durable task; show/reset retain the Claude packet interface |
 | `pixel action-log` | Self-assessment: pixel's own action log (what ran, what went wrong). |
 | `pixel token-savings` | Token-savings report: for retrieval-shaped commands (search/query/ context/resolve) that recorded snippet-vs-pool volumes, aggregate the fraction of the candidate pool the agent did NOT have to read. |
 | `pixel squash-branch` | Squash every commit on the current branch since its base into ONE commit (crash-safe, backup-ref'd), optionally force-pushing with lease |
@@ -156,7 +157,10 @@ Per repository, under `.pixel/` (git-ignored):
 | `actions.jsonl` | `pixel-actionlog` | One line per invocation, with the route and phase timings of each request it served (`serve`). |
 | `reconcile-conflict.json`, `env-snapshots/` | `pixel-ops` | Conflict marker left by `reconcile` for the guard, and the pre-mutation copies `env` takes. |
 | `calls.json` | CLI | Circuit breaker counters for repeated identical calls. |
-| `task-runtime.json`, `tasks/<id>/task.json`, `tasks/<id>/events.jsonl` | CLI `task-state` and the hooks | Claude Code task-runtime packet: the active task record and its event log. |
+| `task-runtime.json` | CLI `task-state show/reset` and Claude hooks | Existing bounded Claude context packets; independent of completion evidence. |
+| `tasks/<id>/journal.jsonl`, `tasks/<id>/task.json`, `tasks/<id>/lock`, `tasks/<id>/run-<run_id>.json` | `pixel-task` | Authoritative checksummed task transactions and a rebuildable view, serialized by task lock; verification leases record child ownership for interruption recovery. Legacy v1 records migrate as unverified. |
+| `tasks/source-manifests/<content_id>.json`, `tasks/source-cache.json`, `tasks/session-locks/`, `tasks/session-context/`, `tasks/route-locks/` | `pixel-task` and task bridge | Immutable source manifests, metadata digest cache, atomic provider/session task binding, bounded latest prompts for first-edit activation, and per-decision classification locks. |
+| `task-hook-observations.json`, `task-hook-observations.lock` | CLI task bridge | Last real host invocation per provider; doctor reports observed activity separately from installation and trust. |
 | `plan.json` | CLI `plan` | The persisted `pixel plan` checklist, so `--status`/`--done`/`--prune` survive a re-plan. |
 | `workspace.json` | CLI `workspace` | The registered member repositories. |
 | `config.yaml` (legacy `config.json`) | CLI `config` | Repository-level settings over `~/.pixel/config.yaml` (`pixel config edit --repo`). |
@@ -350,6 +354,47 @@ envelope talks to the daemon socket directly.
 
 ## Agent integration
 
+The provider-neutral task layer lives above retrieval. `run-hook task-event`
+normalizes Claude, Codex and Pi events into `task_bridge`; it never changes
+the retrieval daemon's wire protocol. Global Claude/Codex installation owns
+one native lifecycle registration; Pi's project extension owns its lifecycle.
+A project-only native install still relies on the global lifecycle layer.
+Foreign hooks and trust settings are preserved. Doctor distinguishes registered
+hooks from actual observations; neither establishes complete host coverage.
+
+`pixel-task::policy` decides edit/completion eligibility from the contract and
+current source. CLI `task_prepare` bundles scope, bounded impact and test
+suggestions. Unknown graph coverage requires explicitly configured conservative
+checks. Scope is advisory, and static lower bounds never establish absence of
+consumers. Source changes invalidate preparation/review and make check receipts
+stale. Checks run in private materialized source workspaces. Unsupported source
+dependencies remain blocked rather than silently omitted.
+
+The bridge binds by worktree, provider and session, with Pi branch bindings
+carrying their task and attempt across forks. Automatic first-mutation fallback
+creates evidence state but denies that triggering edit. Missing state denies
+supported edits and verified completion while read-only and task-recovery
+commands remain available. A missing completion requirement can trigger at most
+three automatic corrections, and at most two for identical unresolved state;
+cancellation ends correction. These are host-hook guarantees, not a sandbox for
+arbitrary shell programs. A host stopping does not imply verified completion.
+
+Routing uses only deterministic eligible actions. Optional warm local
+classification ranks those actions with a 300 ms budget and caches one result
+per decision input/policy/configuration. Classifier failure falls back to the
+original order. Predictions cannot satisfy checks. See
+[task contracts and evaluation](docs/task-optimizer.md) for configuration,
+commands, migration and operational limits.
+
+Task trajectory events live in the durable task journal. `actions.jsonl` remains
+best-effort invocation accounting, with optional explicit task correlation.
+Blocked/retried model requests count as work; coordinator and classifier calls
+are separate. Missing host/child coverage produces a lower bound, never zero
+work. `task replay` reads frozen policy frames without execution. Empirical regret
+compares only matching, successful, completely observed attempts. The existing
+`eval/score.py` and `eval/gate.py` own quality/turn regression gates; the controlled
+container backend adds isolated three-arm trials, not a replacement arena.
+
 A global `pixel install` deploys the bundled `pixel-agent-prompt.md` and the
 short `pixel-subagent-prompt.md` under `~/.local/share/pixel/`, then wires
 each agent through its own extension point:
@@ -446,6 +491,7 @@ The hook entry points, all under `pixel run-hook` (alias `hook`), and where
 | `PostToolUse` (Claude `Edit`) | `pixel run-hook post-tool-use` | After an edit, emits the dependants of what was just changed. |
 | `PostToolUse` (Codex, Claude `Bash`, Devin `exec`) | `pixel run-hook metrics` | Codex tool results drop stderr, so the finalized invocation's 🟩 metrics line is re-emitted as `additionalContext` (Claude and Devin also get `systemMessage`/`additionalContext` output through the same relay, installed by `pixel install` and `pixel install --repo`; when the tool result already carries the box, Claude still receives it as `systemMessage` only while Codex and Devin stay silent) — correlated to the action record by cwd + argv, silent on any miss, and suppressed by the same `metrics` opt-out. An imported Claude entry re-run by an importing host exits without emitting, so it does not double Devin's own relay. |
 | `PreToolUse` (Codex, `<repo>/.codex/hooks.json`, `--repo`) | `pixel run-hook composed-guard` | Runs a sealed install-time snapshot of a foreign hook before Pixel's Codex rewrite. |
+| Native task lifecycle (Claude Code and Codex); Pi extension lifecycle | `pixel run-hook task-event --provider <host> --event <event>` | Binds coding objectives, gates edits, records tool outcomes, and bounds Stop correction. Global native hooks compose with existing hooks; Pi persists branch-local bindings. Once enforced, a task retains its gates if runtime settings change. |
 
 `pixel doctor` checks current installation artifacts and distinguishes configured
 or protocol-checked hooks from observed live execution.

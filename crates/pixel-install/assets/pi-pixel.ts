@@ -5,7 +5,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const PIXEL_BIN = __PIXEL_BIN__;
 const MAX_OUTPUT = 16000;
@@ -110,23 +110,108 @@ function runAsync(root: string, args: string[]): Promise<string> {
 
 // Spawn Pixel and gather its output; past `timeout` the child is killed and
 // the call settles with code null.
-function collect(root: string, args: string[], timeout: number): Promise<{ code: number | null; stdout: string; stderr: string }> {
+function collect(root: string, args: string[], timeout: number, input?: string, signal?: AbortSignal): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((done) => {
+    if (signal?.aborted) { done({ code: null, stdout: "", stderr: "cancelled" }); return; }
     let stdout = "", stderr = "", settled = false;
     const finish = (code: number | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       done({ code, stdout, stderr });
     };
-    const child = spawn(PIXEL_BIN, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(PIXEL_BIN, args, { cwd: root, stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"] });
+    const abort = () => { child.kill("SIGKILL"); finish(null); };
     const timer = setTimeout(() => { child.kill("SIGKILL"); stderr ||= `Pixel timed out after ${timeout} ms`; finish(null); }, timeout);
+    signal?.addEventListener("abort", abort, { once: true });
+    child.stdin?.on("error", () => finish(null));
+    child.stdin?.end(input);
     child.stdout?.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
     child.stderr?.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
     child.on("error", (error) => { stderr ||= error.message; finish(null); });
     child.on("close", (code) => finish(code));
   });
 }
+
+const TASK_UNAVAILABLE = "Pixel task state is unavailable. Reads and recovery remain available; edits and completion require a working task ledger.";
+type TaskBinding = { task_id: string; attempt_id: string; session_id?: string; branch_id?: string };
+type TaskDecision = { decision: "allow" | "deny" | "continue" | "observe"; reason?: string; context?: string; task_id?: string; attempt_id?: string };
+const taskOwners: Map<string, symbol> = ((globalThis as any)[Symbol.for("pixel.task.owners")] ??= new Map());
+
+const readFlags = (args: string[], allowed: string[], prefixes: string[]): boolean => {
+  const end = args.indexOf("--");
+  return args.slice(0, end < 0 ? args.length : end).every((arg) => !arg.startsWith("-") || allowed.includes(arg) || prefixes.some((prefix) => arg.startsWith(prefix)));
+};
+const gitRead = (args: string[]): boolean => ["status", "diff", "log", "show", "rev-parse", "ls-files"].includes(args[0]) && readFlags(args.slice(1), [
+  "-h", "--help", "-s", "--short", "-b", "--branch", "--porcelain", "--porcelain=v1", "--porcelain=v2",
+  "-z", "-v", "-t", "-m", "-o", "-d", "-c", "-u", "--cached", "--staged", "--others", "--exclude-standard",
+  "--modified", "--deleted", "--unmerged", "--stage", "--check", "--stat", "--numstat", "--shortstat",
+  "--name-only", "--name-status", "--summary", "--patch", "-p", "--no-patch", "--binary", "--raw",
+  "--exit-code", "--quiet", "--no-ext-diff", "--no-textconv", "--no-renames", "--no-index",
+  "--oneline", "--graph", "--decorate", "--all", "--no-decorate", "--no-color", "--reverse",
+  "--show-toplevel", "--show-prefix", "--git-dir", "--git-path", "--absolute-git-dir", "--verify",
+  "--revs-only", "--is-inside-work-tree", "--abbrev-ref", "--symbolic-full-name", "--end-of-options",
+], ["--format=", "--pretty=", "--max-count=", "--since=", "--until=", "--color=", "--unified="]);
+const searchRead = (args: string[]): boolean => readFlags(args, [
+  "-h", "--help", "--version", "-n", "-i", "-v", "-l", "-L", "-c", "-q", "-w", "-x", "-s",
+  "-F", "-E", "-e", "-f", "-g", "-r", "-R", "-H", "-I", "-a", "-o", "-U", "-z", "-0",
+  "-A", "-B", "-C", "-m", "--files", "--hidden", "--no-ignore", "--no-config", "--json",
+  "--line-number", "--ignore-case", "--fixed-strings", "--count", "--files-with-matches",
+  "--files-without-match", "--glob", "--iglob", "--type", "--type-not", "--max-count",
+  "--context", "--after-context", "--before-context", "--regexp", "--file", "--no-heading", "--heading",
+], ["--glob=", "--iglob=", "--type=", "--type-not=", "--max-count=", "--context=", "--after-context=", "--before-context=", "--regexp=", "--file=", "--color="]);
+const pixelReadOrRecovery = (args: string[]): boolean => {
+  if (args[0] === "config") return args.length === 1 || args.length === 2 && ["policy", "metrics", "--help", "-h"].includes(args[1]);
+  if (["task", "task-state"].includes(args[0])) return ["begin", "contract", "prepare", "verify", "review", "finish", "route", "cancel", "recover", "status", "events", "replay", "--help", "-h"].includes(args[1]);
+  return ["status", "doctor", "build-index", "scope-task", "find-code", "find-symbol", "search-content", "search-meaning", "impact", "pack-context", "what-changed", "review-changes", "repo-state", "list-areas", "list-flows", "who-calls", "capabilities", "--help", "--version"].includes(args[0]);
+};
+const sortRead = (args: string[]): boolean => readFlags(args, ["-r", "-n", "-u", "-f", "-b", "-d", "-g", "-h", "-M", "-V", "-s", "-z", "-c", "-C", "--reverse", "--numeric-sort", "--unique", "--ignore-case", "--stable", "--check", "--zero-terminated"], ["--key=", "--field-separator="]);
+const uniqRead = (args: string[]): boolean => {
+  const separator = args.indexOf("--");
+  const end = separator < 0 ? args.length : separator;
+  const operands = args.slice(0, end).filter((arg) => !arg.startsWith("-")).length + Math.max(0, args.length - end - 1);
+  return operands <= 1 && readFlags(args, ["-c", "-d", "-u", "-i", "-z", "--count", "--repeated", "--unique", "--ignore-case", "--zero-terminated"], ["--skip-fields=", "--skip-chars=", "--check-chars="]);
+};
+
+// Only syntactically simple reads/recovery survive a missing task engine.
+const mayMutate = (tool: string, input: any): boolean => {
+  if (EDIT_TOOLS.has(tool)) return true;
+  if (tool === "pixel" || tool === "pixel_project") return !["scope_task", "list_areas", "search_content", "find_code", "impact", "pack_context", "what_changed", "review_changes"].includes(input?.action);
+  if (!["Bash", "bash", "shell", "local_shell", "unified_exec", "exec_command"].includes(tool)) return !["Read", "read", "Glob", "glob", "Grep", "grep", "WebSearch", "web_search", "WebFetch", "web_fetch", "AskUserQuestion"].includes(tool);
+  const command = String(input?.command ?? input?.cmd ?? "");
+  const segments = splitShellSegments(command);
+  if (!segments || segments.slice(1).some((segment) => !segment.piped)) return true;
+  return segments.some((segment) => taskLeafMutates(segment.text, segments.length === 1));
+};
+const taskLeafMutates = (command: string, recovery: boolean): boolean => {
+  let words = tokenizeShell(command, true);
+  if (!words?.length) return true;
+  const base = (name: string) => name.split("/").at(-1);
+  if (base(words[0]) === "rtk") words = words.slice(words[1] === "proxy" ? 2 : 1);
+  if (["pixel", "pixel-dev"].includes(base(words[0] ?? "") ?? "")) return !pixelReadOrRecovery(words.slice(1)) || !recovery && ["task", "task-state", "doctor", "build-index"].includes(words[1]);
+  if (base(words[0] ?? "") === "git") return !gitRead(words.slice(1));
+  if (["rg", "grep"].includes(base(words[0] ?? "") ?? "")) return !searchRead(words.slice(1));
+  if (base(words[0] ?? "") === "sort") return !sortRead(words.slice(1));
+  if (base(words[0] ?? "") === "uniq") return !uniqRead(words.slice(1));
+  return !["pwd", "true", "false", "cat", "head", "tail", "wc", "ls", "read"].includes(base(words[0] ?? "") ?? "");
+};
+
+// Authority, completion budgets and deduplication live in the task engine.
+const taskEvent = async (ctx: ExtensionContext, event: string, payload: Record<string, unknown>, branch: string | undefined, binding: TaskBinding | undefined, branchUnbound: boolean): Promise<TaskDecision> => {
+  try {
+    const session = ctx.sessionManager.getSessionId();
+    const input = { ...payload, cwd: ctx.cwd, session_id: session, branch_id: branch, task_id: binding?.task_id, attempt_id: binding?.attempt_id, binding_session_id: binding?.session_id, branch_unbound: branchUnbound };
+    const result = await collect(ctx.cwd, ["run-hook", "task-event", "--provider", "pi", "--event", event, "--metrics", "off"], 8000, JSON.stringify(input), event === "interrupt" || event === "session-end" ? undefined : ctx.signal);
+    if (result.code !== 0) throw new Error("task engine unavailable");
+    const decision = JSON.parse(result.stdout);
+    if (!["allow", "deny", "continue", "observe"].includes(decision?.decision)) throw new Error("invalid task response");
+    return decision;
+  } catch {
+    const blocked = event === "stop" || event === "pre-tool-use" && mayMutate(String(payload.toolName ?? ""), payload.input);
+    return { decision: blocked ? "deny" : "observe", reason: TASK_UNAVAILABLE };
+  }
+};
 
 // The bootstrap's task-intent line, worded as the Claude prompt hook words it
 // (`prompt_intent::render_line`): a classifier claim, never a repository fact.
@@ -311,13 +396,19 @@ function splitShellSegments(text: string): { text: string; piped: boolean }[] | 
 
 /// The bounded shell grammar of `search_compat::shell_argv`: quotes are
 /// accepted, expansions/escapes/redirection/unquoted-globs are not.
-function tokenizeShell(segment: string): string[] | undefined {
+function tokenizeShell(segment: string, literalSingleQuotes = false): string[] | undefined {
   const args: string[] = [];
   let current = "";
   let started = false;
   let quote: string | null = null;
   for (let i = 0; i < segment.length; i++) {
     const c = segment[i];
+    if (c === "\0") return undefined;
+    if (literalSingleQuotes && quote === "'") {
+      if (c === "'") quote = null;
+      else current += c;
+      continue;
+    }
     if (c === "\n" || c === "\r" || c === "\\" || c === "$" || c === "`") return undefined;
     if (quote !== null) {
       if (c === quote) quote = null;
@@ -674,6 +765,89 @@ function formatWhatChanged(stdout: string): string | null {
 }
 
 export default function activate(pi: ExtensionAPI) {
+  const owner = Symbol("pixel-task-adapter");
+  let ownerKey: string | undefined;
+  let branch: string | undefined;
+  let binding: TaskBinding | undefined;
+  let branchUnbound = false;
+  const owns = (ctx: ExtensionContext) => {
+    const session = ctx.sessionManager?.getSessionId?.();
+    if (!session) return true; // Missing identity is rejected by the task engine.
+    const key = `${ctx.cwd}:${session}`;
+    if (!taskOwners.has(key)) taskOwners.set(key, owner);
+    ownerKey = key;
+    return taskOwners.get(key) === owner;
+  };
+  const restoreBinding = (ctx: ExtensionContext) => {
+    const saved = ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "custom" && entry.customType === "pixel-task-binding").at(-1) as any;
+    binding = typeof saved?.data?.task_id === "string" && typeof saved?.data?.attempt_id === "string" ? saved.data : undefined;
+  };
+  const observe = async (ctx: ExtensionContext, event: string, payload: Record<string, unknown> = {}): Promise<TaskDecision> => {
+    if (!owns(ctx)) return { decision: "observe" };
+    const decision = await taskEvent(ctx, event, payload, branch, binding, branchUnbound);
+    if (decision.task_id && decision.attempt_id) {
+      if (binding?.task_id !== decision.task_id || binding?.attempt_id !== decision.attempt_id || binding?.branch_id !== branch) {
+        binding = { task_id: decision.task_id, attempt_id: decision.attempt_id, session_id: binding?.task_id === decision.task_id ? binding.session_id ?? ctx.sessionManager.getSessionId() : ctx.sessionManager.getSessionId(), branch_id: branch };
+        pi.appendEntry("pixel-task-binding", binding);
+      }
+      branchUnbound = false;
+    }
+    return decision;
+  };
+  pi.on("session_start", async (_event, ctx) => {
+    const marker = ctx.sessionManager.getBranch().filter((entry: any) => entry.type === "custom" && entry.customType === "pixel-task-branch").at(-1) as any;
+    branch = marker?.data?.branch_id ?? ctx.sessionManager.getSessionId?.();
+    restoreBinding(ctx);
+    branchUnbound = Boolean(marker) && !binding;
+    await observe(ctx, "session-start");
+  });
+  pi.on("session_tree", async (event, ctx) => {
+    restoreBinding(ctx);
+    branch = event.newLeafId ?? ctx.sessionManager.getSessionId();
+    branchUnbound = !binding;
+    if (owns(ctx)) pi.appendEntry("pixel-task-branch", { branch_id: branch });
+    await observe(ctx, "session-start");
+  });
+  pi.on("session_shutdown", async (_event, ctx) => {
+    await observe(ctx, "session-end");
+    if (ownerKey && taskOwners.get(ownerKey) === owner) taskOwners.delete(ownerKey);
+  });
+  pi.on("message_end", async (event, ctx) => {
+    if (event.message.role !== "assistant") return;
+    const requests = event.message.content.filter((part) => part.type === "toolCall");
+    const leaf = ctx.sessionManager.getLeafId();
+    await observe(ctx, "model-response", {
+      event_id: leaf ? `${ctx.sessionManager.getSessionId()}:${leaf}:model-response` : undefined,
+      request_ids: requests.map((part: any) => part.id),
+      request_tools: Object.fromEntries(requests.map((part: any) => [part.id, part.name])),
+      response_id: event.message.responseId,
+      usage: event.message.usage ? {
+        input: event.message.usage.input,
+        output: event.message.usage.output,
+        cache_read: event.message.usage.cacheRead,
+        cache_write: event.message.usage.cacheWrite,
+      } : undefined,
+      coverage_complete: requests.every((part: any) => typeof part.id === "string" && part.id.length > 0),
+      stop_reason: event.message.stopReason,
+    });
+  });
+  pi.on("user_bash", async (_event, ctx) => {
+    // Both ! and !! stay private: record only that an external action occurred.
+    await observe(ctx, "user-bash");
+  });
+  pi.on("agent_before_settle", async (event, ctx) => {
+    if (!owns(ctx)) return;
+    if (ctx.signal?.aborted || event.outcome !== "completed") {
+      await observe(ctx, "interrupt", { cancelled: true });
+      return;
+    }
+    const decision = await observe(ctx, "stop", { stop_reason: event.outcome });
+    if (ctx.signal?.aborted || decision.decision === "allow" || decision.decision === "observe") return;
+    return {
+      entries: [{ type: "custom_message" as const, customType: "pixel-task-gate", content: decision.reason ?? TASK_UNAVAILABLE, display: true }],
+      continue: decision.decision === "continue" && event.context.canContinue,
+    };
+  });
   const resolvedPaths = new Set<string>();
   const state: { pixelHealthy?: boolean; pixelCalled: boolean } = { pixelCalled: false };
   pi.on("session_start", async () => {
@@ -780,6 +954,7 @@ export default function activate(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     const root = ctx?.cwd ?? process.cwd();
     const prompt = String((event as any).prompt ?? "");
+    await observe(ctx, "prompt-submit", { prompt });
     if (prompt.trim().length < MIN_PROMPT_LEN) return;
     try {
       const index = health(root, "scope_task");
@@ -818,6 +993,8 @@ export default function activate(pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", async (event, ctx) => {
+    const gate = await observe(ctx, "pre-tool-use", { toolName: event.toolName, toolCallId: event.toolCallId, input: event.input });
+    if (gate.decision === "deny") return { block: true, reason: gate.reason ?? TASK_UNAVAILABLE };
     const mode = policyFor(ctx.cwd);
     if (mode === "off") return;
     const decision = classify(event.toolName, event.input, ctx.cwd, resolvedPaths, state);
@@ -840,6 +1017,9 @@ export default function activate(pi: ExtensionAPI) {
   // successful edits have a post-edit snapshot; failures retain diagnostics.
   pi.on("tool_result", async (event, ctx) => {
     const root = ctx?.cwd ?? process.cwd();
+    await observe(ctx, event.isError ? "tool-failure" : "post-tool-use", {
+      toolName: event.toolName, toolCallId: event.toolCallId, input: event.input, isError: event.isError,
+    });
     // The global `pixel` tool never runs pixel_project.execute; its result is
     // the only signal that the model consulted Pixel. Pi reports a tool's
     // returned `isError` as false unless it throws, so an error-shaped

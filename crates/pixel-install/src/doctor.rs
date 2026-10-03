@@ -96,6 +96,7 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("install.legacy-wrappers", FIX_INSTALL),
     entry("rule.parity", FIX_INSTALL),
     entry("rule.scenarios", FIX_INSTALL),
+    entry("repo.task-hook-observations", None),
     entry("repo.codex-config", FIX_REPO_INSTALL),
     entry("repo.codex-hooks", FIX_REPO_INSTALL),
     entry("repo.codex-hook-review", None),
@@ -544,6 +545,13 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             ) {
                 missing.push("PostToolUse(Bash)→metrics");
             }
+            if !crate::routing::task_hooks_registered(
+                &value,
+                crate::routing::Provider::Claude,
+                &exe,
+            ) {
+                missing.push("task lifecycle gates");
+            }
             if !missing.is_empty() {
                 return Err(format!(
                     "missing pixel lifecycle hooks in {}: {} — run `pixel install`",
@@ -831,6 +839,9 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
     }
 
     if let Some(root) = &options.repo_root {
+        runner.check("repo.task-hook-observations", || {
+            task_hook_observations(root)
+        });
         // Repo-local enforcement (`pixel install --repo <path>`). A check is
         // red only when the file carries evidence of a Pixel install (a
         // Pixel entry, marker or sidecar) and that install is broken. An
@@ -1394,6 +1405,33 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             red,
             skipped,
         },
+    })
+}
+
+/// Registration and stored trust are distinct from actual hook observations.
+fn task_hook_observations(root: &Path) -> std::result::Result<DoctorCheckDetail, String> {
+    let path = root.join(".pixel/task-hook-observations.json");
+    let value: serde_json::Value = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map_err(|error| format!("invalid task hook observations: {error}"))?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(format!("cannot read task hook observations: {error}")),
+    };
+    let hosts = ["claude", "codex", "pi"].map(|provider| {
+        let observation = &value[provider];
+        let observed = observation["schema_version"] == 1
+            && observation["provider"] == provider
+            && observation["session_id"].as_str().is_some_and(|id| !id.is_empty())
+            && observation["event"].as_str().is_some_and(|event| !event.is_empty())
+            && observation["observed_unix"].as_u64().is_some();
+        serde_json::json!({"provider":provider,"observed":observed,"evidence":if observed { observation.clone() } else { serde_json::Value::Null }})
+    });
+    let observed = hosts.iter().filter(|host| host["observed"] == true).count();
+    Ok(DoctorCheckDetail {
+        summary: format!(
+            "{observed}/3 task adapters observed in this repository; unobserved hosts and unsupported tool paths remain unverified"
+        ),
+        detail: Some(serde_json::json!({"path":path,"hosts":hosts,"complete_tool_coverage":false})),
     })
 }
 
@@ -2491,6 +2529,53 @@ mod tests {
     };
     use super::{FactsVerdict, facts_poisoned_reason, facts_verdict, size_mib};
     use crate::InstallError;
+
+    #[test]
+    fn task_observations_should_distinguish_registration_from_real_session_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let initial = super::task_hook_observations(temp.path()).unwrap();
+        assert!(initial.summary.starts_with("0/3"));
+        let path = temp.path().join(".pixel/task-hook-observations.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let event = serde_json::json!({"schema_version":1,"provider":"pi","session_id":"real-session","event":"pre-tool-use","observed_unix":123,"coverage":{"native_hooks":true}});
+        std::fs::write(
+            &path,
+            serde_json::json!({"pi":event,"codex":{"registered":true,"trusted":true}}).to_string(),
+        )
+        .unwrap();
+        let observed = super::task_hook_observations(temp.path()).unwrap();
+        assert!(observed.summary.starts_with("1/3"));
+        let detail = observed.detail.unwrap();
+        assert_eq!(detail["hosts"][1]["observed"], false);
+        assert_eq!(detail["hosts"][2]["evidence"]["session_id"], "real-session");
+        assert_eq!(detail["complete_tool_coverage"], false);
+        for (key, invalid) in [
+            ("schema_version", serde_json::json!(2)),
+            ("provider", serde_json::json!("claude")),
+            ("session_id", serde_json::json!("")),
+            ("event", serde_json::json!("")),
+            ("observed_unix", serde_json::json!("123")),
+        ] {
+            let mut malformed = event.clone();
+            malformed[key] = invalid;
+            std::fs::write(&path, serde_json::json!({"pi":malformed}).to_string()).unwrap();
+            let detail = super::task_hook_observations(temp.path())
+                .unwrap()
+                .detail
+                .unwrap();
+            assert_eq!(detail["hosts"][2]["observed"], false, "{key}");
+            assert_eq!(
+                detail["hosts"][2]["evidence"],
+                serde_json::Value::Null,
+                "{key}"
+            );
+        }
+        std::fs::write(&path, "not json").unwrap();
+        assert!(super::task_hook_observations(temp.path()).is_err());
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(super::task_hook_observations(temp.path()).is_err());
+    }
 
     fn finding(
         id: &str,
