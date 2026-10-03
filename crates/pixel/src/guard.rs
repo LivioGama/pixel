@@ -631,17 +631,14 @@ fn policy_mode(payload: &Value) -> crate::config_cmd::PolicyMode {
 }
 
 /// OpenCode's plugin hook hands over the tool call as it names it internally:
-/// a lowercase tool id (`bash`, `read`, `grep`) and camelCase arguments
-/// (`filePath`). Every arm in [`enforce_reason`] is written against the Claude
-/// spelling, so the two are aliased here — once — instead of doubling each
-/// pattern. `file_path` is only written when absent, so an argument the host
-/// already sent under a name this function also knows is never overwritten.
+/// a lowercase tool id (`bash`, `read`, `grep`) and a camelCase path argument
+/// (`filePath`). The read and grep arms of [`enforce_reason`] already read the
+/// lowercase ids, so the tool name is passed through untouched; only the path
+/// argument is aliased here to the `file_path` spelling those arms read. The
+/// shell arm names `bash` itself (line 730). `file_path` is only written when
+/// absent, so an argument the host already sent under a name this function
+/// also knows is never overwritten.
 fn opencode_tool_input(mut payload: Value) -> Value {
-    if let Some(Value::String(tool)) = payload.get("tool_name")
-        && tool.chars().next().is_some_and(char::is_lowercase)
-    {
-        payload["tool_name"] = Value::String(tool.to_lowercase());
-    }
     let Some(input) = payload.get_mut("tool_input").and_then(Value::as_object_mut) else {
         return payload;
     };
@@ -727,7 +724,17 @@ fn enforce_reason(provider: Provider, payload: &Value) -> Option<String> {
     }
     if matches!(
         tool,
-        "Bash" | "shell" | "unified_exec" | "local_shell" | "exec_command" | "run_command" | "exec"
+        // `bash` is OpenCode's lowercase shell id (lowercase read/grep arms
+        // below already match their ids); the rest are the hosts that spell
+        // the shell tool with a title-case or distinct name.
+        "Bash"
+            | "bash"
+            | "shell"
+            | "unified_exec"
+            | "local_shell"
+            | "exec_command"
+            | "run_command"
+            | "exec"
     ) {
         if input.get("env").is_some() || input.get("environment").is_some() {
             return None;
@@ -7628,8 +7635,8 @@ mod tests {
             opencode_tool_input(pinned)["tool_input"]["file_path"],
             "keep.ts"
         );
-        // A tool name that is already Claude-spelled is untouched: the
-        // lowercase rule is what decides, not the provider being OpenCode.
+        // The tool name is passed through regardless of case — only the path
+        // argument is aliased here, never the tool id.
         let untouched = serde_json::json!({
             "hook_event_name": "PreToolUse",
             "tool_name": "Read",
@@ -7684,6 +7691,30 @@ mod tests {
             "cwd": repo,
         });
         assert_eq!(enforce_reason(Provider::Claude, &claude), None);
+    }
+
+    /// OpenCode runs shell reads through its `bash` tool (lowercase id), and
+    /// the shell arm keys its denials on `bash` too — not just the title-case
+    /// `Bash` the other hosts spell. Without that match a `bash`-wrapped
+    /// `cat` fell past the shell arm and passed unjudged even with the native
+    /// `read` tool's deny firing, so the one route OpenCode enforces was the
+    /// one it never reached.
+    #[test]
+    fn opencode_bash_tool_reads_are_denied_like_its_native_read_tool() {
+        let root = scratch_repo("opencode-bash-read");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join(".pixel")).unwrap();
+        std::fs::write(root.join(".pixel/base.shard"), "indexed\n").unwrap();
+        std::fs::write(root.join("README.md"), "text\n").unwrap();
+        let payload = serde_json::json!({
+            "hook_event_name": "PreToolUse",
+            "tool_name": "bash",
+            "tool_input": {"command": "cat README.md"},
+            "cwd": root,
+        });
+        let reason = enforce_reason(Provider::Opencode, &payload)
+            .expect("a flagless repo read through OpenCode's bash tool is denied");
+        assert!(reason.contains("repository read"), "{reason}");
     }
 
     /// Every reader of a repository file is judged like `cat`, with or

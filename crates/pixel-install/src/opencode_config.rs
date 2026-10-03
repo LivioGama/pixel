@@ -24,10 +24,12 @@
 //! supported host whose plugin hook can *stop* a call — `tool.execute.before`
 //! may throw — so it is the only host where the substitutions and refusals
 //! `pixel hook guard` already computes are reachable rather than merely
-//! suggested. Writing `pixel.mjs` into `~/.config/opencode/plugins/` is what
+//! suggested. Writing `pixel.js` into `~/.config/opencode/plugins/` is what
 //! puts the provider in front of a session: OpenCode auto-loads that
 //! directory, so no `opencode.json` edit is needed and a config the user
-//! cannot parse cannot stop the guard from loading.
+//! cannot parse cannot stop the guard from loading. The file is `.js`, not
+//! `.mjs` — that directory is auto-loaded by extension, and a `.mjs` there is
+//! silently ignored on every launch (see `PIXEL_PLUGIN_FILE`).
 //!
 //! The same step sweeps two stale artifacts out of `opencode.json`:
 //! `instructions` entries naming the deployed prompt (written by earlier
