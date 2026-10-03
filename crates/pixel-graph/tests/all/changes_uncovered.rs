@@ -330,6 +330,16 @@ fn past_the_base_read_cap_the_old_side_is_reported_unexamined() {
 
     let r = report(&root, Some("HEAD"));
     assert_eq!(r.changed_files, 201);
+    // The symbol judgement shares the cap: the 201st file is judged by its
+    // status alone, and says so.
+    let basis = |name: &str| {
+        r.symbols
+            .iter()
+            .find(|s| s.name == name)
+            .map(|s| (s.change.clone(), s.change_basis.clone()))
+    };
+    assert_eq!(basis("f199"), Some(("modified".into(), "symbol".into())));
+    assert_eq!(basis("f200"), Some(("modified".into(), "file".into())));
     assert!(
         r.uncovered_lower_bound,
         "a capped scan is a lower bound: {:?}",

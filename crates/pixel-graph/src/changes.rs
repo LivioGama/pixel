@@ -1406,6 +1406,11 @@ mod tests {
         assert_eq!(at(1), Some(1));
         assert_eq!(at(10), Some(1));
         assert_eq!(at(11), None);
+        // Narrowest by line count, not by any other ordering of the bounds.
+        let overlapping = vec![row(5, 2, 5), row(6, 1, 3)];
+        assert_eq!(innermost(&overlapping, 2).map(|s| s.id), Some(6));
+        let inner_late = vec![row(7, 1, 10), row(8, 8, 9)];
+        assert_eq!(innermost(&inner_late, 8).map(|s| s.id), Some(8));
     }
 
     #[test]

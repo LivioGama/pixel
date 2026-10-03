@@ -2327,9 +2327,9 @@ impl Service {
         let returned_symbols = out["symbols"].as_array().map_or(0, Vec::len);
         let returned_processes = out["affected_processes"].as_array().map_or(0, Vec::len);
         let returned_consumers = out["consumers"].as_array().map_or(0, Vec::len);
-        let has_more = offset.saturating_add(returned_symbols) < symbols_total
-            || offset.saturating_add(returned_processes) < affected_processes_total
-            || offset.saturating_add(returned_consumers) < consumers_total;
+        let has_more = page_has_more(offset, returned_symbols, symbols_total)
+            || page_has_more(offset, returned_processes, affected_processes_total)
+            || page_has_more(offset, returned_consumers, consumers_total);
         if let Some(object) = out.as_object_mut() {
             object.insert("symbols_total".into(), json!(symbols_total));
             object.insert("returned_symbols".into(), json!(returned_symbols));
@@ -3890,6 +3890,11 @@ fn compact_edges(
         grouped.entry(e.kind.as_str()).or_default().push(entry);
     }
     Ok(serde_json::to_value(grouped).unwrap_or(Value::Null))
+}
+
+/// Whether a list paged from `offset` holds entries past the `returned` ones.
+fn page_has_more(offset: usize, returned: usize, total: usize) -> bool {
+    offset.saturating_add(returned) < total
 }
 
 /// One bounded read and stored-hash comparison per distinct returned file.
@@ -8449,5 +8454,17 @@ mod tests {
         assert_eq!(second["returned_consumers"], 5);
         assert_eq!(second["base"], "index");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn page_has_more_should_stop_exactly_at_the_last_entry() {
+        assert!(page_has_more(0, 20, 25));
+        assert!(!page_has_more(20, 5, 25));
+        assert!(
+            !page_has_more(0, 3, 3),
+            "a page ending on the last entry is the last page"
+        );
+        assert!(!page_has_more(0, 0, 0));
+        assert!(page_has_more(0, 2, 3));
     }
 }
