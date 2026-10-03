@@ -57,6 +57,9 @@ pub struct ActionEvent {
     /// Correlates one invocation, never a global latest-operation pointer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_id: Option<String>,
+    /// Optional task correlation; this best-effort log is never completion evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<TaskCorrelation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metrics: Option<OperationMetrics>,
     pub ts_ms: i64,
@@ -84,10 +87,23 @@ pub struct ActionEvent {
     pub serve: Vec<ServeStep>,
 }
 
+/// Links an invocation to the durable task ledger without changing legacy records.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskCorrelation {
+    pub task_id: String,
+    pub attempt_id: String,
+    pub span_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_span_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_call_id: Option<String>,
+}
+
 impl ActionEvent {
     pub fn new(command: impl Into<String>, args: impl Into<String>) -> Self {
         ActionEvent {
             invocation_id: Some(metrics::invocation_id()),
+            task: None,
             metrics: None,
             ts_ms: now_ms(),
             pid: std::process::id(),
@@ -103,6 +119,12 @@ impl ActionEvent {
             pool_chars: None,
             serve: Vec::new(),
         }
+    }
+
+    /// Attach explicit task IDs supplied by the caller, without reading ambient state.
+    pub fn with_task(mut self, task: TaskCorrelation) -> Self {
+        self.task = Some(task);
+        self
     }
 
     pub fn with_result(mut self, result: &Result<(), String>, duration: Duration) -> Self {
@@ -497,10 +519,34 @@ mod tests {
              \"outcome\":\"ok\",\"duration_ms\":3}";
         let ev: ActionEvent = serde_json::from_str(line).unwrap();
         assert_eq!(ev.command, "search");
+        assert_eq!(ev.task, None);
         assert_eq!(ev.snippet_cap_chars, None);
         assert_eq!(ev.pool_chars, None);
         assert_eq!(ev.savings_ratio(), None);
         assert!(ev.serve.is_empty());
+    }
+
+    #[test]
+    fn task_correlation_should_survive_the_writer_without_changing_legacy_rows() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("actions.jsonl");
+        let task = TaskCorrelation {
+            task_id: "task-1".into(),
+            attempt_id: "attempt-2".into(),
+            span_id: "span-3".into(),
+            parent_span_id: Some("span-parent".into()),
+            host_call_id: Some("host-call".into()),
+        };
+        let mut log = ActionLog::spawn_at(path.clone());
+        log.log(ActionEvent::new("impact", "symbol").with_task(task.clone()));
+        log.log(ActionEvent::new("status", "."));
+        log.finish_flush();
+        let events = tail(&path, 5).unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].task, Some(task));
+        assert_eq!(events[1].task, None);
+        let raw = fs::read_to_string(path).unwrap();
+        assert!(!raw.lines().nth(1).unwrap().contains("\"task\""));
     }
 
     /// The serve steps are what tells a slow cold start from a slow query;

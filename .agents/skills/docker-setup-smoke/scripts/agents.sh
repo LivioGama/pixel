@@ -109,7 +109,7 @@ PY
 before_searches=$(actions search-content)
 before_compat=$(actions search-compat)
 serve claude
-ANTHROPIC_BASE_URL="http://127.0.0.1:$port" ANTHROPIC_API_KEY=sk-ant-smoke-fake \
+ANTHROPIC_BASE_URL="http://127.0.0.1:$port" CLAUDE_CODE_OAUTH_TOKEN=smoke-fake-oauth \
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_AUTOUPDATER=1 \
     timeout 120 claude -p 'Where is helper_1 defined?' --model claude-smoke-fake \
     --dangerously-skip-permissions --output-format json > /evidence/claude.json 2> /evidence/claude.err

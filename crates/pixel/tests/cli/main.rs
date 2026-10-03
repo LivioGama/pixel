@@ -30,6 +30,9 @@ mod scope_task_precision;
 mod search_compat_cli;
 mod support;
 mod targets_cli;
+mod task_cli;
+mod task_route_cli;
+mod task_watchdog;
 mod ultraflow_cli;
 mod uninstall_cli;
 #[cfg(unix)]

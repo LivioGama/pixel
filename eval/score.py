@@ -8,11 +8,27 @@ Score = sum(must pattern hits) - sum(never penalties), floored at 0.
 `answered` is False when the run ended in error (e.g. error_max_turns) —
 an unanswered run scores 0 regardless of partial text.
 """
-import argparse, json, re, sys
+import argparse, hashlib, json, re, sys
 from pathlib import Path
 
 def load_result(path: Path, cli: str):
     """Return (answer, metrics) for a transcript, parsed per CLI."""
+    controlled = path.with_suffix(".controlled.json")
+    if controlled.exists():
+        r = json.loads(controlled.read_text())
+        if (r.get("schema_version") != 1 or r.get("cli") != cli
+                or r.get("transcript_sha256") != hashlib.sha256(path.read_bytes()).hexdigest()):
+            return "", {"answered": False, "turns": None, "input_tokens": None,
+                        "cost_usd": None, "coverage": "partial"}
+        # Backend captures termination and heldout checks outside model context.
+        keys = ("answered", "turns", "input_tokens", "gen_tokens", "cost_usd", "rep",
+                "comparison_key", "coverage", "model_tool_requests", "duration_ms",
+                "verifier_success", "termination", "observed_model_tool_requests",
+                "blocked_requests", "retried_requests", "coordinator_calls", "classifier_calls")
+        metrics = {key: r.get(key) for key in keys}
+        metrics["answered"] = (r.get("answered") is True and r.get("verifier_success") is True
+                               and r.get("termination") == "exited" and r.get("exit_code") == 0)
+        return r.get("answer") or "", metrics
     answer, metrics = "", {}
     if cli == "codex":
         texts, turns, input_tokens, output_tokens, turn_failed = [], 0, 0, 0, False
@@ -132,7 +148,7 @@ def main():
         by_arm.setdefault(r["arm"], []).append(r)
     for arm, rs in sorted(by_arm.items()):
         mean = sum(r["score"] for r in rs) / len(rs)
-        turns = sum(r["turns"] or 0 for r in rs)
+        turns = sum(r["turns"] for r in rs) if all(r["turns"] is not None for r in rs) else None
         answered = sum(1 for r in rs if r["answered"])
         print(f"  {arm:<10} mean={mean:5.1f}  answered={answered}/{len(rs)}  total_turns={turns}")
     (results / "scores.json").write_text(json.dumps(rows, indent=2))

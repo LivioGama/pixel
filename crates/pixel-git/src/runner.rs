@@ -136,6 +136,31 @@ impl GitRunner {
         execute(cmd, arg_strings, &self.options)
     }
 
+    /// Run repository plumbing without inherited Git routing, injected config,
+    /// global configuration or hooks. Existing callers retain `run` semantics.
+    pub fn run_isolated(&self, args: &[&str]) -> Result<Vec<u8>, GitError> {
+        let mut cmd = Command::new("git");
+        for (name, _) in std::env::vars_os() {
+            if name.as_encoded_bytes().starts_with(b"GIT_") {
+                cmd.env_remove(name);
+            }
+        }
+        cmd.env_remove("ANTHROPIC_API_KEY")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .arg("-C")
+            .arg(&self.root)
+            .args([
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+            ])
+            .args(args);
+        let arg_strings = args.iter().map(ToString::to_string).collect();
+        execute(cmd, arg_strings, &self.options)
+    }
+
     /// Same as `run` but returns `None` instead of erroring — the "graceful
     /// degradation outside a git repo" behavior `gitsync.rs` relies on
     /// today.
@@ -500,6 +525,101 @@ fn execute_output_with_stdin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn isolated_git_obeys_root_and_ignores_external_routing_config_and_hooks() {
+        use std::os::unix::fs::PermissionsExt;
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let base =
+            std::env::temp_dir().join(format!("pixel-isolated-{}-{nonce}", std::process::id()));
+        let root = base.join("root");
+        let foreign = base.join("foreign");
+        for directory in [&root, &foreign] {
+            std::fs::create_dir_all(directory).unwrap();
+            GitRunner::new(directory)
+                .run_isolated(&["init", "-q"])
+                .unwrap();
+        }
+        let hook = root.join(".git/hooks/pre-commit");
+        std::fs::write(&hook, "#!/bin/sh\nexit 23\n").unwrap();
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let global = base.join("global.gitconfig");
+        let system = base.join("system.gitconfig");
+        std::fs::write(&global, "[pixel]\nfromglobal = hostile\n").unwrap();
+        std::fs::write(&system, "[pixel]\nfromsystem = hostile\n").unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "runner::tests::isolated_git_child", "--ignored"])
+            .env("PIXEL_ISOLATED_TEST_ROOT", &root)
+            .env("GIT_DIR", foreign.join(".git"))
+            .env("GIT_WORK_TREE", &foreign)
+            .env("GIT_INDEX_FILE", foreign.join(".git/index"))
+            .env("GIT_CONFIG_GLOBAL", &global)
+            .env("GIT_CONFIG_SYSTEM", &system)
+            .env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "core.worktree")
+            .env("GIT_CONFIG_VALUE_0", &foreign)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(!foreign.join(".git/index").exists());
+        assert!(
+            GitRunner::new(&foreign)
+                .run_isolated(&["rev-parse", "--verify", "HEAD"])
+                .is_err()
+        );
+        assert!(
+            !GitRunner::new(&root)
+                .run_isolated(&["rev-parse", "--verify", "HEAD"])
+                .unwrap()
+                .is_empty()
+        );
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture with isolated process environment"]
+    fn isolated_git_child() {
+        let root = PathBuf::from(std::env::var_os("PIXEL_ISOLATED_TEST_ROOT").unwrap());
+        let runner = GitRunner::new(&root);
+        let top = runner
+            .run_isolated(&["rev-parse", "--show-toplevel"])
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(top).unwrap().trim(),
+            root.canonicalize().unwrap().to_str().unwrap()
+        );
+        assert!(
+            runner
+                .run_isolated(&["config", "--get", "pixel.fromglobal"])
+                .is_err()
+        );
+        assert!(
+            runner
+                .run_isolated(&["config", "--get", "pixel.fromsystem"])
+                .is_err()
+        );
+        let committed = runner.run_isolated(&[
+            "-c",
+            "user.name=Isolated test",
+            "-c",
+            "user.email=isolated@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "isolated",
+        ]);
+        assert!(
+            committed.is_ok(),
+            "local pre-commit hook must not execute: {committed:?}"
+        );
+        let format = runner.run_isolated(&["log", "-1", "--format=%s"]).unwrap();
+        assert_eq!(format, b"isolated\n");
+    }
 
     #[test]
     fn timeout_kills_a_hanging_process_promptly() {

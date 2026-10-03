@@ -294,19 +294,26 @@ pub(crate) fn install_metrics_hook(
             ),
         ));
     };
+    let before = hooks.clone();
     let merged = crate::config::merge_hook_entry(
         hooks.get("PostToolUse"),
         METRICS_HOOK_MARKER,
         metrics_hook_entry(exe),
     );
-    if hooks.get("PostToolUse") == Some(&merged) {
+    hooks.insert("PostToolUse".to_string(), merged);
+    if let Err(error) =
+        crate::routing::merge_task_hooks(hooks, crate::routing::Provider::Codex, exe)
+    {
+        return Ok(step(CheckStatus::Red, format!("{error} — not touched")));
+    }
+    if *hooks == before {
         return Ok(step(
             CheckStatus::Green,
-            format!("verified metrics hook in {}", path.display()),
+            format!("verified metrics and task hooks in {}", path.display()),
         ));
     }
     let summary = format!(
-        "{} metrics PostToolUse hook in {}",
+        "{} metrics and task hooks in {}",
         if path.is_file() {
             "updated"
         } else {
@@ -317,7 +324,6 @@ pub(crate) fn install_metrics_hook(
     if dry_run {
         return Ok(step(CheckStatus::Green, dry_run_summary(true, &summary)));
     }
-    hooks.insert("PostToolUse".to_string(), merged);
     write_hooks(&path, &value)?;
     Ok(step(CheckStatus::Green, summary))
 }
@@ -357,8 +363,21 @@ pub(crate) fn check_metrics_hook(
             path.display()
         ));
     }
+    if !crate::routing::task_hooks_registered(
+        &value,
+        crate::routing::Provider::Codex,
+        Path::new("pixel"),
+    ) {
+        return Err(format!(
+            "task lifecycle hooks missing or asynchronous in {} — run `pixel install`",
+            path.display()
+        ));
+    }
     Ok((
-        format!("metrics PostToolUse hook registered in {}", path.display()),
+        format!(
+            "metrics and task hooks registered in {} (runtime activity checked separately)",
+            path.display()
+        ),
         detail,
     ))
 }
@@ -524,6 +543,7 @@ fn hook_event_label(event: &str) -> Option<&'static str> {
         "SubagentStart" => "subagent_start",
         "SubagentStop" => "subagent_stop",
         "Stop" => "stop",
+        "Interrupt" => "interrupt",
         _ => return None,
     })
 }
@@ -806,7 +826,11 @@ mod tests {
 
         install_metrics_hook(&home, exe, false).unwrap();
         let entries = post_tool_use(&home).as_array().unwrap().clone();
-        assert_eq!(entries.len(), 2, "foreign group preserved + ours added");
+        assert_eq!(
+            entries.len(),
+            3,
+            "foreign group preserved + metrics and task hooks added"
+        );
         let command = entries[1]["hooks"][0]["command"].as_str().unwrap();
         assert!(command.contains(METRICS_HOOK_MARKER));
         assert!(
@@ -821,7 +845,7 @@ mod tests {
         // Second install verifies instead of duplicating.
         let step = install_metrics_hook(&home, exe, false).unwrap();
         assert!(step.summary.contains("verified"), "{}", step.summary);
-        assert_eq!(post_tool_use(&home).as_array().unwrap().len(), 2);
+        assert_eq!(post_tool_use(&home).as_array().unwrap().len(), 3);
         let _ = fs::remove_dir_all(&home);
     }
 
@@ -833,7 +857,7 @@ mod tests {
         let entries = post_tool_use(&home).as_array().unwrap().clone();
         assert_eq!(
             entries.len(),
-            1,
+            2,
             "the stale entry is replaced, not appended"
         );
         let command = entries[0]["hooks"][0]["command"].as_str().unwrap();
@@ -898,6 +922,11 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        assert!(
+            check_metrics_hook(&home).is_err(),
+            "metrics alone cannot satisfy task gate registration"
+        );
+        install_metrics_hook(&home, Path::new("pixel"), false).unwrap();
         assert!(check_metrics_hook(&home).is_ok());
         let _ = fs::remove_dir_all(&home);
     }

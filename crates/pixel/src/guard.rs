@@ -932,7 +932,7 @@ fn bounded_read(input: &Value) -> bool {
 
 /// Split only unquoted pipeline/sequence operators, retaining stdin provenance.
 /// The existing strict argv parser validates every leaf before any decision.
-fn split_segments(text: &str) -> Option<Vec<(&str, bool)>> {
+pub(crate) fn split_segments(text: &str) -> Option<Vec<(&str, bool)>> {
     let mut segments = Vec::new();
     let mut quote = None;
     let mut start = 0;

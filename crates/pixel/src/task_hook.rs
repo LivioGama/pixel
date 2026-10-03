@@ -1,0 +1,1073 @@
+//! Host hook normalization and response envelopes for durable task gates.
+
+use std::io::{Read, Write};
+use std::path::Path;
+use std::time::Duration;
+
+use serde_json::{Value, json};
+
+/// Hook payloads are bounded independently of the host's output limits (1 MiB).
+const MAX_INPUT: u64 = 1_048_576;
+// Return a decision before the managed native hooks' ten-second host deadline
+// and Pi's eight-second subprocess deadline; a stalled worker dies with run().
+const DECISION_TIMEOUT: Duration = Duration::from_secs(6);
+const UNAVAILABLE: &str = "Pixel task state is unavailable. Reads and recovery remain available; edits and completion require a working task ledger.";
+
+/// Hosts with a verified task lifecycle adapter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum TaskProvider {
+    Claude,
+    Codex,
+    Pi,
+}
+
+impl TaskProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Pi => "pi",
+        }
+    }
+}
+
+/// Host lifecycle boundaries translated to the shared task bridge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum TaskHookEvent {
+    SessionStart,
+    PromptSubmit,
+    PreToolUse,
+    PostToolUse,
+    ToolFailure,
+    Stop,
+    SessionEnd,
+    Interrupt,
+    SubagentStart,
+    SubagentStop,
+    ModelResponse,
+    UserBash,
+}
+
+impl TaskHookEvent {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SessionStart => "session-start",
+            Self::PromptSubmit => "prompt-submit",
+            Self::PreToolUse => "pre-tool-use",
+            Self::PostToolUse => "post-tool-use",
+            Self::ToolFailure => "tool-failure",
+            Self::Stop => "stop",
+            Self::SessionEnd => "session-end",
+            Self::Interrupt => "interrupt",
+            Self::SubagentStart => "subagent-start",
+            Self::SubagentStop => "subagent-stop",
+            Self::ModelResponse => "model-response",
+            Self::UserBash => "user-bash",
+        }
+    }
+
+    fn host_name(self) -> &'static str {
+        match self {
+            Self::SessionStart => "SessionStart",
+            Self::PromptSubmit => "UserPromptSubmit",
+            Self::PreToolUse => "PreToolUse",
+            Self::PostToolUse => "PostToolUse",
+            Self::ToolFailure => "PostToolUseFailure",
+            Self::Stop => "Stop",
+            Self::SessionEnd => "SessionEnd",
+            Self::Interrupt => "Interrupt",
+            Self::SubagentStart => "SubagentStart",
+            Self::SubagentStop => "SubagentStop",
+            Self::ModelResponse => "ModelResponse",
+            Self::UserBash => "UserBash",
+        }
+    }
+}
+
+fn string<'a>(payload: &'a Value, names: &[&str]) -> Option<&'a str> {
+    names
+        .iter()
+        .find_map(|name| payload.get(name)?.as_str().filter(|s| !s.is_empty()))
+}
+
+fn basename(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+fn tool_label(value: &str) -> Option<&str> {
+    (!value.is_empty()
+        && value.len() <= 256
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"_-.:/".contains(&byte)))
+    .then_some(value)
+}
+
+fn bounded_count(value: &Value, maximum: u64) -> Option<u64> {
+    value.as_u64().filter(|count| *count <= maximum)
+}
+
+fn usage(payload: &Value) -> Value {
+    let counters = ["input", "output", "cache_read", "cache_write"]
+        .into_iter()
+        .filter_map(|key| {
+            bounded_count(&payload["usage"][key], 1_000_000_000_000)
+                .map(|count| (key.to_string(), Value::from(count)))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    if counters.is_empty() {
+        Value::Null
+    } else {
+        Value::Object(counters)
+    }
+}
+
+fn read_flags(args: &[String], allowed: &[&str], prefixes: &[&str]) -> bool {
+    args.iter()
+        .take_while(|arg| arg.as_str() != "--")
+        .all(|arg| {
+            !arg.starts_with('-')
+                || allowed.contains(&arg.as_str())
+                || prefixes.iter().any(|prefix| arg.starts_with(prefix))
+        })
+}
+
+fn git_read(args: &[String]) -> bool {
+    args.first().is_some_and(|op| {
+        matches!(
+            op.as_str(),
+            "status" | "diff" | "log" | "show" | "rev-parse" | "ls-files"
+        )
+    }) && read_flags(
+        &args[1..],
+        &[
+            "-h",
+            "--help",
+            "-s",
+            "--short",
+            "-b",
+            "--branch",
+            "--porcelain",
+            "--porcelain=v1",
+            "--porcelain=v2",
+            "-z",
+            "-v",
+            "-t",
+            "-m",
+            "-o",
+            "-d",
+            "-c",
+            "-u",
+            "--cached",
+            "--staged",
+            "--others",
+            "--exclude-standard",
+            "--modified",
+            "--deleted",
+            "--unmerged",
+            "--stage",
+            "--check",
+            "--stat",
+            "--numstat",
+            "--shortstat",
+            "--name-only",
+            "--name-status",
+            "--summary",
+            "--patch",
+            "-p",
+            "--no-patch",
+            "--binary",
+            "--raw",
+            "--exit-code",
+            "--quiet",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--no-renames",
+            "--no-index",
+            "--oneline",
+            "--graph",
+            "--decorate",
+            "--all",
+            "--no-decorate",
+            "--no-color",
+            "--reverse",
+            "--show-toplevel",
+            "--show-prefix",
+            "--git-dir",
+            "--git-path",
+            "--absolute-git-dir",
+            "--verify",
+            "--revs-only",
+            "--is-inside-work-tree",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "--end-of-options",
+        ],
+        &[
+            "--format=",
+            "--pretty=",
+            "--max-count=",
+            "--since=",
+            "--until=",
+            "--color=",
+            "--unified=",
+        ],
+    )
+}
+
+fn search_read(args: &[String]) -> bool {
+    read_flags(
+        args,
+        &[
+            "-h",
+            "--help",
+            "--version",
+            "-n",
+            "-i",
+            "-v",
+            "-l",
+            "-L",
+            "-c",
+            "-q",
+            "-w",
+            "-x",
+            "-s",
+            "-F",
+            "-E",
+            "-e",
+            "-f",
+            "-g",
+            "-r",
+            "-R",
+            "-H",
+            "-I",
+            "-a",
+            "-o",
+            "-U",
+            "-z",
+            "-0",
+            "-A",
+            "-B",
+            "-C",
+            "-m",
+            "--files",
+            "--hidden",
+            "--no-ignore",
+            "--no-config",
+            "--json",
+            "--line-number",
+            "--ignore-case",
+            "--fixed-strings",
+            "--count",
+            "--files-with-matches",
+            "--files-without-match",
+            "--glob",
+            "--iglob",
+            "--type",
+            "--type-not",
+            "--max-count",
+            "--context",
+            "--after-context",
+            "--before-context",
+            "--regexp",
+            "--file",
+            "--no-heading",
+            "--heading",
+        ],
+        &[
+            "--glob=",
+            "--iglob=",
+            "--type=",
+            "--type-not=",
+            "--max-count=",
+            "--context=",
+            "--after-context=",
+            "--before-context=",
+            "--regexp=",
+            "--file=",
+            "--color=",
+        ],
+    )
+}
+
+fn pixel_read_or_recovery(args: &[String]) -> bool {
+    let Some((operation, rest)) = args.split_first() else {
+        return false;
+    };
+    match operation.as_str() {
+        "config" => {
+            rest.is_empty()
+                || rest.len() == 1
+                    && matches!(rest[0].as_str(), "policy" | "metrics" | "--help" | "-h")
+        }
+        "task" => rest.first().is_some_and(|operation| {
+            matches!(
+                operation.as_str(),
+                "begin"
+                    | "contract"
+                    | "prepare"
+                    | "verify"
+                    | "review"
+                    | "finish"
+                    | "route"
+                    | "cancel"
+                    | "recover"
+                    | "status"
+                    | "events"
+                    | "replay"
+                    | "--help"
+                    | "-h"
+            )
+        }),
+        _ => matches!(
+            operation.as_str(),
+            "status"
+                | "doctor"
+                | "build-index"
+                | "scope-task"
+                | "find-code"
+                | "find-symbol"
+                | "search-content"
+                | "search-meaning"
+                | "impact"
+                | "pack-context"
+                | "what-changed"
+                | "review-changes"
+                | "repo-state"
+                | "list-areas"
+                | "list-flows"
+                | "who-calls"
+                | "capabilities"
+                | "--help"
+                | "--version"
+        ),
+    }
+}
+
+/// Single-quoted input is literal, including inline contract JSON. Other
+/// expansions, escapes, redirections and unsupported shell syntax stay gated.
+fn task_argv(command: &str) -> Option<Vec<String>> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut started = false;
+    for character in command.chars() {
+        if character == '\0' {
+            return None;
+        }
+        if quote == Some('\'') {
+            if character == '\'' {
+                quote = None;
+            } else {
+                current.push(character);
+            }
+            continue;
+        }
+        if matches!(character, '\n' | '\r' | '\\' | '$' | '`') {
+            return None;
+        }
+        match quote {
+            Some(mark) if character == mark => quote = None,
+            Some(_) => current.push(character),
+            None if matches!(character, '\'' | '"') => {
+                quote = Some(character);
+                started = true;
+            }
+            None if ";|&<>()*?[]{}~#".contains(character) => return None,
+            None if matches!(character, ' ' | '\t') => {
+                if started {
+                    args.push(std::mem::take(&mut current));
+                    started = false;
+                }
+            }
+            None if character.is_whitespace() => return None,
+            None => {
+                current.push(character);
+                started = true;
+            }
+        }
+    }
+    if quote.is_some() {
+        return None;
+    }
+    if started {
+        args.push(current);
+    }
+    Some(args)
+}
+
+fn sort_read(args: &[String]) -> bool {
+    read_flags(
+        args,
+        &[
+            "-r",
+            "-n",
+            "-u",
+            "-f",
+            "-b",
+            "-d",
+            "-g",
+            "-h",
+            "-M",
+            "-V",
+            "-s",
+            "-z",
+            "-c",
+            "-C",
+            "--reverse",
+            "--numeric-sort",
+            "--unique",
+            "--ignore-case",
+            "--stable",
+            "--check",
+            "--zero-terminated",
+        ],
+        &["--key=", "--field-separator="],
+    )
+}
+
+fn uniq_read(args: &[String]) -> bool {
+    let end = args
+        .iter()
+        .position(|arg| arg == "--")
+        .unwrap_or(args.len());
+    let operands = args[..end]
+        .iter()
+        .filter(|arg| !arg.starts_with('-'))
+        .count()
+        + args.len().saturating_sub(end + 1);
+    operands <= 1
+        && read_flags(
+            args,
+            &[
+                "-c",
+                "-d",
+                "-u",
+                "-i",
+                "-z",
+                "--count",
+                "--repeated",
+                "--unique",
+                "--ignore-case",
+                "--zero-terminated",
+            ],
+            &["--skip-fields=", "--skip-chars=", "--check-chars="],
+        )
+}
+
+/// Only proven read pipelines and single-command recovery bypass the edit gate.
+fn shell_mutates(command: &str) -> bool {
+    let Some(segments) = crate::guard::split_segments(command) else {
+        return true;
+    };
+    if segments.iter().skip(1).any(|(_, piped)| !piped) {
+        return true;
+    }
+    segments
+        .iter()
+        .any(|(segment, _)| shell_leaf_mutates(segment, segments.len() == 1))
+}
+
+fn shell_leaf_mutates(command: &str, recovery: bool) -> bool {
+    let Some(words) = task_argv(command) else {
+        return true;
+    };
+    let mut words = words.as_slice();
+    if words.first().is_some_and(|s| basename(s) == "rtk") {
+        words = &words[1..];
+        if words.first().is_some_and(|s| s == "proxy") {
+            words = &words[1..];
+        }
+    }
+    let Some((program, args)) = words.split_first() else {
+        return false;
+    };
+    match basename(program) {
+        "pixel" | "pixel-dev" => {
+            !pixel_read_or_recovery(args)
+                || !recovery
+                    && args.first().is_some_and(|operation| {
+                        matches!(operation.as_str(), "task" | "doctor" | "build-index")
+                    })
+        }
+        "git" => !git_read(args),
+        "rg" | "grep" => !search_read(args),
+        "sort" => !sort_read(args),
+        "uniq" => !uniq_read(args),
+        "pwd" | "true" | "false" | "cat" | "head" | "tail" | "wc" | "ls" | "read" => false,
+        _ => true,
+    }
+}
+
+fn mutation(tool: &str, input: &Value) -> bool {
+    match tool {
+        "Edit"
+        | "Write"
+        | "MultiEdit"
+        | "NotebookEdit"
+        | "apply_patch"
+        | "edit"
+        | "write"
+        | "edit_file"
+        | "write_to_file"
+        | "replace_file_content" => true,
+        "Bash" | "bash" | "shell" | "local_shell" | "unified_exec" | "exec_command" => {
+            string(input, &["command", "cmd"]).is_none_or(shell_mutates)
+        }
+        "pixel" | "pixel_project" => !matches!(
+            string(input, &["action"]),
+            Some(
+                "scope_task"
+                    | "list_areas"
+                    | "search_content"
+                    | "find_code"
+                    | "impact"
+                    | "pack_context"
+                    | "what_changed"
+                    | "review_changes"
+            )
+        ),
+        "Read" | "read" | "Glob" | "glob" | "Grep" | "grep" | "WebSearch" | "web_search"
+        | "WebFetch" | "web_fetch" | "AskUserQuestion" => false,
+        _ => true,
+    }
+}
+
+/// Normalized inputs contain no raw tool arguments, output, or user shell text.
+///
+/// The bridge receives nullable real host IDs (`event_id`, `session_id`,
+/// `turn_id`, `tool_use_id`, `agent_id`, `parent_tool_use_id`), `branch_id`,
+/// `tool_name`, `mutation`, `cancelled`, nullable `success`, `input_digest`,
+/// `changed_paths`, `coverage`, typed `usage`/`duration_ms`, `response_id`,
+/// safe `request_tools` labels, and the objective only on prompt-submit.
+/// A missing host ID is never replaced with a fabricated call identity.
+pub(crate) fn normalize(event: TaskHookEvent, payload: &Value) -> Value {
+    let input = payload
+        .get("tool_input")
+        .or_else(|| payload.get("input"))
+        .unwrap_or(&Value::Null);
+    let tool = string(payload, &["tool_name", "toolName"]).unwrap_or("");
+    let session = string(payload, &["session_id", "sessionId"]);
+    let turn = string(payload, &["turn_id", "turnId"]);
+    let call = string(payload, &["tool_use_id", "toolCallId"]);
+    let explicit_event = string(payload, &["event_id", "eventId", "uuid"]);
+    let event_id = explicit_event.map(ToString::to_string).or_else(|| {
+        Some(format!(
+            "{}:{}:{}:{}",
+            session?,
+            turn.unwrap_or(""),
+            event.as_str(),
+            call?
+        ))
+    });
+    let cancelled = event == TaskHookEvent::Interrupt
+        || payload.get("cancelled").and_then(Value::as_bool) == Some(true)
+        || payload.get("is_interrupt").and_then(Value::as_bool) == Some(true)
+        || matches!(
+            string(payload, &["stop_reason", "stopReason"]),
+            Some("aborted" | "error")
+        );
+    let success = match event {
+        TaskHookEvent::ToolFailure => Some(false),
+        TaskHookEvent::PostToolUse => {
+            payload.get("success").and_then(Value::as_bool).or_else(|| {
+                payload
+                    .get("isError")
+                    .and_then(Value::as_bool)
+                    .map(|error| !error)
+            })
+        }
+        _ => None,
+    };
+    let paths: Vec<&str> = string(input, &["file_path", "path", "notebook_path"])
+        .into_iter()
+        .collect();
+    let request_ids: Vec<&str> = payload
+        .get("request_ids")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|id| !id.is_empty())
+        .collect();
+    let coverage_complete = event == TaskHookEvent::ModelResponse
+        && payload.get("coverage_complete").and_then(Value::as_bool) == Some(true)
+        && payload
+            .get("request_ids")
+            .and_then(Value::as_array)
+            .is_some_and(|ids| ids.len() == request_ids.len());
+    let request_tools = request_ids
+        .iter()
+        .filter_map(|id| {
+            let label = tool_label(payload["request_tools"][*id].as_str()?)?;
+            Some(((*id).to_string(), Value::from(label)))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    json!({
+        "event_id": event_id,
+        "session_id": session,
+        "turn_id": turn,
+        "tool_use_id": call,
+        "agent_id": string(payload, &["agent_id", "agentId"]),
+        "parent_tool_use_id": string(payload, &["parent_tool_use_id", "parentToolUseId"]),
+        "branch_id": string(payload, &["branch_id", "branchId"]),
+        "task_id": string(payload, &["task_id"]),
+        "attempt_id": string(payload, &["attempt_id"]),
+        "binding_session_id": string(payload, &["binding_session_id"]),
+        "branch_unbound": payload.get("branch_unbound").and_then(Value::as_bool) == Some(true),
+        "parent_span_id": string(payload, &["parent_span_id"]),
+        "prompt": if event == TaskHookEvent::PromptSubmit { string(payload, &["prompt"]) } else { None },
+        "tool_name": tool_label(tool).unwrap_or(""),
+        "mutation": mutation(tool, input),
+        "cancelled": cancelled,
+        "success": success,
+        "input_digest": format!("{:016x}", xxhash_rust::xxh3::xxh3_64(input.to_string().as_bytes())),
+        "changed_paths": paths,
+        "request_ids": request_ids,
+        "request_tools": request_tools,
+        "response_id": string(payload, &["response_id"]).filter(|id| id.len() <= 512 && !id.chars().any(char::is_control)),
+        "usage": usage(payload),
+        "duration_ms": bounded_count(&payload["duration_ms"], 604_800_000),
+        "coverage_complete": coverage_complete,
+        "coverage": { "native_hooks": true, "model_requests_complete": coverage_complete, "call_identity": call.is_some() },
+    })
+}
+
+fn envelope(provider: TaskProvider, event: TaskHookEvent, decision: &Value) -> Value {
+    if provider == TaskProvider::Pi {
+        return decision.clone();
+    }
+    let action = decision
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or("observe");
+    let reason = decision
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or(UNAVAILABLE);
+    match (event, action) {
+        (TaskHookEvent::PreToolUse, "deny") => json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason
+        }}),
+        (TaskHookEvent::Stop | TaskHookEvent::SubagentStop, "continue") => {
+            json!({"decision": "block", "reason": reason})
+        }
+        (TaskHookEvent::Stop | TaskHookEvent::SubagentStop, "deny") => {
+            json!({"continue": false, "stopReason": reason})
+        }
+        (_, _) if decision.get("context").and_then(Value::as_str).is_some() => {
+            json!({"hookSpecificOutput": {
+                "hookEventName": event.host_name(), "additionalContext": decision["context"]
+            }})
+        }
+        _ => json!({}),
+    }
+}
+
+fn unavailable(event: TaskHookEvent, payload: Option<&Value>) -> Value {
+    let blocks = match event {
+        TaskHookEvent::PreToolUse => payload.is_none_or(|p| {
+            let normalized = normalize(event, p);
+            normalized["mutation"] == true
+        }),
+        TaskHookEvent::Stop | TaskHookEvent::SubagentStop => true,
+        _ => false,
+    };
+    json!({"decision": if blocks { "deny" } else { "observe" }, "reason": UNAVAILABLE, "coverage": "unavailable"})
+}
+
+fn process(provider: TaskProvider, event: TaskHookEvent, raw: &str) -> Value {
+    let Ok(payload) = serde_json::from_str::<Value>(raw) else {
+        return envelope(provider, event, &unavailable(event, None));
+    };
+    let cwd = string(&payload, &["cwd"]).map_or_else(
+        || std::env::current_dir().unwrap_or_default(),
+        std::path::PathBuf::from,
+    );
+    let decision = handle_at(&cwd, provider, event, &payload)
+        .unwrap_or_else(|_| unavailable(event, Some(&payload)));
+    envelope(provider, event, &decision)
+}
+
+fn handle_at(
+    cwd: &Path,
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    payload: &Value,
+) -> Result<Value, String> {
+    let root = crate::discover_root(cwd).map_err(|e| e.to_string())?;
+    crate::task_commands::handle_hook(
+        &root,
+        provider.as_str(),
+        event.as_str(),
+        &normalize(event, payload),
+    )
+}
+
+fn bounded_decision(
+    provider: TaskProvider,
+    event: TaskHookEvent,
+    raw: &str,
+    timeout: Duration,
+    evaluate: impl FnOnce() -> Value + Send + 'static,
+) -> Value {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    if std::thread::Builder::new()
+        .name("pixel-task-gate".into())
+        .spawn(move || {
+            let _ = sender.send(evaluate());
+        })
+        .is_ok()
+        && let Ok(decision) = receiver.recv_timeout(timeout)
+    {
+        return decision;
+    }
+    let payload = serde_json::from_str(raw).ok();
+    envelope(provider, event, &unavailable(event, payload.as_ref()))
+}
+
+/// Read one bounded host event, dispatch it, and emit only the host's schema.
+pub fn run(provider: TaskProvider, event: TaskHookEvent) -> ! {
+    if provider == TaskProvider::Claude
+        && crate::prompt_submit::imported_claude_entry(Some(crate::guard::Provider::Claude))
+    {
+        std::process::exit(0);
+    }
+    let mut raw = String::new();
+    let output = if std::io::stdin()
+        .take(MAX_INPUT + 1)
+        .read_to_string(&mut raw)
+        .is_ok()
+        && u64::try_from(raw.len()).is_ok_and(|length| length <= MAX_INPUT)
+    {
+        let input = raw.clone();
+        bounded_decision(provider, event, &raw, DECISION_TIMEOUT, move || {
+            process(provider, event, &input)
+        })
+    } else {
+        envelope(provider, event, &unavailable(event, None))
+    };
+    // Flush the only response before exit terminates any stalled evaluator.
+    let mut stdout = std::io::stdout().lock();
+    let _ = writeln!(stdout, "{output}");
+    let _ = stdout.flush();
+    std::process::exit(0);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deadline_should_deny_edits_and_completion_but_preserve_proven_reads() {
+        for provider in [TaskProvider::Claude, TaskProvider::Codex, TaskProvider::Pi] {
+            for (event, payload) in [
+                (TaskHookEvent::PreToolUse, json!({"tool_name":"Edit"})),
+                (TaskHookEvent::PreToolUse, json!({"tool_name":"Read"})),
+                (TaskHookEvent::Stop, json!({})),
+            ] {
+                let (release, wait) = std::sync::mpsc::channel();
+                let output = bounded_decision(
+                    provider,
+                    event,
+                    &payload.to_string(),
+                    Duration::from_millis(1),
+                    move || {
+                        let _ = wait.recv_timeout(Duration::from_secs(1));
+                        json!({"incorrect":"late result"})
+                    },
+                );
+                let _ = release.send(());
+                assert_eq!(
+                    output,
+                    envelope(provider, event, &unavailable(event, Some(&payload)))
+                );
+            }
+        }
+        assert_eq!(
+            bounded_decision(
+                TaskProvider::Codex,
+                TaskHookEvent::PreToolUse,
+                "{}",
+                Duration::from_secs(1),
+                || json!({"decision":"ready"})
+            ),
+            json!({"decision":"ready"})
+        );
+    }
+
+    #[test]
+    fn normalize_should_preserve_host_identity_without_tool_secrets() {
+        let input = json!({"session_id":"s", "turn_id":"t", "tool_use_id":"c", "tool_name":"Write", "tool_input":{"file_path":"src/a.rs","content":"secret-value"},"tool_response":"private-output"});
+        let result = normalize(TaskHookEvent::PreToolUse, &input);
+        assert_eq!(result["event_id"], "s:t:pre-tool-use:c");
+        assert_eq!(result["mutation"], true);
+        assert_eq!(result["changed_paths"], json!(["src/a.rs"]));
+        assert_eq!(result["agent_id"], Value::Null);
+        assert!(!result.to_string().contains("secret-value"));
+        assert!(!result.to_string().contains("private-output"));
+        assert_eq!(
+            normalize(TaskHookEvent::PostToolUse, &input)["success"],
+            Value::Null
+        );
+    }
+
+    #[test]
+    fn normalization_should_not_invent_ids_or_treat_errors_as_success() {
+        let result = normalize(TaskHookEvent::ToolFailure, &json!({"is_interrupt":true}));
+        assert_eq!(result["event_id"], Value::Null);
+        assert_eq!(result["success"], false);
+        assert_eq!(result["cancelled"], true);
+        assert_eq!(result["coverage"]["model_requests_complete"], false);
+    }
+
+    #[test]
+    fn telemetry_should_keep_only_bounded_counters_and_safe_request_labels() {
+        let event = json!({
+            "request_ids":["call"], "request_tools":{"call":"mcp__pixel.find-code", "extra":"secret-label"},
+            "response_id":"response-7", "duration_ms":123,
+            "usage":{"input":100,"output":0,"cache_read":4,"cache_write":2,"secret":"private-value"},
+            "tool_name":"mcp__pixel.find-code"
+        });
+        let normalized = normalize(TaskHookEvent::ModelResponse, &event);
+        assert_eq!(
+            normalized["request_tools"],
+            json!({"call":"mcp__pixel.find-code"})
+        );
+        assert_eq!(normalized["tool_name"], "mcp__pixel.find-code");
+        assert_eq!(normalized["response_id"], "response-7");
+        assert_eq!(normalized["duration_ms"], 123);
+        assert_eq!(
+            normalized["usage"],
+            json!({"input":100,"output":0,"cache_read":4,"cache_write":2})
+        );
+        assert!(!normalized.to_string().contains("private-value"));
+        assert!(!normalized.to_string().contains("secret-label"));
+        let invalid = normalize(
+            TaskHookEvent::ModelResponse,
+            &json!({
+                "request_ids":["call"],"request_tools":{"call":"tool secret text"},"tool_name":"tool\nprivate",
+                "response_id":"response\nprivate", "duration_ms":604_800_001_u64,
+                "usage":{"input":-1,"output":"10","cache_read":1_000_000_000_001_u64,"cache_write":0.5}
+            }),
+        );
+        assert_eq!(invalid["request_tools"], json!({}));
+        assert_eq!(invalid["tool_name"], "");
+        for key in ["usage", "response_id", "duration_ms"] {
+            assert_eq!(invalid[key], Value::Null, "{key}");
+        }
+    }
+
+    #[test]
+    fn unavailable_should_block_edits_but_preserve_reads_and_recovery() {
+        for tool in ["Write", "Edit", "apply_patch", "write", "edit"] {
+            let decision = unavailable(TaskHookEvent::PreToolUse, Some(&json!({"tool_name":tool})));
+            assert_eq!(decision["decision"], "deny", "{tool}");
+        }
+        for command in [
+            "rtk proxy pixel task status abc",
+            "pixel doctor . --fix",
+            "git diff",
+            "cat src/a.rs",
+        ] {
+            assert!(!shell_mutates(command), "{command}");
+        }
+        for command in [
+            "python3 mutate.py",
+            "cat x > y",
+            "pixel commit --files x",
+            "git checkout x",
+            "rtk proxy rm x",
+        ] {
+            assert!(shell_mutates(command), "{command}");
+        }
+        assert_eq!(
+            unavailable(
+                TaskHookEvent::PreToolUse,
+                Some(&json!({"tool_name":"Read"}))
+            )["decision"],
+            "observe"
+        );
+        assert_eq!(
+            unavailable(TaskHookEvent::Stop, Some(&json!({})))["decision"],
+            "deny"
+        );
+    }
+
+    #[test]
+    fn write_flags_config_setters_and_unknown_tools_should_require_preparation() {
+        for command in [
+            "git diff --output=src/a.rs",
+            "git diff --output src/a.rs",
+            "git show --ext-diff",
+            "rg --pre /runner/mutator pattern",
+            "rg --pre=/runner/mutator pattern",
+            "rg --hostname-bin /runner/mutator pattern",
+            "pixel config policy off",
+            "pixel config edit --repo",
+            "pixel config setup",
+            "pixel task evaluate --suite external.json",
+            "pixel task reset session",
+        ] {
+            assert!(shell_mutates(command), "{command}");
+            assert_eq!(
+                unavailable(
+                    TaskHookEvent::PreToolUse,
+                    Some(&json!({"tool_name":"Bash","tool_input":{"command":command}}))
+                )["decision"],
+                "deny",
+                "{command}"
+            );
+        }
+        for command in [
+            "git diff --name-only HEAD",
+            "git status --porcelain=v1",
+            "git diff -- --output=notes",
+            "rg -n -F needle src",
+            "rg --glob='*.rs' needle",
+            "rg -- --pre",
+            "pixel config",
+            "pixel config policy",
+            "pixel config metrics",
+            "pixel task prepare task-1",
+            "pixel task verify task-1",
+            "pixel task recover task-1",
+            "pixel task contract task-1 --file contract.json",
+        ] {
+            assert!(!shell_mutates(command), "{command}");
+        }
+        for tool in ["mcp__custom__edit", "customTool", ""] {
+            assert!(mutation(tool, &json!({})), "{tool}");
+            assert_eq!(
+                unavailable(TaskHookEvent::PreToolUse, Some(&json!({"tool_name":tool})))["decision"],
+                "deny",
+                "{tool}"
+            );
+        }
+        assert!(mutation("pixel", &json!({"action":"new_mutator"})));
+    }
+
+    #[test]
+    fn read_pipelines_and_literal_contract_json_should_preserve_recovery() {
+        for command in [
+            "rg needle src | sort | uniq",
+            "git diff --name-only | sort -u",
+            "rg 'x|y' src | uniq -c",
+            "cat source.txt | uniq -- -",
+        ] {
+            assert!(!shell_mutates(command), "{command}");
+        }
+        for command in [
+            "rg needle | sort -o source.txt",
+            "rg needle | sort --output=source.txt",
+            "rg needle | uniq - source.txt",
+            "rg needle | uniq -- - source.txt",
+            "rg needle | tee source.txt",
+            "rg needle | pixel task prepare task-1",
+            "rg needle || cat source.txt",
+            "rg needle; cat source.txt",
+            "rg needle | cat > source.txt",
+            "rg $(touch source.txt) | sort",
+            "rg \"$(touch source.txt)\" | sort",
+            "pixel task contract task-1 --definition $(cat secret)",
+            "pixel task contract task-1 --definition \"$(cat secret)\"",
+        ] {
+            assert!(shell_mutates(command), "{command}");
+        }
+        let definition =
+            json!({"checks":[{"argv":["/bin/sh","-c","test \"$(cat source.txt)\" = original"]}]})
+                .to_string();
+        let command = format!("pixel task contract task-1 --definition '{definition}' --json");
+        assert!(!shell_mutates(&command));
+        assert_eq!(task_argv(&command).unwrap()[5], definition);
+    }
+
+    #[test]
+    fn envelopes_should_use_supported_provider_specific_decisions() {
+        for provider in [TaskProvider::Claude, TaskProvider::Codex] {
+            let denied = envelope(
+                provider,
+                TaskHookEvent::PreToolUse,
+                &json!({"decision":"deny","reason":"prepare first"}),
+            );
+            assert_eq!(
+                denied,
+                json!({"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"prepare first"}})
+            );
+            assert_eq!(
+                envelope(
+                    provider,
+                    TaskHookEvent::Stop,
+                    &json!({"decision":"continue","reason":"verify"})
+                ),
+                json!({"decision":"block","reason":"verify"})
+            );
+            assert_eq!(
+                envelope(
+                    provider,
+                    TaskHookEvent::Stop,
+                    &json!({"decision":"deny","reason":"unverified"})
+                ),
+                json!({"continue":false,"stopReason":"unverified"})
+            );
+            assert_eq!(
+                envelope(
+                    provider,
+                    TaskHookEvent::PreToolUse,
+                    &json!({"decision":"allow"})
+                ),
+                json!({})
+            );
+        }
+        let decision = json!({"decision":"deny","reason":"verify"});
+        assert_eq!(
+            envelope(TaskProvider::Pi, TaskHookEvent::Stop, &decision),
+            decision
+        );
+    }
+
+    #[test]
+    fn model_response_coverage_should_require_a_complete_real_id_list() {
+        let event = json!({"request_ids":["c1","c2"],"coverage_complete":true});
+        let normalized = normalize(TaskHookEvent::ModelResponse, &event);
+        assert_eq!(normalized["request_ids"], json!(["c1", "c2"]));
+        assert_eq!(normalized["coverage_complete"], true);
+        assert_eq!(
+            normalize(TaskHookEvent::PreToolUse, &event)["coverage_complete"],
+            false
+        );
+        for payload in [
+            json!({"coverage_complete":true}),
+            json!({"request_ids":["c1",null],"coverage_complete":true}),
+            json!({"request_ids":[""],"coverage_complete":true}),
+        ] {
+            assert_eq!(
+                normalize(TaskHookEvent::ModelResponse, &payload)["coverage_complete"],
+                false
+            );
+        }
+        assert!(mutation("pixel_project", &json!({"action":"commit"})));
+        assert!(!mutation(
+            "pixel_project",
+            &json!({"action":"review_changes"})
+        ));
+    }
+
+    #[test]
+    fn malformed_input_should_not_open_the_mutation_or_completion_gate() {
+        for provider in [TaskProvider::Claude, TaskProvider::Codex] {
+            assert_eq!(
+                process(provider, TaskHookEvent::PreToolUse, "not json")["hookSpecificOutput"]["permissionDecision"],
+                "deny"
+            );
+            assert_eq!(
+                process(provider, TaskHookEvent::Stop, "not json")["continue"],
+                false
+            );
+            assert_eq!(
+                process(provider, TaskHookEvent::PostToolUse, "not json"),
+                json!({})
+            );
+        }
+    }
+}

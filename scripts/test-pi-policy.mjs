@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 const root = mkdtempSync(join(tmpdir(), "pi-policy-"));
 const binary = join(root, "pixel");
 const trace = join(root, "calls.jsonl");
+const taskTrace = join(root, "tasks.jsonl");
 const settingsPath = join(root, "settings.json");
 const editedPath = join(root, "edited.txt");
 const originalEnv = [process.env.PIXEL_POLICY, process.env.PIXEL_TARGETS_GUARD];
@@ -20,6 +21,7 @@ const restore = (name, value) => value === undefined ? delete process.env[name] 
 try {
   configure();
   writeFileSync(trace, "");
+  writeFileSync(taskTrace, "");
   writeFileSync(editedPath, "before");
   // The bash fence's canonical containment check requires an existing
   // repository tree. Read fixtures stay lexical, so an empty `src/`
@@ -37,6 +39,14 @@ const operations = ["status", "scope-task", "repo-state", "review-changes", "com
 const box = "warning: diagnostic line\\n\u{1F7E9} pixel " + args[0] + " \u2740 1.0ms\\n  \u2502\\n  \u2514\u2500\u2500\u2500\\n";
 if (!args.includes("off") && !["--version", "--help"].includes(args[0])) process.stderr.write(box);
 switch (args[0]) {
+  case "run-hook": {
+    const payload = JSON.parse(readFileSync(0, "utf8"));
+    const event = args[args.indexOf("--event") + 1];
+    appendFileSync(${JSON.stringify(taskTrace)}, JSON.stringify({ event, payload }) + "\\n");
+    if (settings.taskDelay) await new Promise((done) => setTimeout(done, settings.taskDelay));
+    console.log(JSON.stringify(settings.task?.[event] ?? { decision: "allow" }));
+    break;
+  }
   case "--version": console.log("pixel 0.6.0"); break;
   case "--help": console.log("Commands:\\n" + operations.filter(op => !settings.missing?.includes(op)).map(op => "  " + op + "  Operation").join("\\n")); break;
   case "status": console.log(JSON.stringify({index:{base_files:1},graph:{present:true},facts:{fresh:true}})); break;
@@ -65,11 +75,15 @@ switch (args[0]) {
   writeFileSync(extension, source);
   const { default: activate } = await import(pathToFileURL(extension).href);
   let cwd = root;
+  let storedEntries = [];
   const user = (text = "inspect the implementation") => ({
     cwd,
-    sessionManager: { getBranch: () => [{ type: "message", message: { role: "user", content: text } }] },
+    sessionManager: { getSessionId: () => `fixture-${hostId}`, getLeafId: () => "leaf", getBranch: () => [{ type: "message", message: { role: "user", content: text } }, ...storedEntries] },
   });
+  let hostId = 0;
   const host = async (mode, projectRoot = root) => {
+    hostId += 1;
+    storedEntries = [];
     cwd = projectRoot;
     restore("PIXEL_POLICY", mode);
     delete process.env.PIXEL_TARGETS_GUARD;
@@ -82,13 +96,15 @@ switch (args[0]) {
     // A restored session can come back without the project's tools selected.
     let active = ["bash", "edit", "read"];
     const available = [...active, "pixel", "pixel_project"];
-    activate({
+    const api = {
       registerTool: (registered) => { tool = registered; },
       on: (name, handler) => handlers.set(name, [...handlers.get(name) ?? [], handler]),
       getActiveTools: () => active,
       getAllTools: () => available.map((name) => ({ name })),
       setActiveTools: (names) => { active = names; },
-    });
+      appendEntry: (customType, data) => storedEntries.push({ type: "custom", customType, data }),
+    };
+    activate(api);
     const emit = async (name, event, ctx = user()) => {
       let result;
       for (const handler of handlers.get(name) ?? []) {
@@ -100,7 +116,7 @@ switch (args[0]) {
     };
     await emit("session_start", { reason: "startup" });
     assert.ok(active.includes("pixel") && active.includes("pixel_project"), "session start activates both pixel tools");
-    return { emit, tool, boot: () => emit("before_agent_start", { prompt: "inspect the implementation" }) };
+    return { emit, tool, activateAgain: () => activate(api), boot: () => emit("before_agent_start", { prompt: "inspect the implementation" }) };
   };
   const check = async (name, test) => {
     configure();
@@ -517,6 +533,134 @@ switch (args[0]) {
     const before = count("classify");
     assert.equal(await h.emit("before_agent_start", { prompt: "fix" }), undefined);
     assert.equal(count("classify"), before);
+  });
+  await check("task gates apply even when retrieval policy is off", async () => {
+    const h = await host("off");
+    configure({ task: { "pre-tool-use": { decision: "deny", reason: "Prepare task before editing" } } });
+    assert.deepEqual(await h.emit("tool_call", edit()), { block: true, reason: "Prepare task before editing" });
+    configure({ task: { "pre-tool-use": { decision: "allow" } } });
+    assert.equal(await h.emit("tool_call", edit()), undefined);
+  });
+  await check("missing task state closes edits while recovery stays available", async () => {
+    const h = await host("off");
+    configure({ fail: ["run-hook"] });
+    for (const event of [edit(), native("python mutate.py"), native("cat x > y")]) {
+      assert.equal((await h.emit("tool_call", event)).block, true);
+    }
+    for (const event of [read(), native("rtk proxy pixel task status"), native("git diff")]) {
+      assert.equal(await h.emit("tool_call", event), undefined);
+    }
+    const gate = await h.emit("agent_before_settle", { outcome: "completed", context: { canContinue: true } });
+    assert.equal(gate.continue, false);
+    assert.match(gate.entries[0].content, /task state is unavailable/);
+  });
+  await check("write-capable read flags, config setters and unknown tools require task state", async () => {
+    const h = await host("off");
+    configure({ fail: ["run-hook"] });
+    for (const command of [
+      "git diff --output=src/a.rs", "git diff --output src/a.rs", "git show --ext-diff",
+      "rg --pre /runner/mutator pattern", "rg --pre=/runner/mutator pattern", "rg --hostname-bin /runner/mutator pattern",
+      "pixel config policy off", "pixel config edit --repo", "pixel config setup",
+      "pixel task evaluate --suite external.json", "pixel task reset session",
+    ]) assert.equal((await h.emit("tool_call", native(command))).block, true, command);
+    for (const command of [
+      "git diff --name-only HEAD", "git status --porcelain=v1", "git diff -- --output=notes",
+      "rg -n -F needle src", "rg --glob='*.rs' needle", "rg -- --pre",
+      "pixel config", "pixel config policy", "pixel config metrics", "pixel task prepare task-1",
+      "pixel task verify task-1", "pixel task recover task-1", "pixel task contract task-1 --file contract.json",
+    ]) assert.equal(await h.emit("tool_call", native(command)), undefined, command);
+    for (const toolName of ["mcp__custom__edit", "customTool", ""]) {
+      assert.equal((await h.emit("tool_call", { toolName, toolCallId: "unknown", input: {} })).block, true, toolName);
+    }
+    assert.equal((await h.emit("tool_call", { toolName: "pixel", toolCallId: "unknown-action", input: { action: "new_mutator" } })).block, true);
+  });
+  await check("proven read pipelines and literal inline contracts remain available during recovery", async () => {
+    const h = await host("off");
+    configure({ fail: ["run-hook"] });
+    const definition = JSON.stringify({ checks: [{ argv: ["/bin/sh", "-c", "test \"$(cat source.txt)\" = original"] }] });
+    for (const command of ["rg needle src | sort | uniq", "git diff --name-only | sort -u", "rg 'x|y' src | uniq -c", "cat source.txt | uniq -- -", `pixel task contract task-1 --definition '${definition}' --json`]) {
+      assert.equal(await h.emit("tool_call", native(command)), undefined, command);
+    }
+    for (const command of ["rg needle | sort -o source.txt", "rg needle | sort --output=source.txt", "rg needle | uniq - source.txt", "rg needle | uniq -- - source.txt", "rg needle | tee source.txt", "rg needle | pixel task prepare task-1", "rg needle || cat source.txt", "rg needle; cat source.txt", "rg needle | cat > source.txt", "rg $(touch source.txt) | sort", "rg \"$(touch source.txt)\" | sort", "pixel task contract task-1 --definition $(cat secret)", "pixel task contract task-1 --definition \"$(cat secret)\""]) {
+      assert.equal((await h.emit("tool_call", native(command))).block, true, command);
+    }
+  });
+  await check("settlement uses core continuation budget and never restarts cancellation or errors", async () => {
+    const h = await host("off");
+    configure({ task: { stop: { decision: "continue", reason: "Run required check" } } });
+    const gate = await h.emit("agent_before_settle", { outcome: "completed", context: { canContinue: true } });
+    assert.equal(gate.continue, true);
+    assert.deepEqual(gate.entries, [{ type: "custom_message", customType: "pixel-task-gate", content: "Run required check", display: true }]);
+    assert.equal((await h.emit("agent_before_settle", { outcome: "completed", context: { canContinue: false } })).continue, false);
+    for (const outcome of ["aborted", "error"]) assert.equal(await h.emit("agent_before_settle", { outcome, context: { canContinue: true } }), undefined);
+    configure({ task: { stop: { decision: "deny", reason: "Continuation budget exhausted" } } });
+    assert.equal((await h.emit("agent_before_settle", { outcome: "completed", context: { canContinue: true } })).continue, false);
+  });
+  await check("task subprocess is cancelled without forcing another provider request", async () => {
+    const h = await host("off");
+    configure({ taskDelay: 3000, task: { stop: { decision: "continue" } } });
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), 50);
+    const before = Date.now();
+    const result = await h.emit("agent_before_settle", { outcome: "completed", context: { canContinue: true } }, { ...user(), signal: abort.signal });
+    clearTimeout(timer);
+    assert.equal(result, undefined);
+    assert.ok(Date.now() - before < 2000);
+  });
+  await check("model requests retain real identities and private bang commands never enter telemetry", async () => {
+    const h = await host("off");
+    await h.emit("message_end", { message: { role: "assistant", content: [{ type: "toolCall", id: "real-call", name: "edit", arguments: { secret: "private" } }], stopReason: "toolUse", responseId: "response-7", usage: { input: 100, output: 10, cacheRead: 50, cacheWrite: 2, cost: { total: 1 }, secret: "private" } } });
+    await h.emit("user_bash", { command: "private-bang-token", excludeFromContext: true });
+    const events = readFileSync(taskTrace, "utf8").trim().split("\n").map(JSON.parse);
+    const message = events.findLast((entry) => entry.event === "model-response");
+    assert.deepEqual(message.payload.request_ids, ["real-call"]);
+    assert.deepEqual(message.payload.request_tools, { "real-call": "edit" });
+    assert.deepEqual(message.payload.usage, { input: 100, output: 10, cache_read: 50, cache_write: 2 });
+    assert.equal(message.payload.response_id, "response-7");
+    assert.equal(message.payload.coverage_complete, true);
+    const bang = events.at(-1);
+    assert.equal(bang.event, "user-bash");
+    assert.ok(!JSON.stringify(bang).includes("private-bang-token"));
+    assert.ok(!JSON.stringify(message).includes("private"));
+  });
+  await check("duplicate extension ownership emits one gate and session trees retain branch identity", async () => {
+    const h = await host("off");
+    h.activateAgain();
+    const before = count("run-hook");
+    await h.emit("tool_call", edit());
+    assert.equal(count("run-hook"), before + 1);
+    await h.emit("session_tree", { newLeafId: "branch-leaf" });
+    await h.emit("tool_call", edit());
+    const events = readFileSync(taskTrace, "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(events.at(-1).payload.branch_id, "branch-leaf");
+    assert.equal(events.at(-1).payload.toolCallId, "edit");
+  });
+  await check("branch-local task bindings survive reload and unbound navigation is explicit", async () => {
+    const h = await host("off");
+    configure({ task: { "prompt-submit": { decision: "observe", task_id: "task-real", attempt_id: "attempt-real" } } });
+    await h.emit("before_agent_start", { prompt: "fix" });
+    assert.equal(storedEntries.at(-1).customType, "pixel-task-binding");
+    configure();
+    await h.emit("session_start", { reason: "reload" });
+    await h.emit("tool_call", edit());
+    let last = JSON.parse(readFileSync(taskTrace, "utf8").trim().split("\n").at(-1));
+    assert.equal(last.payload.task_id, "task-real");
+    assert.equal(last.payload.attempt_id, "attempt-real");
+    assert.equal(last.payload.branch_unbound, false);
+    const origin = last.payload.session_id;
+    hostId += 1;
+    await h.emit("session_start", { reason: "fork" });
+    await h.emit("tool_call", edit());
+    last = JSON.parse(readFileSync(taskTrace, "utf8").trim().split("\n").at(-1));
+    assert.equal(last.payload.binding_session_id, origin);
+    assert.notEqual(last.payload.session_id, origin);
+    assert.equal(last.payload.task_id, "task-real");
+    storedEntries = [];
+    await h.emit("session_tree", { newLeafId: "unknown-branch" });
+    await h.emit("tool_call", edit());
+    last = JSON.parse(readFileSync(taskTrace, "utf8").trim().split("\n").at(-1));
+    assert.equal(last.payload.task_id, undefined);
+    assert.equal(last.payload.branch_unbound, true);
   });
   console.log(`Pi extension: ${passed} event-handler contract groups passed`);
 } finally {

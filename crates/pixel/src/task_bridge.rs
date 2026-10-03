@@ -1,0 +1,694 @@
+//! Shared host lifecycle binding and accounting. Native hooks are an integration boundary.
+
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::Path;
+use std::time::Instant;
+
+use fs2::FileExt;
+use pixel_task::replay::{InternalActor, Observation, ReplayFrame, TelemetryEvent, ToolOutcome};
+use pixel_task::{Action, Gate, Phase, Store, Task, TrajectoryEvent};
+use serde_json::{Value, json};
+
+use crate::task_commands::{error, observe};
+
+pub(crate) fn handle_hook(
+    root: &Path,
+    provider: &str,
+    event: &str,
+    payload: &Value,
+) -> Result<Value, String> {
+    let started = Instant::now();
+    if !matches!(provider, "claude" | "codex" | "pi") {
+        return Err("unsupported task provider".into());
+    }
+    let mutation = payload["mutation"] == true;
+    let decisive = mutation || event == "stop";
+    let Some(session) = payload["session_id"].as_str().filter(|id| !id.is_empty()) else {
+        return if decisive {
+            Err("host session identity is missing; task edits and completion require a stable session".into())
+        } else {
+            Ok(json!({"decision":"observe","coverage":"unavailable"}))
+        };
+    };
+    observed(root, provider, event, session, &payload["coverage"])?;
+    let policy = std::env::var("PIXEL_TASK_POLICY").unwrap_or_else(|_| "gates_classifier".into());
+    if !matches!(policy.as_str(), "retrieval" | "gates" | "gates_classifier") {
+        return Err("invalid PIXEL_TASK_POLICY".into());
+    }
+    let configured_enforcement = crate::task_config::enabled(root)? && policy != "retrieval";
+    let session = session_key(session)?;
+    let store = Store::open(root).map_err(error)?;
+    let binding_dir = root.join(".pixel/tasks/session-locks");
+    pixel_ops::durable::ensure_dir(&binding_dir).map_err(error)?;
+    let lock_name = pixel_task::digest(&(provider, &session)).map_err(error)?;
+    let binding_lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(binding_dir.join(&lock_name))
+        .map_err(error)?;
+    binding_lock.lock_exclusive().map_err(error)?;
+    let prompt = session_prompt(root, &lock_name, event, payload)?;
+    let existing = if let Some(id) = payload["task_id"].as_str() {
+        let bound = store.status(id).map_err(error)?;
+        let binding_session = if provider == "pi" {
+            payload["binding_session_id"]
+                .as_str()
+                .map(session_key)
+                .transpose()?
+                .unwrap_or_else(|| session.clone())
+        } else {
+            session.clone()
+        };
+        if bound.provider != provider || bound.session_id.as_deref() != Some(&binding_session) {
+            return Err(
+                "branch task binding does not belong to this provider/session/attempt".into(),
+            );
+        }
+        if payload["attempt_id"].as_str() != Some(bound.attempt_id.as_str()) {
+            return Ok(response(
+                &bound,
+                if decisive { "deny" } else { "observe" },
+                "task attempt changed after recovery; branch binding refreshed, retry the action",
+                json!([]),
+            ));
+        }
+        Some(bound)
+    } else {
+        store.find_session(provider, &session).map_err(error)?
+    };
+    let starts_task = event == "prompt-submit" && coding_prompt(&prompt);
+    // Once a task has enforced gates, changing repository settings or evaluation
+    // environment cannot silently release that task's existing obligations.
+    let enforce = configured_enforcement
+        || existing
+            .as_ref()
+            .map(|task| task_enforced(&store, task))
+            .transpose()?
+            .unwrap_or(false);
+    if provider == "pi"
+        && payload["branch_unbound"] == true
+        && payload["task_id"].is_null()
+        && existing.is_some()
+        && !starts_task
+        && decisive
+        && enforce
+    {
+        return Err("selected Pi branch has no task binding; submit the coding objective on this branch before editing".into());
+    }
+    let mut created_by_mutation = false;
+    let mut task = match existing {
+        Some(task) if !task.phase.terminal() || !starts_task => task,
+        _ if starts_task || (event == "pre-tool-use" && mutation) => {
+            created_by_mutation = event == "pre-tool-use";
+            let objective = if prompt.trim().is_empty() {
+                "Complete the current coding task; map its acceptance criteria before verification"
+            } else {
+                &prompt
+            };
+            let mut contract = if let Some(path) = std::env::var_os("PIXEL_TASK_CONTRACT") {
+                crate::task_config::from_file(root, Path::new(&path))?
+            } else {
+                crate::task_config::initial(
+                    root,
+                    &objective.chars().take(4096).collect::<String>(),
+                )?
+            };
+            // Explicit evaluation contracts carry the frozen objective; normal prompts supply it.
+            if contract.objective.is_empty() {
+                contract.objective = objective.into();
+            }
+            let task = store
+                .begin(
+                    contract,
+                    provider,
+                    Some(&session),
+                    &format!("begin-{}", event_key(event, payload)?),
+                )
+                .map_err(error)?;
+            observe(
+                &store,
+                &task,
+                &format!("origin-{}", task.task_id),
+                "contract_origin",
+                json!({
+                    "repository_config":crate::config_file::preferred_path(&root.join(".pixel")),
+                    "basis":"repository executable requirements plus task acceptance contract"
+                }),
+            )?;
+            task
+        }
+        _ => return Ok(json!({"decision":"observe","coverage":"partial"})),
+    };
+    if enforce {
+        observe(
+            &store,
+            &task,
+            "hook-policy-enforce",
+            "host_policy",
+            json!({"enforce":true}),
+        )?;
+    }
+    task = store.status(&task.task_id).map_err(error)?;
+    drop(binding_lock);
+    task = crate::task_commands::reconcile(root, &store, task)?;
+    let key = event_key(event, payload)?;
+    record_host(&store, &task, event, payload, &key)?;
+    task = store.status(&task.task_id).map_err(error)?;
+    if matches!(event, "post-tool-use" | "tool-failure") && mutation && !task.phase.terminal() {
+        let source = pixel_task::snapshot::capture(root, &task.contract, false).map_err(error)?;
+        if task
+            .source
+            .as_ref()
+            .is_some_and(|prior| prior.content_id != source.content_id)
+        {
+            task = store
+                .update(
+                    &task.task_id,
+                    task.revision,
+                    &format!("edited-{key}"),
+                    Action::Edited,
+                )
+                .map_err(error)?;
+        }
+    }
+    if payload["cancelled"] == true || event == "interrupt" {
+        if !task.phase.terminal() {
+            task = store
+                .update(
+                    &task.task_id,
+                    task.revision,
+                    &format!("cancel-{key}"),
+                    Action::Cancel,
+                )
+                .map_err(error)?;
+        }
+        return Ok(response(
+            &task,
+            "allow",
+            "cancelled; automatic continuation stopped",
+            json!([]),
+        ));
+    }
+    let mut result = response(&task, "observe", "", json!([]));
+    if event == "pre-tool-use" && mutation && enforce {
+        if !task.phase.terminal() && !task.contract.checks.is_empty() {
+            let decision = store.decision(&task.task_id, Gate::Edit).map_err(error)?;
+            if decision
+                .eligible_routes
+                .contains(&pixel_task::Route::Prepare)
+            {
+                task =
+                    crate::task_prepare::prepare(root, &store, &task, &format!("prepare-{key}"))?;
+            }
+        }
+        let decision = store.decision(&task.task_id, Gate::Edit).map_err(error)?;
+        let allowed = decision.allowed && !created_by_mutation;
+        let reason = if created_by_mutation {
+            format!(
+                "Created task {} for the first mutation. Inspect its contract and retry after prerequisites are satisfied.",
+                task.task_id
+            )
+        } else {
+            gate_reason(&task, &decision.reasons)
+        };
+        result = response(
+            &task,
+            if allowed { "allow" } else { "deny" },
+            &reason,
+            json!(decision.eligible_routes),
+        );
+        if !allowed && let Some(call) = payload["tool_use_id"].as_str() {
+            record(
+                &store,
+                &task,
+                payload,
+                &format!("blocked-{key}"),
+                Observation::ToolFinished {
+                    request_id: call.into(),
+                    outcome: ToolOutcome::Blocked,
+                    duration_ms: Some(0),
+                },
+            )?;
+        }
+    } else if event == "stop" && enforce {
+        let decision = store.decision(&task.task_id, Gate::Finish).map_err(error)?;
+        if decision.allowed {
+            if task.phase != Phase::Complete {
+                task = store
+                    .update(
+                        &task.task_id,
+                        task.revision,
+                        &format!("finish-{key}"),
+                        Action::Finish,
+                    )
+                    .map_err(error)?;
+            }
+            result = response(&task, "allow", "verified complete", json!([]));
+        } else if task.phase == Phase::Cancelled {
+            result = response(
+                &task,
+                "allow",
+                "cancelled; task remains unverified",
+                json!([]),
+            );
+        } else {
+            let state_key = pixel_task::digest(&(&decision.reasons, &decision.eligible_routes))
+                .map_err(error)?;
+            match store.update(
+                &task.task_id,
+                task.revision,
+                &format!("correction-{key}"),
+                Action::Correction { state_key },
+            ) {
+                Ok(updated) => {
+                    task = updated;
+                    let advice = crate::task_route::route(root, &store, &task, &key)?;
+                    result = response(
+                        &task,
+                        "continue",
+                        &gate_reason(&task, &decision.reasons),
+                        advice["ranked_routes"].clone(),
+                    );
+                }
+                Err(pixel_task::Error::Blocked(reason)) => {
+                    result = response(
+                        &task,
+                        "deny",
+                        &format!("unverified: {reason}; {}", decision.reasons.join("; ")),
+                        json!([]),
+                    );
+                }
+                Err(failure) => return Err(error(failure)),
+            }
+        }
+    }
+    record_internal(
+        &store,
+        &task,
+        &format!("coordinator-{key}"),
+        InternalActor::Coordinator,
+        started.elapsed().as_millis() as u64,
+    )?;
+    Ok(result)
+}
+
+fn gate_reason(task: &Task, reasons: &[String]) -> String {
+    if reasons.is_empty() {
+        return String::new();
+    }
+    format!(
+        "Task {}: {}. Use pixel task status {} --json; draft checks with pixel task contract TASK --definition '<JSON>' (no file write needed). Contract, prepare, verify, review and recovery remain available.",
+        task.task_id,
+        reasons.join("; "),
+        task.task_id
+    )
+}
+
+fn response(task: &Task, decision: &str, reason: &str, allowed: Value) -> Value {
+    json!({"schema_version":1,"decision":decision,"reason":reason,"task_id":task.task_id,
+        "attempt_id":task.attempt_id,"binding_session_id":task.session_id,"allowed_actions":allowed,"phase":task.phase,"coverage":"partial"})
+}
+
+fn session_key(session: &str) -> Result<String, String> {
+    if pixel_task::model::valid_id(session).is_ok() {
+        Ok(session.to_string())
+    } else {
+        Ok(format!(
+            "session-{}",
+            pixel_task::digest(session).map_err(error)?
+        ))
+    }
+}
+
+fn event_key(event: &str, payload: &Value) -> Result<String, String> {
+    // Missing IDs stay distinct and coverage remains partial; never collapse separate requests by content.
+    let identity = payload["event_id"]
+        .as_str()
+        .map_or_else(crate::task_commands::request, str::to_string);
+    pixel_task::digest(&(event, identity)).map_err(error)
+}
+
+fn coding_prompt(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    let words: Vec<_> = lower
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .collect();
+    // A lexical hint may activate a contract early, but is never authorization.
+    // Ambiguous and read-only prompts wait for the first actual mutation.
+    if words.first().is_some_and(|word| {
+        matches!(
+            *word,
+            "what"
+                | "why"
+                | "how"
+                | "explain"
+                | "compare"
+                | "review"
+                | "inspect"
+                | "analyze"
+                | "analyse"
+                | "find"
+                | "show"
+                | "where"
+                | "is"
+                | "does"
+        )
+    }) {
+        return false;
+    }
+    words.into_iter().take(8).any(|word| {
+        matches!(
+            word,
+            "implement"
+                | "fix"
+                | "refactor"
+                | "edit"
+                | "change"
+                | "add"
+                | "remove"
+                | "build"
+                | "corrige"
+                | "implémente"
+                | "modifie"
+        )
+    })
+}
+
+fn task_enforced(store: &Store, task: &Task) -> Result<bool, String> {
+    Ok(store
+        .events(&task.task_id)
+        .map_err(error)?
+        .iter()
+        .any(|event| {
+            event.kind == "observation"
+                && event.data["kind"] == "host_policy"
+                && event.data["data"]["enforce"] == true
+        }))
+}
+
+fn session_prompt(root: &Path, key: &str, event: &str, payload: &Value) -> Result<String, String> {
+    let directory = root.join(".pixel/tasks/session-context");
+    let path = directory.join(format!("{key}.json"));
+    if event == "prompt-submit"
+        && let Some(prompt) = payload["prompt"].as_str()
+    {
+        let prompt: String = prompt.chars().take(4096).collect();
+        pixel_ops::durable::ensure_dir(&directory).map_err(error)?;
+        pixel_ops::durable::write_durably(&path, &serde_json::to_vec(&prompt).map_err(error)?)
+            .map_err(error)?;
+        return Ok(prompt);
+    }
+    match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(error),
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(failure) => Err(error(failure)),
+    }
+}
+
+fn record_host(
+    store: &Store,
+    task: &Task,
+    event: &str,
+    payload: &Value,
+    key: &str,
+) -> Result<(), String> {
+    let call = payload["tool_use_id"].as_str();
+    match event {
+        "user-bash" => observe(
+            store,
+            task,
+            &format!("external-{key}"),
+            "external_action",
+            json!({"kind":"user-bash","success":null}),
+        )?,
+        "pre-tool-use" => {
+            if let Some(call) = call {
+                record(
+                    store,
+                    task,
+                    payload,
+                    &format!("requested-{key}"),
+                    Observation::ToolRequested {
+                        request_id: call.into(),
+                        tool: payload["tool_name"]
+                            .as_str()
+                            .filter(|label| !label.is_empty())
+                            .unwrap_or("unknown")
+                            .into(),
+                        retry_of: payload["retry_of"].as_str().map(str::to_string),
+                    },
+                )?;
+            }
+        }
+        "post-tool-use" | "tool-failure" => {
+            if let Some(call) =
+                call.filter(|_| event == "tool-failure" || payload["success"].is_boolean())
+            {
+                let outcome = if event == "tool-failure" || payload["success"] == false {
+                    ToolOutcome::Failed
+                } else {
+                    ToolOutcome::Succeeded
+                };
+                record(
+                    store,
+                    task,
+                    payload,
+                    &format!("finished-{key}"),
+                    Observation::ToolFinished {
+                        request_id: call.into(),
+                        outcome,
+                        duration_ms: payload["duration_ms"].as_u64(),
+                    },
+                )?;
+            }
+        }
+        "model-response" => {
+            for call in payload["request_ids"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                let id = pixel_task::digest(&(key, call)).map_err(error)?;
+                record(
+                    store,
+                    task,
+                    payload,
+                    &format!("model-request-{id}"),
+                    Observation::ToolRequested {
+                        request_id: call.into(),
+                        tool: payload["request_tools"][call]
+                            .as_str()
+                            .unwrap_or("unknown")
+                            .into(),
+                        retry_of: None,
+                    },
+                )?;
+            }
+            record(
+                store,
+                task,
+                payload,
+                &format!("model-{key}"),
+                Observation::ModelResponse {
+                    response_id: payload["response_id"].as_str().unwrap_or(key).into(),
+                    usage: serde_json::from_value(payload["usage"].clone()).ok(),
+                    duration_ms: payload["duration_ms"].as_u64(),
+                },
+            )?;
+        }
+        "stop" | "session-end" | "subagent-stop" => {
+            let children = payload["child_spans"]
+                .as_array()
+                .map_or_else(Vec::new, |items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                });
+            record(
+                store,
+                task,
+                payload,
+                &format!("coverage-{key}"),
+                Observation::Coverage {
+                    complete: payload["coverage_complete"] == true
+                        && payload["all_children_observed"] == true,
+                    child_spans: children,
+                    missing: if payload["coverage_complete"] == true
+                        && payload["all_children_observed"] == true
+                    {
+                        vec![]
+                    } else {
+                        vec![
+                            "native hooks do not establish full model and child request coverage"
+                                .into(),
+                        ]
+                    },
+                },
+            )?;
+        }
+        _ => (),
+    }
+    Ok(())
+}
+
+fn record(
+    store: &Store,
+    task: &Task,
+    payload: &Value,
+    id: &str,
+    observation: Observation,
+) -> Result<(), String> {
+    let previous = store
+        .events(&task.task_id)
+        .map_err(error)?
+        .into_iter()
+        .find(|event| event.id == id);
+    let occurred_ms = previous
+        .as_ref()
+        .and_then(|event| event.data["data"]["occurred_ms"].as_u64())
+        .unwrap_or_else(pixel_task::now_ms);
+    let event = TelemetryEvent {
+        schema_version: 1,
+        event_id: id.into(),
+        task_id: task.task_id.clone(),
+        attempt_id: task.attempt_id.clone(),
+        span_id: payload["agent_id"]
+            .as_str()
+            .or_else(|| payload["branch_id"].as_str())
+            .unwrap_or("root")
+            .into(),
+        parent_span_id: payload["parent_span_id"].as_str().map(str::to_string),
+        host_call_id: payload["tool_use_id"].as_str().map(str::to_string),
+        occurred_ms,
+        observation,
+    };
+    let data = serde_json::to_value(&event).map_err(error)?;
+    observe(store, task, id, "telemetry", data)?;
+    // The durable journal may have committed before an interrupted export.
+    // Re-append on delivery retries; consumers deduplicate the stable event ID.
+    export(&event)?;
+    Ok(())
+}
+
+pub(crate) fn record_internal(
+    store: &Store,
+    task: &Task,
+    id: &str,
+    actor: InternalActor,
+    duration_ms: u64,
+) -> Result<(), String> {
+    // Repeat delivery of a host event is the same internal operation, not new work.
+    if store
+        .events(&task.task_id)
+        .map_err(error)?
+        .iter()
+        .any(|event| event.id == id)
+    {
+        return Ok(());
+    }
+    record(
+        store,
+        task,
+        &json!({}),
+        id,
+        Observation::InternalCall {
+            call_id: id.into(),
+            actor,
+            duration_ms: Some(duration_ms),
+        },
+    )
+}
+
+fn export(event: &TelemetryEvent) -> Result<(), String> {
+    let Some(path) = std::env::var_os("PIXEL_TASK_TELEMETRY_PATH") else {
+        return Ok(());
+    };
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(error)?;
+    file.lock_exclusive().map_err(error)?;
+    let mut line = serde_json::to_vec(event).map_err(error)?;
+    line.push(b'\n');
+    file.write_all(&line).map_err(error)
+}
+
+fn observed(
+    root: &Path,
+    provider: &str,
+    event: &str,
+    session: &str,
+    coverage: &Value,
+) -> Result<(), String> {
+    let path = root.join(".pixel/task-hook-observations.json");
+    pixel_ops::durable::ensure_dir(&root.join(".pixel")).map_err(error)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(root.join(".pixel/task-hook-observations.lock"))
+        .map_err(error)?;
+    lock.lock_exclusive().map_err(error)?;
+    let mut value: Value = match std::fs::read(&path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(error)?,
+        Err(failure) if failure.kind() == std::io::ErrorKind::NotFound => json!({}),
+        Err(failure) => return Err(error(failure)),
+    };
+    if !value.is_object() {
+        return Err("task hook observation marker is corrupt".into());
+    }
+    value[provider] = json!({"schema_version":1,"provider":provider,"session_id":session_key(session)?,"event":event,"observed_unix":pixel_task::now_ms()/1000,"coverage":coverage});
+    pixel_ops::durable::ensure_dir(&root.join(".pixel")).map_err(error)?;
+    pixel_ops::durable::write_durably(&path, &serde_json::to_vec(&value).map_err(error)?)
+        .map_err(error)
+}
+
+pub(crate) fn telemetry(events: &[TrajectoryEvent]) -> Result<Vec<TelemetryEvent>, String> {
+    events
+        .iter()
+        .filter(|event| event.kind == "observation" && event.data["kind"] == "telemetry")
+        .map(|event| serde_json::from_value(event.data["data"].clone()).map_err(error))
+        .collect()
+}
+
+pub(crate) fn replay_frames(events: &[TrajectoryEvent]) -> Result<Vec<ReplayFrame>, String> {
+    events
+        .iter()
+        .filter(|event| event.kind == "observation" && event.data["kind"] == "route")
+        .map(|event| serde_json::from_value(event.data["data"]["frame"].clone()).map_err(error))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn identity_should_separate_sessions_and_event_kinds_without_content_deduplication() {
+        assert_ne!(session_key("one").unwrap(), session_key("two").unwrap());
+        let payload = json!({"event_id":"host-1"});
+        assert_eq!(
+            event_key("pre-tool-use", &payload).unwrap(),
+            event_key("pre-tool-use", &payload).unwrap()
+        );
+        assert_ne!(
+            event_key("pre-tool-use", &payload).unwrap(),
+            event_key("post-tool-use", &payload).unwrap()
+        );
+        assert_ne!(
+            event_key("pre-tool-use", &json!({})).unwrap(),
+            event_key("pre-tool-use", &json!({})).unwrap()
+        );
+        assert!(coding_prompt("Implement a task gate"));
+        assert!(!coding_prompt("What is a gate?"));
+    }
+}

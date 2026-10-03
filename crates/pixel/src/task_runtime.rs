@@ -5,8 +5,7 @@
 //! Claude task for a particular hook session. Corrupt or unavailable state is
 //! treated as absent so hook callers can always fail open.
 
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -23,9 +22,6 @@ const MAX_TARGETS: usize = 8;
 const MAX_PATH_CHARS: usize = 512;
 const MAX_EVIDENCE_CHARS: usize = 180;
 const MIN_RENDER_BUDGET: usize = 256;
-const LEDGER_VERSION: u8 = 1;
-const MAX_PROVIDER_BYTES: usize = 32;
-const MAX_EVENTS: usize = 256;
 /// Marks a task the rendered packet had to cut to fit its byte budget.
 const TASK_CUT_MARK: &str = "…";
 /// What a packet appends after its targets when none fit the budget.
@@ -87,55 +83,6 @@ pub(crate) struct Packet {
     /// warm. Absent in stores written before it existed, which still load.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) intent: Option<Intent>,
-}
-
-/// A provider-neutral durable task record. `facts` and `model_claims` are
-/// deliberately distinct: repository observations never become model claims,
-/// and a model claim is never presented as a repository fact.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct TaskRecord {
-    pub(crate) version: u8,
-    pub(crate) task_id: String,
-    pub(crate) provider: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) session_id: Option<String>,
-    pub(crate) status: String,
-    pub(crate) created_unix: u64,
-    pub(crate) updated_unix: u64,
-    pub(crate) spec: TaskSpec,
-    pub(crate) snapshot: TaskSnapshot,
-    pub(crate) model_claims: Vec<ModelClaim>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct TaskSpec {
-    pub(crate) objective: String,
-}
-
-/// Facts captured by Pixel at a particular point in time. The absence of
-/// targets or impact is explicit rather than inferred as no impact.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct TaskSnapshot {
-    pub(crate) revision: u64,
-    pub(crate) observed_unix: u64,
-    pub(crate) head_oid: String,
-    pub(crate) targets_state: String,
-    pub(crate) impact_state: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub(crate) struct ModelClaim {
-    pub(crate) claimed_unix: u64,
-    pub(crate) text: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-struct TaskEvent {
-    version: u8,
-    task_id: String,
-    event: String,
-    created_unix: u64,
-    snapshot_revision: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -291,111 +238,6 @@ pub(crate) fn reset(path: &Path, session: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-/// Start a provider-neutral task ledger. The initial snapshot intentionally
-/// records only observations Pixel can make without asking a model to infer
-/// scope; targets and impact stay explicitly uncollected until a later phase.
-pub(crate) fn begin(
-    root: &Path,
-    objective: &str,
-    provider: &str,
-    session_id: Option<&str>,
-) -> Result<TaskRecord, String> {
-    create_task(root, objective, provider, session_id, "begun")
-}
-
-fn create_task(
-    root: &Path,
-    objective: &str,
-    provider: &str,
-    session_id: Option<&str>,
-    status: &str,
-) -> Result<TaskRecord, String> {
-    let objective = objective.trim();
-    if objective.is_empty() {
-        return Err("task objective must not be empty".to_string());
-    }
-    if !valid_provider(provider) {
-        return Err("invalid task provider".to_string());
-    }
-    if session_id.is_some_and(|session| !valid_session_id(session)) {
-        return Err("invalid task session id".to_string());
-    }
-
-    let now = now_unix();
-    let task_id = next_task_id(root, now)?;
-    let record = TaskRecord {
-        version: LEDGER_VERSION,
-        task_id: task_id.clone(),
-        provider: provider.to_string(),
-        session_id: session_id.map(str::to_string),
-        status: status.to_string(),
-        created_unix: now,
-        updated_unix: now,
-        spec: TaskSpec {
-            objective: truncate(objective, MAX_TASK_CHARS),
-        },
-        snapshot: TaskSnapshot {
-            revision: 1,
-            observed_unix: now,
-            head_oid: current_head(root),
-            targets_state: "not_collected".to_string(),
-            impact_state: "not_collected".to_string(),
-        },
-        model_claims: Vec::new(),
-    };
-    save_task(root, &record)?;
-    append_event(root, &record, status)?;
-    Ok(record)
-}
-
-/// Refresh the factual repository snapshot for an existing task. It does not
-/// manufacture targets or impact: those require their own deterministic Pixel
-/// operations and are represented as absent here until collected.
-pub(crate) fn prepare(root: &Path, task_id: &str) -> Result<Option<TaskRecord>, String> {
-    let mut record = match load_task(root, task_id) {
-        Some(record) => record,
-        None => return Ok(None),
-    };
-    let now = now_unix();
-    // Refreshing evidence must not rewrite a later status, such as the
-    // `accepted` or worker states earlier releases recorded.
-    if record.status == "begun" {
-        record.status = "prepared".to_string();
-    }
-    record.updated_unix = now;
-    record.snapshot.revision = record.snapshot.revision.saturating_add(1);
-    record.snapshot.observed_unix = now;
-    record.snapshot.head_oid = current_head(root);
-    save_task(root, &record)?;
-    append_event(root, &record, "prepared")?;
-    Ok(Some(record))
-}
-
-/// Read a durable task record. Bad ids, partial JSON, and future formats are
-/// treated as absent so callers can safely fall back without trusting corrupt
-/// state.
-pub(crate) fn status(root: &Path, task_id: &str) -> Option<TaskRecord> {
-    load_task(root, task_id)
-}
-
-/// Read bounded, parseable events. A torn/corrupt event line is ignored rather
-/// than being promoted into a fabricated event.
-pub(crate) fn events(root: &Path, task_id: &str) -> Vec<Value> {
-    if !valid_task_id(task_id) {
-        return Vec::new();
-    }
-    fs::read_to_string(events_path(root, task_id))
-        .ok()
-        .map(|raw| {
-            raw.lines()
-                .filter_map(|line| serde_json::from_str::<TaskEvent>(line).ok())
-                .take(MAX_EVENTS)
-                .filter_map(|event| serde_json::to_value(event).ok())
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// What one prompt contributes to its session's packet.
 struct PromptState<'a> {
     prompt: &'a str,
@@ -480,72 +322,6 @@ fn store_path(root: &Path) -> PathBuf {
     root.join(".pixel").join("task-runtime.json")
 }
 
-fn tasks_root(root: &Path) -> PathBuf {
-    root.join(".pixel").join("tasks")
-}
-
-fn task_dir(root: &Path, task_id: &str) -> PathBuf {
-    tasks_root(root).join(task_id)
-}
-
-fn task_path(root: &Path, task_id: &str) -> PathBuf {
-    task_dir(root, task_id).join("task.json")
-}
-
-fn events_path(root: &Path, task_id: &str) -> PathBuf {
-    task_dir(root, task_id).join("events.jsonl")
-}
-
-fn next_task_id(root: &Path, now: u64) -> Result<String, String> {
-    for _ in 0..1024 {
-        let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let candidate = format!("task-{now}-{sequence}");
-        if !task_path(root, &candidate).exists() {
-            return Ok(candidate);
-        }
-    }
-    Err("unable to allocate a unique task id".to_string())
-}
-
-fn load_task(root: &Path, task_id: &str) -> Option<TaskRecord> {
-    if !valid_task_id(task_id) {
-        return None;
-    }
-    fs::read_to_string(task_path(root, task_id))
-        .ok()
-        .and_then(|raw| serde_json::from_str::<TaskRecord>(&raw).ok())
-        .filter(|record| record.version == LEDGER_VERSION && record.task_id == task_id)
-}
-
-fn save_task(root: &Path, record: &TaskRecord) -> Result<(), String> {
-    let path = task_path(root, &record.task_id);
-    save_json_atomic(&path, record)
-}
-
-fn append_event(root: &Path, record: &TaskRecord, event: &str) -> Result<(), String> {
-    let path = events_path(root, &record.task_id);
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("task event path has no parent: {}", path.display()))?;
-    fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-    let entry = TaskEvent {
-        version: LEDGER_VERSION,
-        task_id: record.task_id.clone(),
-        event: event.to_string(),
-        created_unix: record.updated_unix,
-        snapshot_revision: record.snapshot.revision,
-    };
-    let mut body = serde_json::to_vec(&entry).map_err(|e| e.to_string())?;
-    body.push(b'\n');
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
-    file.write_all(&body)
-        .map_err(|e| format!("append {}: {e}", path.display()))
-}
-
 fn load_store(path: &Path) -> Store {
     std::fs::read_to_string(path)
         .ok()
@@ -628,22 +404,6 @@ fn valid_session_id(session: &str) -> bool {
         && session
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-}
-
-fn valid_provider(provider: &str) -> bool {
-    !provider.is_empty()
-        && provider.len() <= MAX_PROVIDER_BYTES
-        && provider
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-}
-
-fn valid_task_id(task_id: &str) -> bool {
-    !task_id.is_empty()
-        && task_id.len() <= 128
-        && task_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn expired(updated_unix: u64, now: u64) -> bool {
@@ -1022,61 +782,6 @@ mod tests {
             !rendered.contains("No ranked targets"),
             "a packet with targets never claims there were none: {rendered}"
         );
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn ledger_keeps_facts_separate_from_claims_and_replays_events() {
-        let root = root("ledger");
-        let begun = begin(&root, "add task ledger", "claude", Some("session-1")).unwrap();
-
-        assert_eq!(begun.status, "begun");
-        assert_eq!(begun.model_claims, Vec::<ModelClaim>::new());
-        assert_eq!(begun.snapshot.targets_state, "not_collected");
-        assert_eq!(status(&root, &begun.task_id), Some(begun.clone()));
-        assert_eq!(events(&root, &begun.task_id).len(), 1);
-
-        let prepared = prepare(&root, &begun.task_id).unwrap().unwrap();
-        assert_eq!(prepared.status, "prepared");
-        assert_eq!(prepared.snapshot.revision, 2);
-        let events = events(&root, &begun.task_id);
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0]["event"], "begun");
-        assert_eq!(events[1]["event"], "prepared");
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn corrupt_task_and_event_state_fail_open() {
-        let root = root("corrupt-ledger");
-        let record = begin(&root, "task", "claude", None).unwrap();
-        std::fs::write(task_path(&root, &record.task_id), "not json").unwrap();
-        std::fs::write(events_path(&root, &record.task_id), "not json\n").unwrap();
-
-        assert!(status(&root, &record.task_id).is_none());
-        assert!(events(&root, &record.task_id).is_empty());
-        assert!(prepare(&root, &record.task_id).unwrap().is_none());
-        assert!(begin(&root, "task", "bad/provider", None).is_err());
-        std::fs::remove_dir_all(root).unwrap();
-    }
-
-    #[test]
-    fn prepare_refresh_should_keep_a_status_other_than_begun() {
-        // Records written by earlier releases carry `accepted` and worker
-        // states; a refresh must not turn them into `prepared`.
-        let root = root("prepare-state");
-        for state in ["accepted", "worker_running", "launch_failed", "prepared"] {
-            let mut task = begin(&root, "run controller", "claude", Some("session-1")).unwrap();
-            task.status = state.to_string();
-            save_task(&root, &task).unwrap();
-            let refreshed = prepare(&root, &task.task_id).unwrap().unwrap();
-            assert_eq!(
-                refreshed.status, state,
-                "snapshot refresh must not rewrite {state}"
-            );
-            assert_eq!(refreshed.snapshot.revision, task.snapshot.revision + 1);
-            assert_eq!(status(&root, &task.task_id).unwrap().status, state);
-        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -54,7 +54,14 @@ mod search_compat;
 mod search_filter;
 mod serve_trace;
 mod sniper_cmd;
+mod task_bridge;
+mod task_commands;
+mod task_config;
+mod task_hook;
+mod task_prepare;
+mod task_route;
 mod task_runtime;
+use task_commands::TaskCmd;
 mod ultraflow_cmd;
 
 mod update_notice;
@@ -1208,7 +1215,7 @@ enum Command {
         #[command(subcommand)]
         cmd: Option<ConfigCmd>,
     },
-    /// Inspect or reset Claude Code's local Pixel task-runtime packet.
+    /// Completion contracts, verification, task trajectories and Claude packets.
     #[command(alias = "task")]
     TaskState {
         #[command(subcommand)]
@@ -1643,6 +1650,13 @@ fn parse_line_range(s: &str) -> Result<(u32, u32), String> {
 
 #[derive(Subcommand)]
 enum HookCmd {
+    /// Durable task lifecycle and completion gate for supported agent hosts.
+    TaskEvent {
+        #[arg(long, value_enum)]
+        provider: task_hook::TaskProvider,
+        #[arg(long, value_enum)]
+        event: task_hook::TaskHookEvent,
+    },
     /// `pixel hook guard "$@"` — targets enforcement guard.
     Guard {
         #[arg(default_value = ".")]
@@ -1787,69 +1801,6 @@ enum ConfigCmd {
         /// The engine preference to store.
         #[arg(value_parser = ["local", "remote", "auto"])]
         value: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum TaskCmd {
-    /// Begin a provider-neutral durable Pixel task ledger.
-    Begin {
-        /// Observable objective. Stored as task specification, not model output.
-        objective: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        /// Provider which will consume the task evidence.
-        #[arg(long, default_value = "claude")]
-        provider: String,
-        /// Optional provider session mapped to this task.
-        #[arg(long)]
-        session: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Refresh a task's factual repository snapshot.
-    Prepare {
-        task_id: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Print a durable task record. Corrupt or unavailable state is absent.
-    Status {
-        task_id: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Replay bounded, factual task-ledger events.
-    Events {
-        task_id: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Print the current Claude session task packet, if it is still valid.
-    Show {
-        /// Claude Code hook session ID.
-        #[arg(long)]
-        session: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Remove the current Claude session task packet. Safe when absent.
-    Reset {
-        /// Claude Code hook session ID.
-        #[arg(long)]
-        session: String,
-        #[arg(default_value = ".")]
-        path: PathBuf,
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -4595,6 +4546,11 @@ fn run() -> Result<(), String> {
     };
     let mut event = pixel_actionlog::ActionEvent::new(&command_label, logged_args(&argv[1..]))
         .with_result(&logged_result, elapsed);
+    if let Ok(root) = &root
+        && let Some(correlation) = task_commands::action_correlation(root)
+    {
+        event = event.with_task(correlation);
+    }
     event.serve = serve_trace::take();
     if !protected {
         // The repeated error is rendered output the caller reads, written
@@ -6473,6 +6429,7 @@ fn run_command(
                 )?;
                 Ok(())
             }
+            HookCmd::TaskEvent { provider, event } => task_hook::run(provider, event),
             HookCmd::PromptSubmit { provider } => {
                 // Task boundary detector — reads UserPromptSubmit payload
                 // from stdin, embeds prompt + context, emits advisory if a
@@ -6527,75 +6484,7 @@ fn run_command(
                 Ok(())
             }
         },
-        Command::TaskState { cmd } => match cmd {
-            TaskCmd::Begin {
-                objective,
-                path,
-                provider,
-                session,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let record = task_runtime::begin(&root, &objective, &provider, session.as_deref())?;
-                print_data(
-                    &serde_json::to_value(record).map_err(|e| e.to_string())?,
-                    json,
-                )
-            }
-            TaskCmd::Prepare {
-                task_id,
-                path,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let data = task_runtime::prepare(&root, &task_id)?
-                    .map(|record| serde_json::to_value(record).map_err(|e| e.to_string()))
-                    .transpose()?
-                    .unwrap_or_else(|| json!({"task_id": task_id, "status": "absent"}));
-                print_data(&data, json)
-            }
-            TaskCmd::Status {
-                task_id,
-                path,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let data = task_runtime::status(&root, &task_id)
-                    .map(|record| serde_json::to_value(record).map_err(|e| e.to_string()))
-                    .transpose()?
-                    .unwrap_or_else(|| json!({"task_id": task_id, "status": "absent"}));
-                print_data(&data, json)
-            }
-            TaskCmd::Events {
-                task_id,
-                path,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let events = task_runtime::events(&root, &task_id);
-                print_data(&json!({"task_id": task_id, "events": events}), json)
-            }
-            TaskCmd::Show {
-                session,
-                path,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let data = task_runtime::show(&root, &session)?.unwrap_or_else(
-                    || json!({"session_id": session, "task_id": Value::Null, "status": "absent"}),
-                );
-                print_data(&data, json)
-            }
-            TaskCmd::Reset {
-                session,
-                path,
-                json,
-            } => {
-                let root = discover_root(&path)?;
-                let removed = task_runtime::reset(&root, &session)?;
-                print_data(&json!({"session_id": session, "removed": removed}), json)
-            }
-        },
+        Command::TaskState { cmd } => task_commands::run(cmd),
         Command::ActionLog {
             path,
             limit,
