@@ -308,11 +308,28 @@ jobs:
       # when cc could not create /tmp files, although / still had 88 GB free;
       # /tmp held 4.5-4.6 GB after the affected shards. GCC and Rust respect
       # TMPDIR, so put compiler and test scratch files on the runner's disk.
-      # RUNNER_TEMP is isolated per job and cleaned by the runner afterward.
+      # Not under RUNNER_TEMP: on the self-hosted runner it sits in a $HOME
+      # that is itself a git repository, and every test that needs a scratch
+      # directory outside git then sees that repository (#599's shards failed
+      # their baseline on `non_git_plain_build` and six siblings). The same
+      # job gets its own XDG_RUNTIME_DIR, which the runner service lacks: the
+      # test process and the `pixel` binaries it spawns must resolve daemon
+      # sockets into one place (scripts/mutants-gate-host.sh, which the gate
+      # host runs with the same two settings).
       - name: Use disk-backed mutation temporary storage
+        env:
+          SHARD: ${{ matrix.shard }}
         run: |
-          mkdir -p "$RUNNER_TEMP/pixel-mutants-tmp"
-          echo "TMPDIR=$RUNNER_TEMP/pixel-mutants-tmp" >> "$GITHUB_ENV"
+          # PIXEL_MUTANTS_SCRATCH_BASE is for scripts/test-mutants-config.py.
+          base="${PIXEL_MUTANTS_SCRATCH_BASE:-/var/tmp}"
+          scratch="$base/pixel-mutants-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-${SHARD//\//-of-}"
+          mkdir -p "$scratch/tmp" "$scratch/runtime"
+          chmod 700 "$scratch/runtime"
+          {
+            echo "PIXEL_MUTANTS_SCRATCH=$scratch"
+            echo "TMPDIR=$scratch/tmp"
+            echo "XDG_RUNTIME_DIR=$scratch/runtime"
+          } >> "$GITHUB_ENV"
 
       # --in-place: mutate the checkout itself instead of copying it (CI
       # discards the tree). --no-shuffle: mutants run in source order, so
@@ -338,7 +355,7 @@ jobs:
         run: |
           df -h / /tmp "$TMPDIR"
           df -i / /tmp "$TMPDIR"
-          sudo du -sh target ~/.cache/pixel "$RUNNER_TEMP" /tmp 2>&1 || true
+          sudo du -sh target ~/.cache/pixel "$RUNNER_TEMP" "$TMPDIR" /tmp 2>&1 || true
 
       # --config: the plan's copy of this workflow's configuration, the one
       # the listing was made with (see "List the mutants the diff produces").
@@ -357,7 +374,15 @@ jobs:
         run: |
           df -h / /tmp "${TMPDIR:-$RUNNER_TEMP}"
           df -i / /tmp "${TMPDIR:-$RUNNER_TEMP}"
-          sudo du -sh target ~/.cache/pixel "$RUNNER_TEMP" /tmp 2>&1 || true
+          sudo du -sh target ~/.cache/pixel "$RUNNER_TEMP" "${TMPDIR:-/tmp}" /tmp 2>&1 || true
+
+      # /var/tmp outlives the job, unlike RUNNER_TEMP.
+      - name: Remove the mutation scratch
+        if: always()
+        run: |
+          if [ -n "${PIXEL_MUTANTS_SCRATCH:-}" ]; then
+            rm -rf "$PIXEL_MUTANTS_SCRATCH"
+          fi
 
       - name: Post job summary
         if: always()
