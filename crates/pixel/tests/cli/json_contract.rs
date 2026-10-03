@@ -1356,8 +1356,8 @@ fn the_stdout_cap_warning_leaves_the_daemon_caps_in_the_note() {
 /// `--limit` counts the matching lines a `-g`/`-t` search prints, not the
 /// index rows read before the filter: `--limit 1 -g 'tests/*'` used to ask
 /// the index for one row, drop it (it was `NOTES.md`), and print nothing
-/// while `tests/login_test.rs` matched. `next_offset` counts index rows, so
-/// the page it names starts on the next kept match instead of replaying one.
+/// while `tests/login_test.rs` matched. The daemon filters before paging, so
+/// `next_offset` counts kept matches and names the next one, never a replay.
 #[test]
 fn a_filtered_limit_counts_kept_matches_and_resumes_past_dropped_rows() {
     let dir = fixture("search-filter-limit");
@@ -1417,7 +1417,7 @@ fn a_filtered_limit_counts_kept_matches_and_resumes_past_dropped_rows() {
 
 /// A filter narrows the answer, it does not lengthen the page: without
 /// `--limit`, `-g` gets the daemon's default row limit, as an unfiltered
-/// search does, not the 10 000-row page it reads the index with.
+/// search does.
 #[test]
 fn a_filtered_search_without_a_limit_keeps_the_default_page_length() {
     let dir = fixture_with_many_matches("search-filter-default");

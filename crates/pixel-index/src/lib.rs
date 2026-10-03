@@ -19,6 +19,7 @@ pub mod gitsync;
 pub mod index;
 pub mod indexset;
 pub mod overlay;
+pub mod path_filter;
 pub mod plan;
 pub mod shard;
 pub mod verify;

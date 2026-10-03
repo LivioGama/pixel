@@ -2033,7 +2033,6 @@ version = "0.6.1"
 dependencies = [
  "clap",
  "fs2",
- "globset",
  "ignore",
  "libc",
  "mutants",
@@ -2161,6 +2160,7 @@ version = "0.6.1"
 dependencies = [
  "crc32fast",
  "fs2",
+ "globset",
  "grep-regex",
  "grep-searcher",
  "ignore",

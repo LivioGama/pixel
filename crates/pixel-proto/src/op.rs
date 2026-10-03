@@ -45,6 +45,14 @@ pub enum Op {
         /// any other value) preserves the existing path/line order.
         #[serde(default)]
         scope: Option<String>,
+        /// `-g/--glob` rules with ripgrep's semantics: a leading `!`
+        /// excludes, the last matching rule decides, and with any include
+        /// rule a path no rule matches is left out. Empty = no glob filter.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        globs: Vec<String>,
+        /// `-t/--type` names (`rust`, `ts`, `md`, ...). Empty = every type.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        types: Vec<String>,
     },
     /// Sniper target list: task description in, closed prioritized file
     /// list (P0/P1/P2) out.
@@ -506,6 +514,8 @@ mod tests {
             offset: None,
             paths: Some(vec!["src".into()]),
             scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
         };
         let value = serde_json::to_value(&op).unwrap();
         assert_eq!(
@@ -701,6 +711,8 @@ mod tests {
                     offset: None,
                     paths: None,
                     scope: None,
+                    globs: Vec::new(),
+                    types: Vec::new(),
                 },
                 "search",
             ),

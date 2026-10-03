@@ -183,6 +183,8 @@ fn bench_search_service_time(c: &mut Criterion) {
         offset: None,
         paths: None,
         scope: None,
+        globs: Vec::new(),
+        types: Vec::new(),
     };
 
     // Warm up the index (first search builds it).
@@ -240,6 +242,8 @@ fn bench_ranked_search_service_time(c: &mut Criterion) {
         offset: None,
         paths: None,
         scope: Some("code".into()),
+        globs: Vec::new(),
+        types: Vec::new(),
     };
 
     // Warm up.
@@ -323,6 +327,8 @@ fn gate_search_service_time() {
             offset: None,
             paths: None,
             scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
         })
     };
     let _ = svc.handle(make_req());
@@ -345,6 +351,8 @@ fn gate_ranked_search_service_time() {
             offset: None,
             paths: None,
             scope: Some("code".into()),
+            globs: Vec::new(),
+            types: Vec::new(),
         })
     };
     let _ = svc.handle(make_req());
