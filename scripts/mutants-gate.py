@@ -49,10 +49,10 @@ CONFIG = REPO / ".cargo/mutants.toml"
 #: minutes where 20 take about ten, for one more baseline per 10 mutants.
 MUTANTS_PER_SHARD = 10
 #: Upper bound on parallel shard jobs. Free accounts run 20 jobs at a time,
-#: and this leaves room for the CI workflow of the same push. Past 100
+#: and this leaves room for the CI workflow of the same push. Past 150
 #: mutants, shards grow beyond `MUTANTS_PER_SHARD`: a 658-mutant diff puts
-#: 66 on each shard, about 30 minutes against the job's 90-minute limit.
-MAX_SHARDS = 10
+#: 44 on each shard, about 20 minutes against the job's 90-minute limit.
+MAX_SHARDS = 15
 
 #: `outcomes.json` summaries, by the name the report prints for them.
 OUTCOME_NAMES = {

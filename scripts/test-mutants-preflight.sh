@@ -104,7 +104,7 @@ grep -q 'cargo mutants --list failed' "$tmp/cargo-failure.out"
 : > "$tmp/cargo.log"
 (cd "$fixture" && run --run > "$tmp/run.out")
 grep -q 'local run caught every listed mutant' "$tmp/run.out"
-grep -q '^mutants -vV --no-shuffle --in-place --in-diff ' "$tmp/cargo.log"
+grep -q '^mutants -vV --no-shuffle --in-place --iterate --in-diff ' "$tmp/cargo.log"
 # .cargo/mutants.toml owns --all-targets and --locked for every lane.
 if grep -Eq -- '--all-targets|--locked' "$tmp/cargo.log"; then
     echo "expected the local run to leave --all-targets and --locked to .cargo/mutants.toml" >&2
@@ -126,6 +126,12 @@ fi
 (cd "$fixture" && run --run 'changed|other' > "$tmp/run-filter.out")
 grep -q -- "-F 'changed|other'\|-F changed|other" "$tmp/cargo.log" \
     || grep -q 'F.*changed|other' "$tmp/cargo.log"
+# A filtered run judges a different slice: it must not iterate off the full
+# run's outcomes.
+if grep -q -- '--iterate' "$tmp/cargo.log"; then
+    echo "expected a filtered run to skip --iterate" >&2
+    exit 1
+fi
 
 if (cd "$fixture" && CARGO_RUN_FAIL=1 run --run > "$tmp/run-fail.out" 2>&1); then
     echo "expected a failed local run to exit nonzero" >&2

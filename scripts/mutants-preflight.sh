@@ -90,6 +90,21 @@ if [ "$mode" = --run ]; then
     sh "$repo/scripts/mutants-version-check.sh" "$repo"
     worktree="$tmp_dir/tree"
     git worktree add --detach "$worktree" "$head_oid" >/dev/null
+    # Iterate, unfiltered runs only: the previous run's outcomes are kept
+    # under target/ and copied into the throwaway tree, so a rerun after
+    # fixing a MISSED line re-tests only the mutants not yet caught (and any
+    # whose source moved) instead of the whole list. A filtered run judges a
+    # different slice, so its outcomes must never seed or replace the full
+    # run's. First run has no seed and --iterate is a no-op.
+    iterate=
+    persist="$repo/target/mutants-preflight"
+    if [ -z "$filter" ]; then
+        iterate=--iterate
+        mkdir -p "$persist"
+        if [ -d "$persist/mutants.out" ]; then
+            cp -R "$persist/mutants.out" "$worktree/mutants.out"
+        fi
+    fi
     run_status=0
     (
         cd "$worktree" || exit 2
@@ -97,9 +112,15 @@ if [ "$mode" = --run ]; then
             exec cargo mutants -vV --no-shuffle --in-place --in-diff "$diff_file" \
                 -F "$filter"
         else
-            exec cargo mutants -vV --no-shuffle --in-place --in-diff "$diff_file"
+            exec cargo mutants -vV --no-shuffle --in-place --iterate --in-diff "$diff_file"
         fi
     ) || run_status=$?
+    if [ -n "$iterate" ]; then
+        if [ -d "$worktree/mutants.out" ]; then
+            rm -rf "$persist/mutants.out"
+            cp -R "$worktree/mutants.out" "$persist/mutants.out"
+        fi
+    fi
     outcomes="$worktree/mutants.out/mutants.out"
     if [ -f "$outcomes" ]; then
         survivors=$(grep -Ei '^(missed|timeout)' "$outcomes" || true)
