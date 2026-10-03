@@ -23,7 +23,7 @@ jobs:
     name: Verify tag and tests
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: useblacksmith/checkout@v1 # v7
         with:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
@@ -72,7 +72,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-26.04
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: blacksmith-6vcpu-macos-15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -152,7 +152,7 @@ jobs:
       # is not updated (a warning is emitted instead of failing the release).
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: useblacksmith/checkout@v1 # v7
         with:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
@@ -233,7 +233,7 @@ jobs:
 
       - name: Check out the Homebrew tap
         if: env.HOMEBREW_TAP_TOKEN != ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: useblacksmith/checkout@v1 # v7
         with:
           repository: LivioGama/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -280,7 +280,7 @@ jobs:
           - target: aarch64-unknown-linux-musl
             os: ubuntu-26.04-arm
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: blacksmith-6vcpu-macos-15
     env:
       GH_TOKEN: ${{ github.token }}
       HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

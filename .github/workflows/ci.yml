@@ -121,7 +121,7 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       # Full history so the merge base with the target branch is available.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: useblacksmith/checkout@v1 # v7
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -382,7 +382,7 @@ jobs:
     if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.cargo == 'true'
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: useblacksmith/checkout@v1 # v7
         with:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
@@ -534,7 +534,7 @@ jobs:
     if: needs.scope.outputs.release-prepare != 'true' && needs.changes.outputs.deps == 'true'
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: useblacksmith/checkout@v1 # v7
         with:
           # The job never pushes: do not leave the token in .git/config.
           persist-credentials: false
