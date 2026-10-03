@@ -1,0 +1,128 @@
+# Depot CI Migration
+# Source: .github/workflows/board-sync.yml
+#
+# Changes made:
+# - Changed GitHub runs-on labels to their Depot equivalents
+
+name: Board sync
+
+# The Status field of the tracking task on project 3 follows the PR carrying
+# `Task <number>` (`.agents/rules/project-task.md`): In Progress when the PR
+# opens, Done when it merges, Todo when it closes unmerged. It lives apart
+# from ci.yml: docs-only pull requests still sync work, so ci.yml's path
+# filter must not gate it.
+#
+# `GITHUB_TOKEN` cannot write Projects v2; the job degrades gracefully when
+# PROJECTS_TOKEN (a fine-grained or classic token with `project: write` on
+# the board, a repository secret) is absent, printing what it skipped.
+#
+# `pull_request_target` (not `pull_request`) so fork PRs still reach the
+# repository secrets. This job is metadata-only: it never checks out the
+# PR's code, only reads the PR body and runs `gh` against the project.
+
+on:
+  pull_request_target:
+    types: [opened, reopened, closed]
+
+concurrency:
+  group: board-sync-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: depot-ubuntu-latest # was: ubuntu-latest. Mapped standard GitHub runner to Depot equivalent.
+    steps:
+      - name: Sync project 3 status with the PR lifecycle
+        env:
+          PROJECTS_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_MERGED: ${{ github.event.pull_request.merged }}
+          PR_ACTION: ${{ github.event.action }}
+          PR_REPO_URL: ${{ github.event.pull_request.base.repo.html_url }}
+        run: |
+          if [ -z "$PROJECTS_TOKEN" ]; then
+            echo "PROJECTS_TOKEN is not set; board status not synced for PR ${PR_NUMBER}"
+            exit 0
+          fi
+          python3 - <<'PY'
+          import json, os, re, subprocess
+
+          body = os.environ["PR_BODY"] or ""
+          action = os.environ["PR_ACTION"]
+          merged = os.environ["PR_MERGED"] == "true"
+          token = os.environ["PROJECTS_TOKEN"]
+
+          # A body opens on `Task <number>` or declares `no task: <reason>`
+          # (project-task.md); anything else has nothing to sync.
+          m = re.match(r"\s*Task (\d+)\b", body)
+          if not m:
+            print("no Task line found; nothing to sync")
+          else:
+            number = int(m.group(1))
+            if action == "opened" or action == "reopened":
+              option, note = "47fc9ee4", "In Progress"
+            elif merged:
+              option, note = "98236657", "Done"
+            else:
+              option, note = "f75ad846", "Todo"
+
+            def gh(*args):
+              env = dict(os.environ, GH_TOKEN=token)
+              result = subprocess.run(["gh", *args], capture_output=True,
+                                      text=True, env=env)
+              if result.returncode != 0:
+                print(result.stderr.strip())
+                raise SystemExit(f"gh {' '.join(args)} failed")
+              return result.stdout
+
+            # GraphQL pagination: `first` is capped at 100 per page, so one
+            # big `item-list` call dies. Walk the pages instead. The query
+            # returns issues only, and the URL check keeps a same-numbered
+            # item from another repository out of reach.
+            found = None
+            cursor = None
+            while True:
+              query = (
+                'query($owner:String!, $n:Int!, $cursor:String) {'
+                ' user(login: $owner) { projectV2(number: $n) {'
+                ' items(first:100, after:$cursor) {'
+                ' pageInfo { hasNextPage endCursor }'
+                ' nodes { id content {'
+                ' ... on Issue { number url } } } } } } }')
+              args = ["api", "graphql", "-f", f"query={query}",
+                      "-f", "owner=LivioGama", "-F", "n=3"]
+              if cursor:
+                args += ["-f", f"cursor={cursor}"]
+              items = json.loads(
+                  gh(*args))["data"]["user"]["projectV2"]["items"]
+              for entry in items["nodes"]:
+                content = entry.get("content", {})
+                if (content.get("number") == number
+                    and content.get("url", "").startswith(
+                        os.environ["PR_REPO_URL"])
+                ):
+                  found = entry["id"]
+                  break
+              if found is not None or not items["pageInfo"]["hasNextPage"]:
+                break
+              cursor = items["pageInfo"]["endCursor"]
+            if found is None:
+              print(f"issue {number} is not on the board; nothing to sync")
+            else:
+              # The raw mutation, not `gh project item-edit`: that wrapper
+              # validates token scopes locally (read:org, read:discussion)
+              # before the operation, which `project: write` alone serves;
+              # `gh api` skips the preflight and the API only needs the
+              # scopes the project itself requires.
+              mutation = (
+                  'mutation { updateProjectV2ItemFieldValue(input: {'
+                  ' projectId: "PVT_kwHOAGnAQs4BlIxX",'
+                  ' itemId: "%s",'
+                  ' fieldId: "PVTSSF_lAHOAGnAQs4BlIxXzhj2yRU",'
+                  ' value: { singleSelectOptionId: "%s" } })'
+                  ' { projectV2Item { id } } }' % (found, option))
+              gh("api", "graphql", "-f", "query=" + mutation)
+              print(f"PR {os.environ['PR_NUMBER']} ({action}, "
+                    f"merged={merged}): task {number} set to {note}")
+          PY

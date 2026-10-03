@@ -627,6 +627,12 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
   built from source, `brew test`, `brew audit --strict --new`, on macOS and
   Linux),
   `release-prepare-scope.yml` and `pages.yml` (the website).
+- Depot CI mirrors these workflows under `.depot/workflows/`. Depot's
+  migration keeps `.github/workflows/` active in parallel, rewrites local
+  workflow references to `.depot/`, and maps supported runner labels to
+  Depot's Linux sandboxes. The mirror is an onboarding path; release,
+  Homebrew macOS, and self-hosted harness behavior still require verification
+  in Depot before GitHub remains the sole required gate.
 - Local agent validation uses targeted checks during editing and the full
   gates once a reviewable unit is ready (CONTRIBUTING.md, "Agent validation
   workflow"). Background gates validate an unchanged checkout or a committed
