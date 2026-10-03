@@ -338,7 +338,13 @@ class OneProgramForEveryLane(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="pixel-mutants-temp-") as tmp:
             root = Path(tmp)
             runner_temp = root / "runner temp"
-            expected = runner_temp / "pixel-mutants-tmp"
+            # Outside RUNNER_TEMP: on the self-hosted runner it lies in a
+            # $HOME that is a git repository, which breaks every test that
+            # needs a scratch directory outside git (#599).
+            scratch_base = root / "var tmp"
+            scratch_base.mkdir()
+            scratch = scratch_base / "pixel-mutants-41-2-0-of-10"
+            expected = scratch / "tmp"
             github_env = root / "github-env"
             probe = root / "inherited-temp"
             bin_dir = root / "bin"
@@ -355,15 +361,33 @@ class OneProgramForEveryLane(unittest.TestCase):
             cargo.chmod(0o755)
             env = dict(os.environ)
             env.pop("TMPDIR", None)
-            env.update(RUNNER_TEMP=str(runner_temp), GITHUB_ENV=str(github_env))
+            env.update(
+                RUNNER_TEMP=str(runner_temp),
+                GITHUB_ENV=str(github_env),
+                GITHUB_RUN_ID="41",
+                GITHUB_RUN_ATTEMPT="2",
+                SHARD="0/10",
+                PIXEL_MUTANTS_SCRATCH_BASE=str(scratch_base),
+            )
             result = subprocess.run(
                 ["bash", "-e", "-o", "pipefail", "-c", prepare],
                 cwd=root, env=env, capture_output=True, text=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(expected.is_dir())
+            runtime = scratch / "runtime"
+            self.assertTrue(runtime.is_dir())
+            self.assertEqual(runtime.stat().st_mode & 0o777, 0o700)
+            self.assertFalse(runner_temp.exists(), "nothing lands under RUNNER_TEMP")
             updates = dict(line.split("=", 1) for line in github_env.read_text().splitlines())
-            self.assertEqual(updates, {"TMPDIR": str(expected)})
+            self.assertEqual(
+                updates,
+                {
+                    "PIXEL_MUTANTS_SCRATCH": str(scratch),
+                    "TMPDIR": str(expected),
+                    "XDG_RUNTIME_DIR": str(runtime),
+                },
+            )
             env.update(updates)
             env.update(PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", PROBE_FILE=str(probe), SHARD="0/10")
             for status in (0, 7):
