@@ -38,7 +38,9 @@ pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// deterministic `targets_facts` request (older daemons reject it as an
 /// unknown variant) and `search` names each cap that fired by kind
 /// (`cap_hits`), which the CLI reads instead of matching the cap sentences.
-pub const PROTOCOL_VERSION: u64 = 12;
+/// 13: `search` takes `globs` and `types` and filters candidate files
+/// itself; an older daemon would ignore them and answer unfiltered.
+pub const PROTOCOL_VERSION: u64 = 13;
 
 /// Rows a `search` returns when the request names no `limit`.
 pub const SEARCH_DEFAULT_ROWS: usize = 100;
@@ -443,7 +445,7 @@ impl Service {
         }
         let result = match kind {
             "execution_brief" => self.op_targets(query, Some(limit), Some("P1"), false),
-            "search" => self.op_search(query, Some(limit), None, None, None),
+            "search" => self.op_search(query, Some(limit), None, None, None, None),
             "resolve" => self.op_resolve(query, Some(limit)),
             "impact" => self.op_impact(query, "upstream", Some(2)),
             _ => Err(format!("unsupported evidence query kind: {kind}")),
@@ -970,7 +972,18 @@ impl Service {
                 offset,
                 paths,
                 scope,
-            } => self.op_search(&pattern, limit, offset, paths.as_deref(), scope.as_deref()),
+                globs,
+                types,
+            } => pixel_index::path_filter::PathFilter::new(&globs, &types).and_then(|filter| {
+                self.op_search(
+                    &pattern,
+                    limit,
+                    offset,
+                    paths.as_deref(),
+                    scope.as_deref(),
+                    filter.as_ref(),
+                )
+            }),
             Request::Targets { task, limit, max_tier, precision } => self.op_targets(&task, limit, max_tier.as_deref(), precision),
             Request::TargetsFacts { task, limit } => self.op_targets_facts(&task, limit),
             Request::Symbol { name } => self.op_symbol(&name),
@@ -1144,6 +1157,10 @@ impl Service {
         offset: Option<usize>,
         paths: Option<&[String]>,
         scope: Option<&str>,
+        // `-g`/`-t`: drops candidate files before verification, like `paths`,
+        // so `limit`, `offset` and `truncated` count kept matches and a
+        // filtered page is as long as an unfiltered one.
+        filter: Option<&pixel_index::path_filter::PathFilter>,
     ) -> Result<Value, String> {
         // Default row limit and byte cap protect against broad patterns
         // (`.*`, short literals that hit every file) returning unbounded
@@ -1210,7 +1227,7 @@ impl Service {
                 .index
                 .read()
                 .expect("index lock poisoned")
-                .search_page_in(pattern, 0, Some(RANK_CANDIDATE_CAP), paths)
+                .search_page_filtered(pattern, 0, Some(RANK_CANDIDATE_CAP), paths, filter)
                 .map_err(|e| e.to_string())?;
             if pool_stats.truncated {
                 ranked_pool_capped = true;
@@ -1243,7 +1260,7 @@ impl Service {
             self.index
                 .read()
                 .expect("index lock poisoned")
-                .search_page_in(pattern, offset, Some(row_limit), paths)
+                .search_page_filtered(pattern, offset, Some(row_limit), paths, filter)
                 .map_err(|e| e.to_string())?
         };
 
@@ -5889,6 +5906,8 @@ mod tests {
             limit: None,
             offset: None,
             scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
         });
         assert!(resp.ok, "search: {resp:?}");
         let matches = resp
@@ -5916,6 +5935,8 @@ mod tests {
             limit: Some(5),
             offset: None,
             scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
         });
         assert!(resp.ok);
         let matches = resp
@@ -5939,6 +5960,8 @@ mod tests {
             limit: Some(5),
             offset: Some(5),
             scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
         });
         assert!(resp.ok);
         let second_page = resp
@@ -5993,6 +6016,8 @@ mod tests {
             limit: Some(50),
             offset: None,
             scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
         });
         assert!(unranked.ok, "unranked: {:?}", unranked.error);
         assert_eq!(
@@ -6023,6 +6048,8 @@ mod tests {
             limit: Some(50),
             offset: None,
             scope: Some("code".into()),
+            globs: Vec::new(),
+            types: Vec::new(),
         });
         assert!(ranked.ok, "ranked: {:?}", ranked.error);
         assert_eq!(
@@ -6377,6 +6404,8 @@ mod tests {
             limit: Some(3),
             offset: None,
             scope: Some("code".into()),
+            globs: Vec::new(),
+            types: Vec::new(),
         });
         assert!(resp.ok, "ranked search: {:?}", resp.error);
         let matches = resp
@@ -6432,6 +6461,8 @@ mod tests {
                 limit: Some(5),
                 offset: Some(o),
                 scope: Some("code".into()),
+                globs: Vec::new(),
+                types: Vec::new(),
             });
             assert!(resp.ok, "page at offset {o}: {:?}", resp.error);
             let matches = resp
@@ -6510,6 +6541,8 @@ mod tests {
                 limit: Some(10),
                 offset: None,
                 scope: Some("code".into()),
+                globs: Vec::new(),
+                types: Vec::new(),
             });
             assert!(resp.ok, "search: {:?}", resp.error);
             resp.data()
@@ -6571,6 +6604,8 @@ mod tests {
             limit: Some(5),
             offset: None,
             scope: Some("banana".into()),
+            globs: Vec::new(),
+            types: Vec::new(),
         });
         assert!(!resp.ok, "unknown scope must fail, not silently succeed");
         assert_eq!(
@@ -6585,6 +6620,8 @@ mod tests {
             limit: Some(5),
             offset: None,
             scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
         });
         assert!(
             unranked.ok,
@@ -6599,6 +6636,8 @@ mod tests {
             limit: Some(5),
             offset: None,
             scope: Some("CODE".into()),
+            globs: Vec::new(),
+            types: Vec::new(),
         });
         assert!(
             upper.ok,
@@ -6895,6 +6934,8 @@ mod tests {
             limit: Some(10),
             offset: None,
             scope: Some("code".into()),
+            globs: Vec::new(),
+            types: Vec::new(),
         });
         assert!(resp.ok, "ranked search: {:?}", resp.error);
         let matches = resp
@@ -6958,6 +6999,8 @@ mod tests {
                     offset: None,
                     paths: None,
                     scope: None,
+                    globs: Vec::new(),
+                    types: Vec::new(),
                 },
             ),
             (
@@ -8422,6 +8465,57 @@ mod tests {
     /// produce no cap (a healthy search with no hidden matches is not a
     /// partial answer); a non-zero hidden count must produce a cap the
     /// envelope surfaces, with the exact count visible in the line.
+    /// `globs` and `types` travel in the request and the daemon filters
+    /// candidate files before paging: a limited page holds kept matches
+    /// only, and a malformed rule is an error, never an unfiltered answer.
+    #[test]
+    fn search_should_filter_files_by_glob_and_type_before_paging() {
+        let root = tmpdir("search-filter");
+        git(&root, &["init", "-q"]);
+        for name in ["a.md", "b.rs", "c.md", "d.rs"] {
+            std::fs::write(root.join(name), "filterWireNeedle\n").unwrap();
+        }
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "fixture"]);
+        let mut svc = Service::open(&root).unwrap();
+        let mut search = |globs: &[&str], types: &[&str], limit| {
+            svc.handle(Request::Search {
+                paths: None,
+                pattern: "filterWireNeedle".into(),
+                json: true,
+                limit,
+                offset: None,
+                scope: None,
+                globs: globs.iter().map(ToString::to_string).collect(),
+                types: types.iter().map(ToString::to_string).collect(),
+            })
+        };
+        let paths = |resp: &Response| -> Vec<String> {
+            resp.data()["matches"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["path"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        let md = search(&["*.md"], &[], Some(1));
+        assert!(md.ok, "{md:?}");
+        assert_eq!(paths(&md), ["a.md"]);
+        assert_eq!(md.data()["truncated"], true, "c.md is still to come");
+        assert_eq!(md.data()["next_offset"], 1);
+        let rust = search(&[], &["rust"], None);
+        assert_eq!(paths(&rust), ["b.rs", "d.rs"]);
+        let none_md = search(&["!*.md"], &[], None);
+        assert_eq!(paths(&none_md), ["b.rs", "d.rs"]);
+
+        let bad = search(&["["], &[], None);
+        assert!(!bad.ok, "a malformed glob must fail, not answer unfiltered");
+        let unknown = search(&[], &["cobol"], None);
+        assert!(!unknown.ok, "an unknown type must fail");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A reader that already stated a bound (the CLI's `⚠ results
     /// truncated` line) drops it by kind; `cap_hits` must name every cap
     /// `caps` names, in the same order, with the same text.
@@ -8443,6 +8537,8 @@ mod tests {
             limit: Some(2),
             offset: None,
             scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
         });
         assert!(resp.ok, "search: {resp:?}");
         let data = resp.data();
@@ -8473,6 +8569,8 @@ mod tests {
             limit: None,
             offset: None,
             scope: None,
+            globs: Vec::new(),
+            types: Vec::new(),
         });
         assert_eq!(
             resp.data()["cap_hits"],

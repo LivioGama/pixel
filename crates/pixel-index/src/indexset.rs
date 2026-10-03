@@ -829,6 +829,21 @@ impl IndexSet {
         limit: Option<usize>,
         path_prefixes: Option<&[String]>,
     ) -> Result<(Vec<MatchLine>, SearchStats), IndexSetError> {
+        self.search_page_filtered(pattern, offset, limit, path_prefixes, None)
+    }
+
+    /// [`Self::search_page_in`] that also drops every candidate file `filter`
+    /// does not keep (`-g`/`-t`), before verification: `offset`, `limit` and
+    /// `truncated` then count kept matches only, so a page of a filtered
+    /// search is as long as an unfiltered one and pages without gaps.
+    pub fn search_page_filtered(
+        &self,
+        pattern: &str,
+        offset: usize,
+        limit: Option<usize>,
+        path_prefixes: Option<&[String]>,
+        filter: Option<&crate::path_filter::PathFilter>,
+    ) -> Result<(Vec<MatchLine>, SearchStats), IndexSetError> {
         let started = std::time::Instant::now();
         let query = plan_pattern(pattern, self.extractor.as_ref())
             .map_err(|e| IndexSetError::Pattern(e.to_string()))?;
@@ -869,6 +884,9 @@ impl IndexSet {
                     .iter()
                     .any(|p| p.is_empty() || rel_path.starts_with(p))
             });
+        }
+        if let Some(filter) = filter {
+            candidates.retain(|rel| filter.keeps(rel));
         }
         let verifier = Verifier::new(pattern)?;
 
@@ -2171,5 +2189,46 @@ mod tests {
         }
         assert!(opening >= 13, "the scan found the tests: {opening}");
         assert!(unguarded.is_empty(), "no isolated cache: {unguarded:?}");
+    }
+
+    /// `-g`/`-t` drop files before paging: a page holds `limit` KEPT
+    /// matches, `truncated` says whether more kept ones exist, and `offset`
+    /// counts kept matches, so paging a filtered search neither skips nor
+    /// repeats one. Filtering a page after the fact returned short or empty
+    /// pages while later rows matched.
+    #[test]
+    fn a_filtered_page_counts_kept_matches_only() {
+        let _cache = IsolatedCache::new("filtered-page");
+        let dir = scratch("filtered-page");
+        git(&dir, &["init", "-q"]);
+        for name in ["a.md", "b.rs", "c.md", "d.rs", "e.md"] {
+            std::fs::write(dir.join(name), "filterPageNeedle\n").unwrap();
+        }
+        git(&dir, &["add", "."]);
+        git(&dir, &["commit", "-qm", "fixture"]);
+        let set = IndexSet::open_or_build(&dir, ex()).unwrap();
+        let md = crate::path_filter::PathFilter::new(&["*.md".to_string()], &[])
+            .unwrap()
+            .unwrap();
+        let paths =
+            |page: &[MatchLine]| -> Vec<String> { page.iter().map(|m| m.path.clone()).collect() };
+
+        let (first, stats) = set
+            .search_page_filtered("filterPageNeedle", 0, Some(2), None, Some(&md))
+            .unwrap();
+        assert_eq!(paths(&first), ["a.md", "c.md"]);
+        assert!(stats.truncated, "e.md is still to come");
+        let (second, stats) = set
+            .search_page_filtered("filterPageNeedle", 2, Some(2), None, Some(&md))
+            .unwrap();
+        assert_eq!(paths(&second), ["e.md"]);
+        assert!(!stats.truncated, "no kept match is left");
+
+        let (all, _) = set
+            .search_page_filtered("filterPageNeedle", 0, Some(10), None, None)
+            .unwrap();
+        assert_eq!(all.len(), 5, "without a filter every file matches");
+        drop(set);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

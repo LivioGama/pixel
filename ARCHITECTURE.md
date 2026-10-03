@@ -253,7 +253,10 @@ Invariants enforced by `Service::handle`:
   default instead of an implied claim of completeness. `search` also returns
   each cap that fired as `cap_hits` (`{kind, text}`, kinds `byte_cap`,
   `row_limit`, `ranked_pool`, `credential_hidden`), so a reader that already
-  stated a bound drops it by kind rather than by matching its sentence.
+  stated a bound drops it by kind rather than by matching its sentence. It
+  also takes the `-g`/`-t` rules (`globs`, `types`) and drops the files they
+  exclude before paging (`pixel_index::path_filter`), so `limit`, `offset`
+  and `truncated` count kept matches.
 - Retrieval ops and git-state ops (`inspect`, `review`, `diff`, `status`,
   `changes`) get a `snapshot` so the caller can correlate the answer with the
   working tree it was computed against. Only `inspect` and `review` carry the

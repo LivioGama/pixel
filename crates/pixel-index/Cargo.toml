@@ -12,6 +12,7 @@ crc32fast = { workspace = true }
 mutants = { workspace = true }
 pixel-git = { path = "../pixel-git" }
 fs2 = "0.4.3"
+globset = "0.4"
 grep-regex = "0.1.14"
 grep-searcher = "0.1.17"
 ignore = "0.4.33"

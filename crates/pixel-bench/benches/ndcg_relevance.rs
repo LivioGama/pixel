@@ -212,6 +212,8 @@ fn run_ndcg(
                 offset: Some(offset),
                 paths: Some(vec!["crates/pixel-graph/src".to_string()]),
                 scope: scope.map(str::to_string),
+                globs: Vec::new(),
+                types: Vec::new(),
             });
             assert!(
                 resp.ok,
@@ -382,6 +384,8 @@ fn bench(c: &mut Criterion) {
         offset: None,
         paths: Some(vec!["crates/pixel-graph/src".to_string()]),
         scope: Some("code".to_string()),
+        globs: Vec::new(),
+        types: Vec::new(),
     });
 
     let ranked = run_ndcg(&mut svc, &suite, Some("code"), 10);
