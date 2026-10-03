@@ -17,7 +17,7 @@ These responsibilities make three properties particularly useful:
 - **Native integration already in place.** Pixel’s Rust code integrates Tree-sitter grammars, SQLite and embedding backends. Replacing the language means preserving extraction, query and model behavior as well as connecting to the same libraries.
 - **A native CLI distribution.** Users install a compiled executable rather than a language runtime for the core. The release workflow builds macOS ARM64 and Linux musl ARM64 and x86-64 binaries. Embedding features differ by target: Linux uses model2vec; the macOS build also includes fastembed.
 
-Other languages can provide some or all of these properties. Rust’s advantage here is that they already work together in Pixel, with tests and compatibility contracts around them. The [architecture](https://github.com/LivioGama/pixel/blob/main/ARCHITECTURE.md) and [release workflow](https://github.com/LivioGama/pixel/blob/main/.github/workflows/release.yml) describe that implementation.
+Other languages can provide some or all of these properties. Rust’s advantage here is that they already work together in Pixel, with tests and compatibility contracts around them. The [architecture](https://github.com/Pixel-CLI/pixel/blob/main/ARCHITECTURE.md) and [release workflow](https://github.com/Pixel-CLI/pixel/blob/main/.github/workflows/release.yml) describe that implementation.
 
 ## Build time is a real cost
 
@@ -25,11 +25,11 @@ A language that makes each edit slow to validate can limit development, includin
 
 The useful measure is elapsed time from an edit to a correct, validated change. It includes implementation, compilation, linking, tests, linting, repair and CI. A quick compiler cannot compensate for missing checks; a fast executable cannot make developer waiting disappear.
 
-Pixel already has a `dev-release` profile that disables thin LTO and increases codegen units compared with the shipping release profile. Contributors use focused checks during editing and the applicable full gates when a reviewable change is ready. These are existing workflow choices, not a newly demonstrated productivity gain from the audit. See [CONTRIBUTING.md](https://github.com/LivioGama/pixel/blob/main/CONTRIBUTING.md).
+Pixel already has a `dev-release` profile that disables thin LTO and increases codegen units compared with the shipping release profile. Contributors use focused checks during editing and the applicable full gates when a reviewable change is ready. These are existing workflow choices, not a newly demonstrated productivity gain from the audit. See [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/CONTRIBUTING.md).
 
 ## What the exploratory audit established
 
-The October 2026 [language audit task](https://github.com/LivioGama/pixel/issues/526) considered Rust, TypeScript on Bun, Zig, Go, C++, C# with Native AOT, and Ruby compiled with Spinel.
+The October 2026 [language audit task](https://github.com/Pixel-CLI/pixel/issues/526) considered Rust, TypeScript on Bun, Zig, Go, C++, C# with Native AOT, and Ruby compiled with Spinel.
 
 Small native integration probes worked in all six alternatives on the available macOS ARM64 host. Access to a parser or database was therefore not, by itself, a reason to reject them. Matching regex and byte semantics, resource cleanup, embedding features and packaging still required separate work.
 

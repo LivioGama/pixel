@@ -145,7 +145,7 @@ contract groups, a web UI, generated wikis — all GitNexus, no pixel equivalent
 trigram indexes and gained a default ceiling of 256 MiB and 365 days of diffs.
 On pixel's own repository (918 commits, `du` on `.pixel/history.db*`) the
 change took the history database from 383 MB, WAL included, to 25 MB
-([#301](https://github.com/LivioGama/pixel/pull/301)); the GitNexus repo has
+([#301](https://github.com/Pixel-CLI/pixel/pull/301)); the GitNexus repo has
 not been re-measured since. History is built only when a history command runs.
 
 ## Running them together
@@ -194,7 +194,7 @@ source — call sites by grep, queries from your own doc comments — so no tool
 be right by construction:
 
 ```sh
-git clone https://github.com/LivioGama/pixel && cd pixel
+git clone https://github.com/Pixel-CLI/pixel && cd pixel
 export GITNEXUS_CLI=/path/to/GitNexus/gitnexus/dist/cli/index.js   # or `gitnexus` on PATH
 
 # blast radius, against grep-derived call sites

@@ -39,7 +39,7 @@ pixel token-savings
 **Our table, on your machine.** `scripts/bench-read-savings.sh` re-measures the well-known files below. It needs a clone of Pixel's repository for the script, plus `curl` and the network: it downloads each file at its pinned commit into a throwaway folder, never into your code, and takes a few seconds.
 
 ```bash
-git clone --depth 1 https://github.com/LivioGama/pixel.git && cd pixel
+git clone --depth 1 https://github.com/Pixel-CLI/pixel.git && cd pixel
 scripts/bench-read-savings.sh
 ```
 
@@ -58,7 +58,7 @@ Historical read-volume comparison on Pixel's own repository (138K lines of Rust)
 | Source and test pair | 5,289 | 48,978 tok | 1,890 tok | 96.1% |
 | Code-write context | 5,289 | 48,978 tok | 1,910 tok | 96.1% |
 
-These are file/answer volumes, not an invoice or an end-to-end task comparison. The historical maintainer log reported 41 to 83% across 798 operations; its snippet-versus-candidate-pool ratio is a different baseline, not a measured reduction in session tokens or cost. The scenarios replay the shape of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark, which reaches a similar ratio by rerouting reads through a paid second model. [Method and figures, as first published](https://github.com/LivioGama/pixel/blob/632b3685a97e941476cb42aa75333b79f0ed8955/README.md#-token-savings--measured-no-second-model)
+These are file/answer volumes, not an invoice or an end-to-end task comparison. The historical maintainer log reported 41 to 83% across 798 operations; its snippet-versus-candidate-pool ratio is a different baseline, not a measured reduction in session tokens or cost. The scenarios replay the shape of [shunt](https://github.com/spotify/portal-ai-plugins/tree/main/plugins/shunt)'s benchmark, which reaches a similar ratio by rerouting reads through a paid second model. [Method and figures, as first published](https://github.com/Pixel-CLI/pixel/blob/632b3685a97e941476cb42aa75333b79f0ed8955/README.md#-token-savings--measured-no-second-model)
 
 ### Well-known files
 
@@ -66,7 +66,7 @@ The same measurement on large files of popular projects, each pinned to a commit
 
 {{% read-savings %}}
 
-React's work loop is left out of the range: it is written in Flow, and the JavaScript grammar lists 20 of its 125 top-level functions, so its 99.4% measures a parse failure, not a saving. The Signatures column is the check for that on every row: signature counts provide a coarse coverage check, not proof of complete parsing; the Python counts are compared with module- and class-level definitions (Transformers: 90 for 89 `def` and `class` lines). Re-run it with `scripts/bench-read-savings.sh`. [Method and raw output](https://github.com/LivioGama/pixel/blob/main/docs/bench/read-savings.md)
+React's work loop is left out of the range: it is written in Flow, and the JavaScript grammar lists 20 of its 125 top-level functions, so its 99.4% measures a parse failure, not a saving. The Signatures column is the check for that on every row: signature counts provide a coarse coverage check, not proof of complete parsing; the Python counts are compared with module- and class-level definitions (Transformers: 90 for 89 `def` and `class` lines). Re-run it with `scripts/bench-read-savings.sh`. [Method and raw output](https://github.com/Pixel-CLI/pixel/blob/main/docs/bench/read-savings.md)
 
 ## Cold start on a large repository
 
@@ -77,7 +77,7 @@ The first Pixel command on a repository builds everything from nothing: the text
 | Text index | **2.0 s** |
 | Text index and code graph (59,609 symbols) | **12 s** |
 
-Later commands reuse the index and read only what changed. One repository on one machine: re-run the command on yours. [Method and raw runs](https://github.com/LivioGama/pixel/blob/main/docs/bench/cold-index.md)
+Later commands reuse the index and read only what changed. One repository on one machine: re-run the command on yours. [Method and raw runs](https://github.com/Pixel-CLI/pixel/blob/main/docs/bench/cold-index.md)
 
 ## Against GitNexus
 
@@ -95,7 +95,7 @@ The jobs both tools do: 29 blast-radius cases on four repositories in Rust, Type
 | Callers in Ruby (two repositories) | 0.90 and 0.56 | **1.00 and 0.68** |
 | Licence | **MIT** | PolyForm Noncommercial |
 
-Recall is a tie at this sample size: Pixel finds every caller in Rust and TypeScript, GitNexus does better on Ruby. The index comparison covers one repository only. [Full method and raw rows](https://github.com/LivioGama/pixel/blob/main/docs/bench/vs-gitnexus.md)
+Recall is a tie at this sample size: Pixel finds every caller in Rust and TypeScript, GitNexus does better on Ruby. The index comparison covers one repository only. [Full method and raw rows](https://github.com/Pixel-CLI/pixel/blob/main/docs/bench/vs-gitnexus.md)
 
 ## On whole agent tasks
 
@@ -105,17 +105,17 @@ An Opus medium trial with install hooks on one scoping task reported these media
 | --- | --- | --- |
 | Wall time | 42.9 s | 47.6 s |
 
-No speed gain on this task. This does not establish a general slowdown or speedup, or a token or cost result. The raw runs are held outside the repository; their date, exact model and Pixel versions, sample size and cost are not archived here. [Available protocol note](https://github.com/LivioGama/pixel/blob/main/docs/motion/README.md#the-agent-demo)
+No speed gain on this task. This does not establish a general slowdown or speedup, or a token or cost result. The raw runs are held outside the repository; their date, exact model and Pixel versions, sample size and cost are not archived here. [Available protocol note](https://github.com/Pixel-CLI/pixel/blob/main/docs/motion/README.md#the-agent-demo)
 
 Read volume, estimated tokens, elapsed duration and provider-reported cost are different quantities. Adoption rates with the current install hooks are not quantified here; inspect `pixel action-log` on your own sessions.
 
 ## Where a specialist wins
 
-- **Natural-language search, the top 10:** on 45 plain-English queries, semble has the right file in its top 10 for 100%, Pixel 0.6.0 for 96%. Pixel puts it first more often: 87%, against 64% for semble and 69% for WarpGrep, Morph's search subagent, whose top 10 reaches 71%. Average answer time 0.7 s for Pixel, 1.6 s for semble, 6.8 s for WarpGrep. The queries are each repository's own doc comments, which favours Pixel's chunks, cut along symbols with their comments. WarpGrep's figures are from its one run on the same queries, with Pixel 0.5.2; it is paid per search and sends the lines it reads to Morph's API. [Method and every row](https://github.com/LivioGama/pixel/blob/main/docs/bench/vs-landscape.md#natural-language-retrieval--pixel-060-four-arms-45-queries)
+- **Natural-language search, the top 10:** on 45 plain-English queries, semble has the right file in its top 10 for 100%, Pixel 0.6.0 for 96%. Pixel puts it first more often: 87%, against 64% for semble and 69% for WarpGrep, Morph's search subagent, whose top 10 reaches 71%. Average answer time 0.7 s for Pixel, 1.6 s for semble, 6.8 s for WarpGrep. The queries are each repository's own doc comments, which favours Pixel's chunks, cut along symbols with their comments. WarpGrep's figures are from its one run on the same queries, with Pixel 0.5.2; it is paid per search and sends the lines it reads to Morph's API. [Method and every row](https://github.com/Pixel-CLI/pixel/blob/main/docs/bench/vs-landscape.md#natural-language-retrieval--pixel-060-four-arms-45-queries)
 - **Compact repository map:** stacklit covers more directories for fewer tokens on 3 of 4 repositories.
 - **Context cost:** Pixel is 4.7× lighter than GitNexus, but heavier than semble (~980 tokens) and stacklit (~420).
 
-They combine: semble for search and Pixel for the graph, history and Git costs about 5,100 always-on tokens. [Full comparison](https://github.com/LivioGama/pixel/blob/main/docs/comparison.md)
+They combine: semble for search and Pixel for the graph, history and Git costs about 5,100 always-on tokens. [Full comparison](https://github.com/Pixel-CLI/pixel/blob/main/docs/comparison.md)
 
 ## Coding decisions
 

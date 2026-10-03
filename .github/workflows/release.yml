@@ -210,7 +210,7 @@ jobs:
           ' CHANGELOG.md > release-notes.md
           if [ ! -s release-notes.md ]; then
             echo "::warning::no '## [${VERSION}]' section in CHANGELOG.md; the release body falls back to a link"
-            echo "See [CHANGELOG.md](https://github.com/LivioGama/pixel/blob/v${VERSION}/CHANGELOG.md)." > release-notes.md
+            echo "See [CHANGELOG.md](https://github.com/Pixel-CLI/pixel/blob/v${VERSION}/CHANGELOG.md)." > release-notes.md
           fi
           echo "--- release-notes.md ---"
           cat release-notes.md

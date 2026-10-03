@@ -39,7 +39,7 @@ On 2026-09-30 the repository has 24 stars, 1 fork and 0 watchers, and is 31
 days old. Check before submitting:
 
 ```bash
-gh repo view LivioGama/pixel --json stargazerCount,forkCount,watchers \
+gh repo view Pixel-CLI/pixel --json stargazerCount,forkCount,watchers \
   --jq '{stars: .stargazerCount, forks: .forkCount, watchers: .watchers.totalCount}'
 ```
 
@@ -52,7 +52,7 @@ audit fails and the pull request is closed.
 With the latest release's `pixel-core.rb`:
 
 ```bash
-gh release download vX.Y.Z --repo LivioGama/pixel --pattern pixel-core.rb
+gh release download vX.Y.Z --repo Pixel-CLI/pixel --pattern pixel-core.rb
 brew tap homebrew/core --force        # a local clone of homebrew-core to edit
 cp pixel-core.rb "$(brew --repository homebrew/core)/Formula/p/pixel.rb"
 HOMEBREW_NO_INSTALL_FROM_API=1 brew install --build-from-source pixel

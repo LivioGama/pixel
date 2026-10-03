@@ -14,7 +14,7 @@
   {{/* The supported agents, shown by the hero's Works with row and the Compatibility grid, from data/agents.toml (which also feeds /for/ and the /docs/ wiring table). Marks in assets/logos/ in each brand's own colours (Lobe Icons' colour variants); the brands whose mark is monochrome (Pi, Copilot, OpenCode, Windsurf) use currentColor. Sources: Simple Icons, Lobe Icons, pi.dev's favicon. */}}
   {{ $agents := hugo.Data.agents.agent }}
   {{/* The prompt a visitor pastes into their agent instead of a shell: the repository README's "Let your agent install it" block, used by the Install terminal. */}}
-  {{ $agentPrompt := "Install Pixel (https://github.com/LivioGama/pixel) for me: follow the \"For AI agents\" section of its README, then tell me what changed and whether `pixel doctor .` is green." }}
+  {{ $agentPrompt := "Install Pixel (https://github.com/Pixel-CLI/pixel) for me: follow the \"For AI agents\" section of its README, then tell me what changed and whether `pixel doctor .` is green." }}
   {{/* The shared Install terminal commands. The one-liner runs the install.sh asset of the latest release (release.yml uploads scripts/install.sh with every tag); $scriptSrc is that file at the tag of the version this site describes (crates/pixel/Cargo.toml, mounted as data/cli.toml, which the release bumps), so "read the script" opens the bytes the one-liner runs. $inspect is the same install for a visitor who reads before running: download, page through, then run. */}}
   {{ $scriptURL := printf "%s/releases/latest/download/install.sh" site.Params.github_url }}
   {{ $curl := printf "curl -fsSL %s | sh" $scriptURL }}

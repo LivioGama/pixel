@@ -88,7 +88,7 @@ class HomebrewFormulaContract(unittest.TestCase):
     def archive_sha(self, target):
         return (self.artifacts / f"pixel-{TAG}-{target}.tar.gz.sha256").read_text().split()[0]
 
-    def expected_formula(self, out, base="https://github.com/LivioGama/pixel/releases/download"):
+    def expected_formula(self, out, base="https://github.com/Pixel-CLI/pixel/releases/download"):
         text = TEMPLATE.read_text()
         values = {
             "{MAC}": self.archive_sha("aarch64-apple-darwin"),
@@ -99,7 +99,7 @@ class HomebrewFormulaContract(unittest.TestCase):
         }
         for placeholder, value in values.items():
             text = text.replace(placeholder, value)
-        return text.replace("https://github.com/LivioGama/pixel/releases/download", base)
+        return text.replace("https://github.com/Pixel-CLI/pixel/releases/download", base)
 
     def test_the_formula_is_the_template_with_the_real_digests(self):
         out = self.generate()

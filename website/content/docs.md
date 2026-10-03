@@ -10,13 +10,13 @@ description: "Install Pixel, wire it into your agents, and read what its answers
 Pixel is a single binary for macOS and Linux. The install script is one line:
 
 ```bash
-curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
 ```
 
-It runs [`scripts/install.sh`](https://github.com/LivioGama/pixel/blob/main/scripts/install.sh), which every release publishes as an asset: one POSIX `sh` file, no `sudo`. It downloads the latest release for your platform, refuses the archive unless its SHA-256 matches the release's checksum, and writes a single file into `$PIXEL_INSTALL_DIR` (default `~/.local/bin`). It edits no shell profile. To read it before it runs:
+It runs [`scripts/install.sh`](https://github.com/Pixel-CLI/pixel/blob/main/scripts/install.sh), which every release publishes as an asset: one POSIX `sh` file, no `sudo`. It downloads the latest release for your platform, refuses the archive unless its SHA-256 matches the release's checksum, and writes a single file into `$PIXEL_INSTALL_DIR` (default `~/.local/bin`). It edits no shell profile. To read it before it runs:
 
 ```bash
-curl -fsSL -o install.sh https://github.com/LivioGama/pixel/releases/latest/download/install.sh
+curl -fsSL -o install.sh https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh
 less install.sh    # every line it will run
 sh install.sh
 ```
@@ -32,7 +32,7 @@ The same release publishes the static archives the script downloads. Use them wh
 | Apple Silicon | `aarch64-apple-darwin` |
 
 ```bash
-tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/LivioGama/pixel/releases/latest)
+tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/Pixel-CLI/pixel/releases/latest)
 tag=${tag##*/}
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64|Linux-amd64) target=x86_64-unknown-linux-musl ;;
@@ -41,8 +41,8 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "No prebuilt binary for $(uname -s) $(uname -m)" >&2; exit 1 ;;
 esac
 archive="pixel-${tag}-${target}.tar.gz"
-curl -fsSL -o "$archive" "https://github.com/LivioGama/pixel/releases/download/${tag}/${archive}"
-curl -fsSL -o "$archive.sha256" "https://github.com/LivioGama/pixel/releases/download/${tag}/${archive}.sha256"
+curl -fsSL -o "$archive" "https://github.com/Pixel-CLI/pixel/releases/download/${tag}/${archive}"
+curl -fsSL -o "$archive.sha256" "https://github.com/Pixel-CLI/pixel/releases/download/${tag}/${archive}.sha256"
 if command -v sha256sum >/dev/null 2>&1; then sha256sum -c "$archive.sha256"; else shasum -a 256 -c "$archive.sha256"; fi
 tar xzf "$archive"
 mkdir -p "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}"
@@ -57,7 +57,7 @@ On a runner, the script is the same one-liner. Add `~/.local/bin` to `GITHUB_PAT
 ```yaml
 - name: Install Pixel
   run: |
-    curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh
+    curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
     echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 ```
 
@@ -66,15 +66,15 @@ The classic Linux binary, with no script. `ubuntu-latest` is x86_64; an arm64 ru
 ```yaml
 - name: Install the Pixel Linux binary
   run: |
-    tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/LivioGama/pixel/releases/latest)
+    tag=$(curl -fsSLI -o /dev/null -w '%{url_effective}' https://github.com/Pixel-CLI/pixel/releases/latest)
     tag=${tag##*/}
     case "$(uname -m)" in
       aarch64|arm64) target=aarch64-unknown-linux-musl ;;
       *) target=x86_64-unknown-linux-musl ;;
     esac
     archive="pixel-${tag}-${target}.tar.gz"
-    curl -fsSL -o "$archive" "https://github.com/LivioGama/pixel/releases/download/${tag}/${archive}"
-    curl -fsSL -o "$archive.sha256" "https://github.com/LivioGama/pixel/releases/download/${tag}/${archive}.sha256"
+    curl -fsSL -o "$archive" "https://github.com/Pixel-CLI/pixel/releases/download/${tag}/${archive}"
+    curl -fsSL -o "$archive.sha256" "https://github.com/Pixel-CLI/pixel/releases/download/${tag}/${archive}.sha256"
     sha256sum -c "$archive.sha256"
     tar xzf "$archive"
     mkdir -p "$HOME/.local/bin"
@@ -84,7 +84,7 @@ The classic Linux binary, with no script. `ubuntu-latest` is x86_64; an arm64 ru
 
 An install that already came from Homebrew still updates with `brew update && brew upgrade LivioGama/tap/pixel`. New installs use the script or the archive above.
 
-To build from source, see [CONTRIBUTING.md](https://github.com/LivioGama/pixel/blob/main/CONTRIBUTING.md).
+To build from source, see [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/CONTRIBUTING.md).
 
 Then let your agents use it, and check the result:
 
@@ -95,7 +95,7 @@ pixel doctor .        # optional: health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
-The index, the code graph and the optional history data live in `.pixel/` at the repository root and never leave the machine, and there is no telemetry. The network is used only for Git remote operations, the optional `pixel classify` and `pixel web-search`, the embedding model downloaded from Hugging Face on first use, and a once-a-day release check for a person at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) ([security model](https://github.com/LivioGama/pixel/blob/main/SECURITY.md)).
+The index, the code graph and the optional history data live in `.pixel/` at the repository root and never leave the machine, and there is no telemetry. The network is used only for Git remote operations, the optional `pixel classify` and `pixel web-search`, the embedding model downloaded from Hugging Face on first use, and a once-a-day release check for a person at a terminal (`PIXEL_NO_UPDATE_CHECK=1` turns it off) ([security model](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md)).
 
 ## What pixel install wires
 
@@ -120,7 +120,7 @@ Each agent's page under [For your agent](../for/) names the files, the check and
 
 Machine-specific artifacts that name this machine's `pixel` binary are listed in the clone's `.git/info/exclude`, so a `git add -A` cannot publish them. `.codex/config.toml` and the root `AGENTS.md` are portable and do not name the local binary.
 
-The Pi extension registers a structured `pixel` tool and provides advisory retrieval guidance by default. The root `AGENTS.md` block tells agents to attempt Pixel before native retrieval and explicitly allows native fallback; it does not produce denial messages. Run `pixel config policy enforce` to opt into supported retrieval gates or `pixel config policy off` to disable classification; `PIXEL_POLICY=enforce` or `PIXEL_POLICY=off` overrides the setting for one environment. Shell compositions and unsupported syntax retain native behavior. [Pi policy and exceptions](https://github.com/LivioGama/pixel/blob/main/docs/pi-harness.md) describe the Pi boundary. `pixel doctor <repo>` reports the global wiring and the per-repository artifacts as green, stale or missing.
+The Pi extension registers a structured `pixel` tool and provides advisory retrieval guidance by default. The root `AGENTS.md` block tells agents to attempt Pixel before native retrieval and explicitly allows native fallback; it does not produce denial messages. Run `pixel config policy enforce` to opt into supported retrieval gates or `pixel config policy off` to disable classification; `PIXEL_POLICY=enforce` or `PIXEL_POLICY=off` overrides the setting for one environment. Shell compositions and unsupported syntax retain native behavior. [Pi policy and exceptions](https://github.com/Pixel-CLI/pixel/blob/main/docs/pi-harness.md) describe the Pi boundary. `pixel doctor <repo>` reports the global wiring and the per-repository artifacts as green, stale or missing.
 
 ## Updating
 
@@ -148,17 +148,17 @@ Each agent CLI below can load Pixel's protocol through its own plugin mechanism,
 
 | Tool | Install |
 | --- | --- |
-| Claude Code | `/plugin marketplace add LivioGama/pixel`, then `/plugin install pixel@pixel` |
-| Codex | `codex plugin marketplace add LivioGama/pixel`, then `codex plugin add pixel@pixel` |
-| Copilot CLI | `copilot plugin marketplace add LivioGama/pixel`, then `copilot plugin install pixel@pixel` |
-| Devin | add `github.com/LivioGama/pixel` as a Devin plugin |
-| Gemini CLI | `gemini extensions install https://github.com/LivioGama/pixel` |
-| Pi | `pi install git:github.com/LivioGama/pixel` |
+| Claude Code | `/plugin marketplace add Pixel-CLI/pixel`, then `/plugin install pixel@pixel` |
+| Codex | `codex plugin marketplace add Pixel-CLI/pixel`, then `codex plugin add pixel@pixel` |
+| Copilot CLI | `copilot plugin marketplace add Pixel-CLI/pixel`, then `copilot plugin install pixel@pixel` |
+| Devin | add `github.com/Pixel-CLI/pixel` as a Devin plugin |
+| Gemini CLI | `gemini extensions install https://github.com/Pixel-CLI/pixel` |
+| Pi | `pi install git:github.com/Pixel-CLI/pixel` |
 | Cursor, Windsurf, Kiro, Cline, Qoder | rules ship under `.cursor/rules/`, `.windsurf/rules/`, `.kiro/steering/`, `.clinerules/` and `.qoder/rules/`: copy them into your project |
 
 OpenCode has no Pixel plugin package published yet, so it is not in the table: `pixel install` puts the protocol in its global `AGENTS.md` instead ([Pixel for OpenCode](../for/opencode/)).
 
-Any other agent: paste [`PIXEL.md`](https://github.com/LivioGama/pixel/blob/main/PIXEL.md), the plain-Markdown protocol, into whatever instruction surface it offers. [Manual setup](https://github.com/LivioGama/pixel/blob/main/docs/manual-setup.md) covers wiring the full prompt by hand.
+Any other agent: paste [`PIXEL.md`](https://github.com/Pixel-CLI/pixel/blob/main/PIXEL.md), the plain-Markdown protocol, into whatever instruction surface it offers. [Manual setup](https://github.com/Pixel-CLI/pixel/blob/main/docs/manual-setup.md) covers wiring the full prompt by hand.
 
 ## The workflow
 
@@ -181,7 +181,7 @@ Optional model-backed decisions have a [classification guide](../classify/).
 
 ## Commands
 
-The most used commands, by job. `pixel --help` lists all of them, and [ARCHITECTURE.md](https://github.com/LivioGama/pixel/blob/main/ARCHITECTURE.md#command-surface) describes each in one line.
+The most used commands, by job. `pixel --help` lists all of them, and [ARCHITECTURE.md](https://github.com/Pixel-CLI/pixel/blob/main/ARCHITECTURE.md#command-surface) describes each in one line.
 
 ### Find code
 

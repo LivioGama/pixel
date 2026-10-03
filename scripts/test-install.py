@@ -62,7 +62,7 @@ if url.endswith('/releases/latest'):
         sys.stderr.write('curl: (6) Could not resolve host: github.com\\n')
         sys.exit(6)
     page = 'releases/tag/v9.8.7' if mode == 'tag' else 'releases'
-    sys.stdout.write('https://github.com/LivioGama/pixel/' + page)
+    sys.stdout.write('https://github.com/Pixel-CLI/pixel/' + page)
 elif url.endswith('.sha256'):
     if os.environ.get('FIXTURE_CHECKSUM', 'ok') == 'unreachable':
         sys.stderr.write('curl: (22) The requested URL returned error: 404\\n')
@@ -157,7 +157,7 @@ for path in args:
         result = self.install()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(
-            "Could not download https://github.com/LivioGama/pixel/releases/"
+            "Could not download https://github.com/Pixel-CLI/pixel/releases/"
             "download/v9.8.7/pixel-v9.8.7-aarch64-apple-darwin.tar.gz.sha256",
             result.stderr,
         )
@@ -226,7 +226,7 @@ for path in args:
             "the anonymous API is rate limited per IP",
         )
         self.assertIn(
-            "https://github.com/LivioGama/pixel/releases/download/v9.8.7/"
+            "https://github.com/Pixel-CLI/pixel/releases/download/v9.8.7/"
             "pixel-v9.8.7-aarch64-apple-darwin.tar.gz",
             urls,
         )
@@ -236,7 +236,7 @@ for path in args:
         self.env["FIXTURE_LATEST"] = "none"
         result = self.install()
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("No prebuilt release found for LivioGama/pixel.", result.stderr)
+        self.assertIn("No prebuilt release found for Pixel-CLI/pixel.", result.stderr)
         self.assertIn("cargo install --git", result.stderr)
         self.assertFalse((self.destination / "pixel").exists())
 
@@ -248,7 +248,7 @@ for path in args:
         result = self.install()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Could not resolve host: github.com", result.stderr)
-        self.assertIn("Could not reach https://github.com/LivioGama/pixel/releases/latest", result.stderr)
+        self.assertIn("Could not reach https://github.com/Pixel-CLI/pixel/releases/latest", result.stderr)
         self.assertNotIn("No prebuilt release found", result.stderr)
         self.assertEqual(installed.read_bytes(), b"previous installation")
 

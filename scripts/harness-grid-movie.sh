@@ -156,7 +156,7 @@ grid = "\n".join([
     "",
     "| Claude Code · Codex · pi · Antigravity, side by side |",
     "| --- |",
-    "| ![wall](https://raw.githubusercontent.com/LivioGama/pixel/harness-recordings-media/recordings/grid/harness-grid-movie.gif) |",
+    "| ![wall](https://raw.githubusercontent.com/Pixel-CLI/pixel/harness-recordings-media/recordings/grid/harness-grid-movie.gif) |",
     "",
     "One canned prompt (no tool hints, no pixel mention) into all four at once; the film shows which of them reaches for Pixel on its own.",
     end_m,

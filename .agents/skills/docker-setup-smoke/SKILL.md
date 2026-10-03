@@ -47,7 +47,7 @@ sh .agents/skills/docker-setup-smoke/scripts/run.sh --agents --source main
   (`brew-host-deps.txt`); a dependency of pixel beyond it fails the run. The image
   (Ubuntu 22.04, glibc 2.35) is such a host: its 12 are the control's, and a `NOTE`
   says so.
-- **Source** (`--source`, `--pr`): fetch from `https://github.com/LivioGama/pixel.git`
+- **Source** (`--source`, `--pr`): fetch from `https://github.com/Pixel-CLI/pixel.git`
   inside the container, check out the fetched commit detached, and build with
   pinned Rust 1.98.1, `--locked --no-default-features --features model2vec`, debug
   profile without debug info: this tests setup contracts, not release performance

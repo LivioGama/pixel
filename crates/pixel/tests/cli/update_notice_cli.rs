@@ -100,7 +100,7 @@ fn a_terminal_sees_the_notice_once_with_its_update_command() {
         return;
     };
     let expected = format!(
-        "pixel 999.0.0 is available (this is {}) · curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | PIXEL_INSTALL_DIR='{}' sh\n",
+        "pixel 999.0.0 is available (this is {}) · curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | PIXEL_INSTALL_DIR='{}' sh\n",
         env!("CARGO_PKG_VERSION"),
         bin.canonicalize().unwrap().display()
     );

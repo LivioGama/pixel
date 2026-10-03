@@ -112,7 +112,7 @@ python3 scripts/bench-vs/summarize-retrieval.py docs/bench/vs-tools/raw/v0.6.0/r
 
 **Read this table with its bias.** Every query is the target symbol's own doc
 comment, and pixel 0.6.0 cuts its search chunks along symbols *with* their doc
-comments ([#330](https://github.com/LivioGama/pixel/pull/330)): the comment the
+comments ([#330](https://github.com/Pixel-CLI/pixel/pull/330)): the comment the
 query was made from sits in the chunk it has to find. Measured on #330,
 detaching comments from their symbols scores higher on this set and lower on the
 hand-labelled `ndcg_relevance` qrels. Read these figures as "finds the code a
@@ -155,14 +155,14 @@ Readings:
 
 **What changed since 0.5.2** (r@1 0.47, r@10 0.69 in the runs below): #326 to
 #330 rebuilt `search-meaning`: the gitignore-aware file universe and ten hits
-instead of eight ([#326](https://github.com/LivioGama/pixel/pull/326)), chunk vectors persisted
-in `.pixel/code-vectors` ([#327](https://github.com/LivioGama/pixel/pull/327)),
+instead of eight ([#326](https://github.com/Pixel-CLI/pixel/pull/326)), chunk vectors persisted
+in `.pixel/code-vectors` ([#327](https://github.com/Pixel-CLI/pixel/pull/327)),
 every eligible file searched by default
-([#328](https://github.com/LivioGama/pixel/pull/328)), the lexical channel ranked by
+([#328](https://github.com/Pixel-CLI/pixel/pull/328)), the lexical channel ranked by
 BM25, with tests, config and docs weighted below code
-([#329](https://github.com/LivioGama/pixel/pull/329)), and chunks cut along
+([#329](https://github.com/Pixel-CLI/pixel/pull/329)), and chunks cut along
 tree-sitter symbols with their doc comments
-([#330](https://github.com/LivioGama/pixel/pull/330)). semble's figures
+([#330](https://github.com/Pixel-CLI/pixel/pull/330)). semble's figures
 reproduce the earlier runs exactly.
 
 ## Natural-language retrieval — semble vs pixel 0.4.0, 45 queries (2026-09-21, history)

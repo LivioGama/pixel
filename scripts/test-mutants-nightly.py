@@ -134,7 +134,7 @@ class Report(unittest.TestCase):
         for d in range(nightly.SLICES):
             body = nightly.update_body(body, d, nightly.section(
                 d, 5_000, nightly.Counter(missed=5_000), survivors, "5000 mutant(s) survived",
-                "https://github.com/LivioGama/pixel/actions/runs/99999999999", "b" * 40))
+                "https://github.com/Pixel-CLI/pixel/actions/runs/99999999999", "b" * 40))
         self.assertLessEqual(len(body) + nightly.PROSE_ALLOWANCE - len(nightly.HEADER), nightly.ISSUE_BODY_LIMIT)
 
     def test_prose_too_long_for_the_issue_fails_before_writing(self):

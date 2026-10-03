@@ -1,10 +1,10 @@
 #!/bin/sh
 # pixel install script — downloads the latest release binary from GitHub.
-# Usage: curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh
+# Usage: curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh
 # (published as an asset of every release; main may be ahead of the latest release)
 set -eu
 
-REPO="LivioGama/pixel"
+REPO="Pixel-CLI/pixel"
 INSTALL_DIR="${PIXEL_INSTALL_DIR:-${HOME}/.local/bin}"
 
 # A SHA-256 digest exactly as the release workflow writes it: 64 lower-case

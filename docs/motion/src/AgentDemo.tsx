@@ -237,7 +237,7 @@ export const AgentDemo = ({vanilla, pixel, speed, recorded, modelName}: DemoProp
 							{modelName}, bare setup on both sides, {vanilla.runs.length} runs per side started together, recorded {recorded}. Replayed: each side's median-time run.
 						</text>
 						<text x={W / 2} y={668} textAnchor="middle" fontFamily={F.mono} fontSize={16} fill={C.inkSoft}>
-							Every run and its trace: docs/motion/src/demo/ in LivioGama/pixel.
+							Every run and its trace: docs/motion/src/demo/ in Pixel-CLI/pixel.
 						</text>
 					</g>
 				)}

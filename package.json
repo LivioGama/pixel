@@ -11,10 +11,10 @@
   "homepage": "https://pixel-cli.dev/",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/LivioGama/pixel.git"
+    "url": "git+https://github.com/Pixel-CLI/pixel.git"
   },
   "bugs": {
-    "url": "https://github.com/LivioGama/pixel/issues"
+    "url": "https://github.com/Pixel-CLI/pixel/issues"
   },
   "main": "./.opencode/plugins/pixel.mjs",
   "exports": {

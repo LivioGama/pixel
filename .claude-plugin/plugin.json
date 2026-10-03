@@ -7,7 +7,7 @@
     "url": "https://github.com/LivioGama"
   },
   "homepage": "https://pixel-cli.dev/",
-  "repository": "https://github.com/LivioGama/pixel",
+  "repository": "https://github.com/Pixel-CLI/pixel",
   "license": "MIT",
   "keywords": ["code-graph", "impact-analysis", "retrieval", "tree-sitter", "productivity"],
   "skills": "./skills/",

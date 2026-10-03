@@ -207,7 +207,7 @@ grid = "\n".join([
     "",
     "| Claude + pi | Codex + Antigravity |",
     "| --- | --- |",
-    "| ![claude](https://raw.githubusercontent.com/LivioGama/pixel/harness-recordings-media/recordings/grid/claude-rns.gif) ![pi](https://raw.githubusercontent.com/LivioGama/pixel/harness-recordings-media/recordings/grid/pi-rns.gif) | ![codex](https://raw.githubusercontent.com/LivioGama/pixel/harness-recordings-media/recordings/grid/codex-rns.gif) ![agy](https://raw.githubusercontent.com/LivioGama/pixel/harness-recordings-media/recordings/grid/agy-rns.gif) |",
+    "| ![claude](https://raw.githubusercontent.com/Pixel-CLI/pixel/harness-recordings-media/recordings/grid/claude-rns.gif) ![pi](https://raw.githubusercontent.com/Pixel-CLI/pixel/harness-recordings-media/recordings/grid/pi-rns.gif) | ![codex](https://raw.githubusercontent.com/Pixel-CLI/pixel/harness-recordings-media/recordings/grid/codex-rns.gif) ![agy](https://raw.githubusercontent.com/Pixel-CLI/pixel/harness-recordings-media/recordings/grid/agy-rns.gif) |",
     end_m,
 ])
 i, j = body.find(begin_m), body.find(end_m)

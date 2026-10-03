@@ -2,7 +2,7 @@
 set -eu
 # The published installer always resolves the latest release, so this mode
 # tests whatever that is today; the evidence records the version it chose.
-url=https://github.com/LivioGama/pixel/releases/latest/download/install.sh
+url=https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh
 curl --fail --silent --show-error --location --max-time 120 "$url" -o /evidence/install.sh
 dir=/home/tester/opt/pixel/bin
 # Run as the user it installs for, into a directory outside the default.

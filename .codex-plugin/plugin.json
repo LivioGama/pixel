@@ -6,8 +6,8 @@
     "name": "Livio Gama",
     "url": "https://github.com/LivioGama"
   },
-  "homepage": "https://github.com/LivioGama/pixel",
-  "repository": "https://github.com/LivioGama/pixel",
+  "homepage": "https://github.com/Pixel-CLI/pixel",
+  "repository": "https://github.com/Pixel-CLI/pixel",
   "license": "MIT",
   "keywords": ["code-graph", "impact-analysis", "retrieval", "tree-sitter", "productivity"],
   "skills": "./skills/",
@@ -19,7 +19,7 @@
     "developerName": "Livio Gama",
     "category": "Productivity",
     "capabilities": ["Instructions"],
-    "websiteURL": "https://github.com/LivioGama/pixel",
+    "websiteURL": "https://github.com/Pixel-CLI/pixel",
     "defaultPrompt": [
       "Run pixel impact on the symbol I'm about to edit.",
       "Generate a plan for this bug with pixel plan.",

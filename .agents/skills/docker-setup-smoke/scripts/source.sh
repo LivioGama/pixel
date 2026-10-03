@@ -2,7 +2,7 @@
 set -eu
 git init -q /source
 cd /source
-git remote add origin https://github.com/LivioGama/pixel.git
+git remote add origin https://github.com/Pixel-CLI/pixel.git
 git fetch --depth 1 origin "$PIXEL_SOURCE_REF"
 git checkout --detach FETCH_HEAD
 sha=$(git rev-parse HEAD)

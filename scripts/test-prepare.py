@@ -228,10 +228,10 @@ class PrepareContract(unittest.TestCase):
         changelog = self.changelog()
         self.assertIn(
             "\n- **thing:** it no longer breaks. "
-            "([#42](https://github.com/LivioGama/pixel/pull/42))\n", changelog)
+            "([#42](https://github.com/Pixel-CLI/pixel/pull/42))\n", changelog)
         self.assertIn(
             "\n- **thing:** a flag\n  that wraps. "
-            "([#42](https://github.com/LivioGama/pixel/pull/42))\n", changelog)
+            "([#42](https://github.com/Pixel-CLI/pixel/pull/42))\n", changelog)
         self.assertEqual(self.fragments(), [])
 
     def test_an_entry_merged_by_a_merge_commit_takes_that_pull_request(self):
@@ -253,14 +253,14 @@ class PrepareContract(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(
             "\n- **thing:** it no longer breaks, at all. "
-            "([#7](https://github.com/LivioGama/pixel/pull/7))\n", self.changelog())
+            "([#7](https://github.com/Pixel-CLI/pixel/pull/7))\n", self.changelog())
 
     def test_a_written_reference_is_kept_as_written(self):
         """A link in the text or a number in the slug is the entry's own: the
         cut adds nothing to it, whatever the commit says."""
         self.write("changelog.d/12-numbered.fixed.md", "**thing:** numbered.\n")
         self.write("changelog.d/linked.fixed.md",
-                   "**thing:** linked. ([#13](https://github.com/LivioGama/pixel/pull/13))\n")
+                   "**thing:** linked. ([#13](https://github.com/Pixel-CLI/pixel/pull/13))\n")
         self.git("add", ".")
         self.git("commit", "-qm", "fix(thing): both (#42)")
 
@@ -270,7 +270,7 @@ class PrepareContract(unittest.TestCase):
         changelog = self.changelog()
         self.assertIn("\n- **thing:** numbered.\n", changelog)
         self.assertIn(
-            "\n- **thing:** linked. ([#13](https://github.com/LivioGama/pixel/pull/13))\n",
+            "\n- **thing:** linked. ([#13](https://github.com/Pixel-CLI/pixel/pull/13))\n",
             changelog)
         self.assertNotIn("/pull/42", changelog)
 
@@ -283,7 +283,7 @@ class PrepareContract(unittest.TestCase):
 
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn(name + ": no pull request referenced, and " + reason, result.stderr)
-        self.assertIn("https://github.com/LivioGama/pixel/pull/<number>", result.stderr)
+        self.assertIn("https://github.com/Pixel-CLI/pixel/pull/<number>", result.stderr)
         self.assertEqual(self.changelog(), before)
         self.assertIn(name, self.fragments())
         self.assertIn('version = "0.1.0"', (self.repo / "crates/a/Cargo.toml").read_text())
@@ -656,7 +656,7 @@ class FragmentContract(unittest.TestCase):
     def test_a_link_in_the_entry_references_the_pull_request(self):
         """The link alone is enough, whatever the slug."""
         root = self.make_repo({
-            "thing.fixed.md": "**thing:** it no longer breaks. ([#12](https://github.com/LivioGama/pixel/pull/12))\n",
+            "thing.fixed.md": "**thing:** it no longer breaks. ([#12](https://github.com/Pixel-CLI/pixel/pull/12))\n",
         })
         result = self.run_check(root)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

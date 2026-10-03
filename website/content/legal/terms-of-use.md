@@ -5,11 +5,11 @@ description: "The terms for using pixel-cli.dev. The pixel software is covered b
 
 ## About these terms
 
-These terms apply to the website pixel-cli.dev, published by Navid Emad, the main contributor to [Pixel](https://github.com/LivioGama/pixel). Livio Gama created this open-source project and is a major contributor too ([About](/about/)). By using the site, you accept them. If you do not accept them, please do not use the site.
+These terms apply to the website pixel-cli.dev, published by Navid Emad, the main contributor to [Pixel](https://github.com/Pixel-CLI/pixel). Livio Gama created this open-source project and is a major contributor too ([About](/about/)). By using the site, you accept them. If you do not accept them, please do not use the site.
 
 ## The software is licensed separately
 
-The `pixel` software is distributed under the [MIT License](https://github.com/LivioGama/pixel/blob/main/LICENSE). That licence alone governs how you may use, copy, modify and redistribute the software, and it provides the software "as is", without warranty of any kind. These terms do not restrict any right the licence gives you.
+The `pixel` software is distributed under the [MIT License](https://github.com/Pixel-CLI/pixel/blob/main/LICENSE). That licence alone governs how you may use, copy, modify and redistribute the software, and it provides the software "as is", without warranty of any kind. These terms do not restrict any right the licence gives you.
 
 ## Using the site
 
@@ -35,4 +35,4 @@ How the site handles data is described in the [Privacy Policy](/legal/privacy-po
 
 ## Changes and contact
 
-These terms may change. When they do, this page is updated and the date at the top moves, and its full history is public in the [repository](https://github.com/LivioGama/pixel/commits/main/website/content/legal/terms-of-use.md). For any question, open a [discussion on GitHub](https://github.com/LivioGama/pixel/discussions).
+These terms may change. When they do, this page is updated and the date at the top moves, and its full history is public in the [repository](https://github.com/Pixel-CLI/pixel/commits/main/website/content/legal/terms-of-use.md). For any question, open a [discussion on GitHub](https://github.com/Pixel-CLI/pixel/discussions).

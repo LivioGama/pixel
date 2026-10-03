@@ -36,10 +36,10 @@ const FETCH_TIMEOUT: Duration = Duration::from_secs(2);
 /// A command that ends sooner leaves the answer to the next day's check.
 const JOIN_WAIT: Duration = Duration::from_millis(1_500);
 /// Redirects to `…/releases/tag/<tag>` of the latest non-pre-release.
-const RELEASES_LATEST_URL: &str = "https://github.com/LivioGama/pixel/releases/latest";
+const RELEASES_LATEST_URL: &str = "https://github.com/Pixel-CLI/pixel/releases/latest";
 /// What a non-managed install runs to update: the documented installer.
 const INSTALL_SH_COMMAND: &str =
-    "curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | sh";
+    "curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh";
 /// The state file's name under the cache directory.
 const STATE_FILE: &str = "release-check.json";
 /// The opt-out variable: any value but empty or `0` turns the check off.
@@ -176,7 +176,7 @@ pub(crate) fn upgrade_hint(exe: &Path, roots: &[ManagedRoot], home: &Path) -> Op
         return Some(INSTALL_SH_COMMAND.to_string());
     }
     Some(format!(
-        "curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | PIXEL_INSTALL_DIR={} sh",
+        "curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | PIXEL_INSTALL_DIR={} sh",
         shell_quote(&dir.display().to_string())
     ))
 }
@@ -445,11 +445,11 @@ mod tests {
     #[test]
     fn tag_from_url_should_read_the_redirect_target_only() {
         assert_eq!(
-            tag_from_url("https://github.com/LivioGama/pixel/releases/tag/v0.5.2"),
+            tag_from_url("https://github.com/Pixel-CLI/pixel/releases/tag/v0.5.2"),
             Some("v0.5.2")
         );
         assert_eq!(
-            tag_from_url("https://github.com/LivioGama/pixel/releases"),
+            tag_from_url("https://github.com/Pixel-CLI/pixel/releases"),
             None
         );
         assert_eq!(tag_from_url("https://github.com/x/releases/tag/"), None);
@@ -560,7 +560,7 @@ mod tests {
         assert_eq!(
             hint("/opt/my tools/pixel").as_deref(),
             Some(
-                "curl -fsSL https://github.com/LivioGama/pixel/releases/latest/download/install.sh | PIXEL_INSTALL_DIR='/opt/my tools' sh"
+                "curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | PIXEL_INSTALL_DIR='/opt/my tools' sh"
             )
         );
         // A developer's own builds are never nagged.

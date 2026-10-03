@@ -4,7 +4,7 @@ class Pixel < Formula
   url "{URL}"
   sha256 "{SHA}"
   license "MIT"
-  head "https://github.com/LivioGama/pixel.git", branch: "main"
+  head "https://github.com/Pixel-CLI/pixel.git", branch: "main"
 
   livecheck do
     url :stable

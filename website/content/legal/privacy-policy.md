@@ -7,7 +7,7 @@ description: "What this site and the pixel binary do with your data: the site us
 
 ## Who is responsible
 
-This site, pixel-cli.dev, is published by Navid Emad, the main contributor to [Pixel](https://github.com/LivioGama/pixel). Livio Gama created this open-source project and is a major contributor too ([About](/about/)). For any question about this policy or your data, open a [discussion on GitHub](https://github.com/LivioGama/pixel/discussions). To send a request privately, use a [private advisory](https://github.com/LivioGama/pixel/security/advisories/new).
+This site, pixel-cli.dev, is published by Navid Emad, the main contributor to [Pixel](https://github.com/Pixel-CLI/pixel). Livio Gama created this open-source project and is a major contributor too ([About](/about/)). For any question about this policy or your data, open a [discussion on GitHub](https://github.com/Pixel-CLI/pixel/discussions). To send a request privately, use a [private advisory](https://github.com/Pixel-CLI/pixel/security/advisories/new).
 
 ## What this site collects
 
@@ -31,13 +31,13 @@ The legal basis for these requests is the publisher's legitimate interest (Artic
 The site stores two values in your browser's session storage. Session storage is cleared when you close the tab, and neither value is sent anywhere:
 
 - `pixel:splash` records that the opening animation has played, so it does not play again on every page.
-- `gh-stars:LivioGama/pixel` caches the star count, so the navigation bar can show it before the GitHub API answers.
+- `gh-stars:Pixel-CLI/pixel` caches the star count, so the navigation bar can show it before the GitHub API answers.
 
 The [savings estimate](/savings/) calculates everything inside the page. The values you enter are neither sent nor stored. A share link puts them in the part of the URL after the `#`, which browsers do not send to the server.
 
 ## The pixel binary
 
-This policy covers the website. The `pixel` command-line tool runs on your machine and sends no telemetry or usage data. The index it builds and its sidecar files never leave your machine. It connects to the network only for the actions [SECURITY.md](https://github.com/LivioGama/pixel/blob/main/SECURITY.md) lists:
+This policy covers the website. The `pixel` command-line tool runs on your machine and sends no telemetry or usage data. The index it builds and its sidecar files never leave your machine. It connects to the network only for the actions [SECURITY.md](https://github.com/Pixel-CLI/pixel/blob/main/SECURITY.md) lists:
 
 - first-use model downloads from Hugging Face;
 - Git remote operations you ask for;
@@ -50,4 +50,4 @@ Under the GDPR you have the right to access, correct and erase your personal dat
 
 ## Changes
 
-When this policy changes, this page is updated and the date at the top moves. Its full history is public in the [repository](https://github.com/LivioGama/pixel/commits/main/website/content/legal/privacy-policy.md).
+When this policy changes, this page is updated and the date at the top moves. Its full history is public in the [repository](https://github.com/Pixel-CLI/pixel/commits/main/website/content/legal/privacy-policy.md).

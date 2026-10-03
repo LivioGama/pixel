@@ -81,7 +81,7 @@ HIGHLIGHTS="changelog.d/_highlights.md"
 HIGHLIGHTS_LIMIT=2000
 
 # Where an entry's `([#<n>](...))` link points.
-PULL_URL="https://github.com/LivioGama/pixel/pull"
+PULL_URL="https://github.com/Pixel-CLI/pixel/pull"
 
 VERSION=""
 DATE="$(date +%Y-%m-%d)"
