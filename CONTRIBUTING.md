@@ -25,7 +25,7 @@ A change is ready for a pull request when every line below is true.
 - [ ] `cargo deny check` exits 0 (skip when `Cargo.lock` did not change); a new exception in `deny.toml` carries its reason.
 - [ ] New behaviour has a test that fails if the behaviour is removed.
 - [ ] The `Mutants` CI job reports no `MISSED` mutant on the pull request (see "Mutation testing"); a local run is optional.
-- [ ] A `changelog.d/<slug>.<section>.md` fragment carries the entry, opening on its scope (`**graph:** …`), ending with the pull request's link and under 500 bytes (skip for pure refactors, CI/deps chores, and changes to the website alone, `website/` and its data, which ship nothing in the tool). The number exists only once the pull request is open: open it, then `git mv` the fragment to `<number>-<slug>.<section>.md`, add the link and push. `prepare.sh --check`, which CI runs on every pull request, refuses a missing scope, a missing pull request reference or an entry over 900.
+- [ ] A `changelog.d/<slug>.<section>.md` fragment carries the entry, opening on its scope (`**graph:** …`), under 500 bytes (skip for pure refactors, CI/deps chores, and changes to the website alone, `website/` and its data, which ship nothing in the tool). Write it once, in the same push as the change: the pull request's link is left out, and the release cut appends it from the merge commit's `(#<n>)`. `prepare.sh --check`, which CI runs on every pull request, refuses a missing scope or an entry over 900.
 - [ ] The commit message follows the Conventional Commits format below.
 - [ ] The branch was created from an up-to-date `main` and the pull request targets `main` (a maintainer's maintenance-release branch instead starts from an up-to-date `origin/release/x.y` and its pull request targets `release/x.y`, so no unreleasable `main` commit rides along; see "Branches").
 - [ ] No file under `.pixel/`, `target/`, `.claude/` (other than the `.claude/rules` and `.claude/skills` symlinks), `.codex/`, `.cursor/` is staged (they are gitignored; do not force-add).
@@ -678,20 +678,27 @@ e.g. `changelog.d/184-rank-gate-tolerance.fixed.md`.
 
 The name is `<slug>.<section>.md`, the section naming the heading the entry is
 filed under — `added`, `changed`, `deprecated`, `removed`, `fixed` or
-`security`. The slug starts with the pull request number, so the release can
-match entries to pull requests; since the number is only known once the pull
-request is open, write the fragment under any slug, open the pull request, then
-rename it and add the link. `prepare.sh --check` refuses a fragment that names
-no pull request, in the slug or in the text, and CI runs it on every pull
-request. The file
+`security`. The slug is free (`stale-note-target-builds.fixed.md`): the
+pull request number does not exist when the fragment is written, and it is
+not needed there. The release cut (`prepare.sh x.y.z`) appends
+`([#<n>](<pull request url>))` to an entry that names no pull request, taking
+`<n>` from the commit that added the fragment to `main` (a squash merge's
+`(#<n>)`, or a merge commit's `Merge pull request #<n>`), and refuses the cut
+when that commit names none, so no entry ships without its link. Renaming the
+fragment after opening the pull request used to cost a second push and a
+cancelled CI run per pull request (#550). A link written in the text, or a
+number opening the slug, is kept as written. The file
 holds the entry's text and nothing else, without the leading `-`. A second
 file is a second entry.
 
 An entry is written to be scanned in a released section, not read as a note:
 
 ```
-**<scope>:** <what changed, and what it means for a user>. ([#<n>](<pull request url>))
+**<scope>:** <what changed, and what it means for a user>.
 ```
+
+The released bullet ends with ` ([#<n>](<pull request url>))`, appended at
+the cut.
 
 - **The scope comes first**, the same area the commit subject scopes — `graph`,
   `daemon`, `install`, `recall`. `**graph, daemon:**` when the change lands in
@@ -700,10 +707,9 @@ An entry is written to be scanned in a released section, not read as a note:
   one.
 - **Then the change and its effect**, naming the command or flag affected. One
   before/after measurement earns its place; the second does not.
-- **Then the pull request link.** Why this design and not another, how a
-  threshold was calibrated, what else was measured: all of it belongs to the
-  pull request, and the link is what carries the reader there. `prepare.sh`
-  warns when neither the text nor the slug references a pull request.
+- **Then the pull request link, which the cut adds.** Why this design and not
+  another, how a threshold was calibrated, what else was measured: all of it
+  belongs to the pull request, and the link is what carries the reader there.
 - **500 bytes is the target, 900 the hard cap.** `prepare.sh --check` warns
   over the first and refuses over the second, so an entry that has turned into
   an engineering note fails the pull request that wrote it.
