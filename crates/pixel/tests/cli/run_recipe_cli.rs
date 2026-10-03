@@ -27,6 +27,14 @@ fn fixture(tag: &str) -> Scratch {
             "export function render(x: number): number {\n  return x + 2\n}\n",
         ),
         (
+            "src/box.ts",
+            "export class Box {\n  open(): number {\n    return 1\n  }\n}\n",
+        ),
+        (
+            "src/crate.ts",
+            "export class Crate {\n  open(): number {\n    return 2\n  }\n}\n",
+        ),
+        (
             "tests/flow.test.ts",
             "import { flowDir } from '../src/flow'\nexport function checkFlow(): string {\n  return flowDir()\n}\n",
         ),
@@ -83,6 +91,7 @@ fn locate_should_show_one_exact_symbol_with_its_test_files_in_one_call() {
         serde_json::json!(["tests/flow.test.ts"])
     );
     assert!(locate["next_action"].is_null(), "{answer}");
+    assert_eq!(locate["limits"], serde_json::json!([]), "{answer}");
     assert_eq!(answer["result"]["plan"][0]["recipe"], "locate.v2");
     // resolve, context, callers: one round trip each, no subprocess.
     assert_eq!(answer["metrics"]["operations"], 3);
@@ -152,6 +161,31 @@ fn locate_should_send_a_miss_to_an_exact_search() {
         "pixel search-content -F 'zzqxMissing'"
     );
     assert_eq!(locate["targets"], serde_json::json!([]));
+    // resolve, then the file ranking a miss calls for.
+    assert_eq!(answer["metrics"]["operations"], 2);
+}
+
+#[test]
+fn locate_should_fall_back_to_the_name_when_a_method_uid_is_not_its_name() {
+    let root = fixture("methods");
+    let answer = locate(&root, "where is `open`", "1500", &["--no-daemon"]);
+    let locate = &answer["locate"];
+    assert_eq!(locate["status"], "ambiguous", "{answer}");
+    let mut uids: Vec<&str> = locate["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["uid"].as_str())
+        .collect();
+    uids.sort_unstable();
+    assert_eq!(uids.len(), 2, "{answer}");
+    assert!(
+        uids[0].starts_with("src/box.ts#") && uids[1].starts_with("src/crate.ts#"),
+        "{answer}"
+    );
+    // resolve, then per method: the guessed uid, the name (two candidates)
+    // and the candidate's uid; then the best one's callers.
+    assert_eq!(answer["metrics"]["operations"], 8, "{answer}");
 }
 
 #[test]
