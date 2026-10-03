@@ -2,14 +2,11 @@
 //! tree (table and `--json`), and `--delete --yes` remove them.
 
 use std::path::PathBuf;
-use std::process::Command;
+
+use crate::support::pixel_command;
 
 fn pixel(args: &[&str]) -> (bool, String, String) {
-    let out = Command::new(env!("CARGO_BIN_EXE_pixel"))
-        .args(args)
-        .env("PIXEL_DAEMON_AUTO_START", "0")
-        .output()
-        .unwrap();
+    let out = pixel_command().args(args).output().unwrap();
     (
         out.status.success(),
         String::from_utf8(out.stdout).unwrap(),
