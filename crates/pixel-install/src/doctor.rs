@@ -105,6 +105,9 @@ pub const CHECKS: &[CheckSpec] = &[
     entry("repo.pixel-first", FIX_REPO_INSTALL),
     entry("repo.claude-hooks", FIX_REPO_INSTALL),
     entry("repo.pi-guard", FIX_REPO_INSTALL),
+    // The setup step is interactive and needs the user at a terminal, so
+    // the check names it in the message but leaves `--fix` out of it.
+    entry("web-search.provider", None),
     entry("daemon.health", Some("pixel daemon start {root}")),
     entry(
         "daemon.epistemics",
@@ -1377,6 +1380,12 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
         });
     }
 
+    // Which web search provider the installed binary resolves to. The
+    // binary's own `config overview` is the authority on the config the
+    // installed `pixel` reads (YAML + legacy JSON), same as
+    // `binary.executable` trusts it for `--version`.
+    runner.check_status("web-search.provider", || web_search_provider_check(&exe));
+
     let Runner {
         checks, skipped, ..
     } = runner;
@@ -1762,6 +1771,61 @@ fn shell_path_check_within(
             })),
         },
     ))
+}
+
+/// The `pixel config overview` line naming the resolved web-search provider.
+pub(crate) const WEB_SEARCH_PROVIDER_PREFIX: &str = "web-search provider: ";
+
+/// Which web search provider the installed binary resolves to. Green when
+/// one is configured; yellow, naming the setup command, when the public
+/// chain is the default. The binary's own `pixel config overview` is the
+/// authority (it reads YAML and legacy JSON through the installed binary's
+/// parser); an older binary that prints no such line reads as `none`.
+pub(crate) fn web_search_provider_check(
+    exe: &Path,
+) -> std::result::Result<(CheckStatus, DoctorCheckDetail), String> {
+    let out = Command::new(exe)
+        .args(["config", "overview"])
+        .output()
+        .map_err(|e| format!("failed to run `pixel config overview`: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "`pixel config overview` exited {}: {}",
+            out.status,
+            capped(
+                &one_line(&String::from_utf8_lossy(&out.stderr)),
+                STDERR_EXCERPT_CHARS
+            )
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    match web_search_provider_from(&text) {
+        "none" => Ok((
+            CheckStatus::Yellow,
+            DoctorCheckDetail {
+                summary: "no web search provider configured — the free public chain replies; run `pixel config setup` to configure SearXNG or Perplexity"
+                    .to_string(),
+                detail: Some(serde_json::json!({ "provider": "none" })),
+            },
+        )),
+        provider => Ok((
+            CheckStatus::Green,
+            DoctorCheckDetail {
+                summary: format!("web search provider: {provider}"),
+                detail: Some(serde_json::json!({ "provider": provider })),
+            },
+        )),
+    }
+}
+
+/// The provider name from the overview text, when it recognises the line;
+/// an unrecognised shape (including no line at all) reads as `none`.
+fn web_search_provider_from(output: &str) -> &'static str {
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(WEB_SEARCH_PROVIDER_PREFIX))
+        .filter(|provider| matches!(*provider, "searxng" | "perplexity" | "none"))
+        .unwrap_or("none")
 }
 
 /// Runs the checks the selection keeps and records each outcome.
@@ -3102,6 +3166,59 @@ mod tests {
             .expect_err("a stalled shell is red, not a hang");
         assert!(err.contains("did not answer within"), "{err}");
         assert!(err.contains(&format!("{timeout:?}")), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The overview line is the only authority the check trusts: the three
+    /// provider words pass through, a missing or undocumented word reads as
+    /// `none` (an older binary degrades to the recommendation, never a red).
+    #[test]
+    fn web_search_provider_from_recognises_only_the_documented_words() {
+        let overview = |provider: &str| {
+            format!(
+                "global: /home/u/.pixel/config.yaml\nremote_keys.openrouter: set\nweb-search provider: {provider}\nSetup: pixel config setup (interactive global settings)\n"
+            )
+        };
+        assert_eq!(web_search_provider_from(&overview("searxng")), "searxng");
+        assert_eq!(web_search_provider_from(&overview("perplexity")), "perplexity");
+        assert_eq!(web_search_provider_from(&overview("none")), "none");
+        assert_eq!(web_search_provider_from(&overview("mallory")), "none");
+        assert_eq!(web_search_provider_from("no such line\n"), "none");
+    }
+
+    /// The check runs the installed binary's own `config overview` and maps
+    /// its verdict: a configured provider is green, a `none` is a yellow
+    /// suggestion, a broken binary is red.
+    #[test]
+    fn web_search_provider_check_reads_the_binaries_own_overview() {
+        let dir = std::env::temp_dir().join(format!("pixel-doctor-web-search-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let make_binary = |tag: &str, body: &str| {
+            let exe = dir.join(tag);
+            std::fs::write(&exe, format!("#!/bin/sh\n{body}\n")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            exe
+        };
+
+        let (status, detail) =
+            web_search_provider_check(&make_binary("green", "printf 'web-search provider: searxng\\n'")).unwrap();
+        assert_eq!(status, CheckStatus::Green, "{detail:?}");
+        assert_eq!(detail.detail.as_ref().unwrap()["provider"], "searxng");
+
+        let (status, detail) =
+            web_search_provider_check(&make_binary("none", "printf 'web-search provider: none\\n'")).unwrap();
+        assert_eq!(status, CheckStatus::Yellow, "{detail:?}");
+        assert!(detail.summary.contains("pixel config setup"), "{detail:?}");
+
+        let err = web_search_provider_check(&make_binary("broken", "exit 1"))
+            .expect_err("a failing overview is red");
+        assert!(err.contains("exited"), "{err}");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
