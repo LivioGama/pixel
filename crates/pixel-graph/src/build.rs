@@ -105,7 +105,10 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    (`signals::is_test_path`) resolves to that module's free function.
 /// 12: Rust literal environment reads (`env::var("NAME")`, `env::var_os`,
 ///    `env!`, `option_env!`) are stored as `env_read` concepts.
-pub const EXTRACTOR_VERSION: &str = "12";
+/// 13: a Go package import or a Java wildcard import resolves to the
+///    package's smallest path, not to the first one the walk or the store
+///    happened to list (`imports.resolved_file_id`).
+pub const EXTRACTOR_VERSION: &str = "13";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
@@ -3446,8 +3449,8 @@ mod tests {
     /// The files every equivalence scenario below writes: a Rust `use` with
     /// an alias and a group, a module path call, a literal environment read
     /// (a concept) behind a guard (a crux line), a relative TS import, a
-    /// function passed as a value (a reference), a JSX handler, and Ruby calls
-    /// without receiver or parentheses.
+    /// function passed as a value (a reference), a JSX handler, a Go package
+    /// of two files, and Ruby calls without receiver or parentheses.
     const EQUIVALENCE_TREE: &[(&str, &str)] = &[
         (
             "src/lib.rs",
@@ -3475,6 +3478,12 @@ mod tests {
             "web/view.tsx",
             "import { helper } from \"./b\";\n\
              export function View() { return <button onClick={() => helper()}>Go</button> }\n",
+        ),
+        ("go/pkg/zeta.go", "package pkg\n\nfunc Zeta() {}\n"),
+        ("go/pkg/alpha.go", "package pkg\n\nfunc Alpha() {}\n"),
+        (
+            "go/main.go",
+            "package main\n\nimport \"example.com/m/pkg\"\n\nfunc main() { pkg.Alpha() }\n",
         ),
         (
             "app/svc.rb",
