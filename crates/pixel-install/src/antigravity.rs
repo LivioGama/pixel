@@ -593,19 +593,17 @@ mod tests {
     #[test]
     fn antigravity_prompt_should_require_scoped_reads_after_pixel_hits() {
         assert!(
-            AGENT_PROMPT_ASSET.contains(
-                "A hit is the retrieval. When Pixel serves `path:line`, read that region"
-            ),
+            AGENT_PROMPT_ASSET.contains("that answer is the retrieval"),
             "Antigravity guidance must treat a Pixel hit as the retrieval"
         );
         assert!(
-            AGENT_PROMPT_ASSET.contains("scoped read of the served window")
+            AGENT_PROMPT_ASSET.contains("the served window")
                 && AGENT_PROMPT_ASSET.contains("`sed -n '<line>,+40p' <path>`")
-                && AGENT_PROMPT_ASSET.contains("`read(path, offset=<line>, limit≈40)`"),
+                && AGENT_PROMPT_ASSET.contains("`offset=<line>, limit≈40` read"),
             "Antigravity guidance must give bounded scoped-read examples"
         );
         assert!(
-            AGENT_PROMPT_ASSET.contains("reading the whole file after Pixel"),
+            AGENT_PROMPT_ASSET.contains("a whole-file read pays for the answer"),
             "Antigravity guidance must reject whole-file reads after a Pixel hit"
         );
     }

@@ -7045,8 +7045,8 @@ mod tests {
             );
             for kept in [
                 "# Pixel — indexed code retrieval",
+                "## The stopping rule — a served hit ends the retrieval",
                 "## Retrieval commands",
-                "## Reading results",
                 "## When native tools are right",
             ] {
                 assert!(context.contains(kept), "{provider:?} lost {kept}");
