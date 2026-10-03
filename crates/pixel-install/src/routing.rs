@@ -1883,7 +1883,7 @@ mod tests {
             config::GUARD_HOOK,
             config::OLD_GUARD_HOOK,
         ] {
-            let mut mixed = retained.clone();
+            let mut mixed = retained.clone(); // Each case mutates an independent fixture.
             mixed["hooks"]
                 .as_array_mut()
                 .unwrap()
@@ -1892,12 +1892,12 @@ mod tests {
                 .unwrap();
             assert_eq!(
                 remove_pre_tool_use_guard(&path, release(), false).unwrap(),
-                (vec![retained.clone()], true),
+                (vec![retained.clone()], true), // Reuse the fixture in later assertions.
                 "{command}"
             );
             assert_eq!(
                 install::read_settings(&path).unwrap(),
-                json!({"hooks":{"PreToolUse":[retained.clone()]}}),
+                json!({"hooks":{"PreToolUse":[retained.clone()]}}), // Retain the shared fixture.
                 "{command}"
             );
         }
