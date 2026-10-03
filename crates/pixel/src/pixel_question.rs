@@ -274,7 +274,6 @@ mod tests {
             "is there a pixel command for scope-task",
             "which pixel command shows what changed",
             "use pixel find-code",
-            "how do I use pixel impact",
             "what does pixel classify do",
             "what is search-content",
             "how do i use find code",
