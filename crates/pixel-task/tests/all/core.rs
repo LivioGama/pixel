@@ -131,6 +131,39 @@ fn check_source_mutation_stays_private_and_invalidates_receipt() {
 }
 
 #[test]
+fn undeclared_check_outputs_invalidate_receipts_without_changing_captured_files() {
+    let directory = repo();
+    let store = Store::open(directory.path()).unwrap();
+    let task = store
+        .begin(
+            contract("printf generated > unexpected.txt"),
+            "pi",
+            None,
+            "begin",
+        )
+        .unwrap();
+    let task = store
+        .update(
+            &task.task_id,
+            task.revision,
+            "prepare",
+            Action::Prepare {
+                observations: observations(),
+            },
+        )
+        .unwrap();
+    let task = store.verify(&task.task_id, &[], "verify").unwrap();
+    assert_eq!(task.receipts.len(), 1);
+    assert_eq!(task.receipts[0].outcome, CheckOutcome::SourceChanged);
+    assert!(!store.decision(&task.task_id, Gate::Finish).unwrap().allowed);
+    assert!(!directory.path().join("unexpected.txt").exists());
+    assert_eq!(
+        fs::read_to_string(directory.path().join("source.txt")).unwrap(),
+        "correct\n"
+    );
+}
+
+#[test]
 fn explicit_outputs_are_isolated_but_never_hide_tracked_source() {
     let directory = repo();
     let mut configured = contract("mkdir -p output; printf generated > output/result");
@@ -379,23 +412,50 @@ fn criterion_strengthening_is_allowed_but_waivers_are_not() {
     new.criteria[0].checks.push("value".into());
     assert!(new.preserves(&old));
     assert!(!old.preserves(&new));
-    new.checks[0].required = false;
-    assert!(!new.preserves(&old));
+    let mut weakened = new.clone();
+    weakened.checks[0].required = false;
+    assert!(!weakened.preserves(&old));
     let directory = repo();
     let store = Store::open(directory.path()).unwrap();
     let task = store.begin(old, "pi", None, "begin").unwrap();
+    let task = store
+        .update(
+            &task.task_id,
+            task.revision,
+            "strengthen",
+            Action::SetContract {
+                contract: new.clone(),
+                human_authorized: false,
+            },
+        )
+        .unwrap();
+    assert_eq!(task.contract, new);
     assert!(matches!(
         store.update(
             &task.task_id,
             task.revision,
             "weaken",
             Action::SetContract {
-                contract: new,
+                contract: weakened.clone(),
                 human_authorized: false
             }
         ),
         Err(Error::Blocked(_))
     ));
+    assert_eq!(store.status(&task.task_id).unwrap(), task);
+    let authorized = store
+        .update(
+            &task.task_id,
+            task.revision,
+            "authorized-weaken",
+            Action::SetContract {
+                contract: weakened.clone(),
+                human_authorized: true,
+            },
+        )
+        .unwrap();
+    assert_eq!(authorized.contract, weakened);
+    assert_eq!(authorized.revision, task.revision + 1);
 }
 
 #[test]
@@ -1171,6 +1231,15 @@ fn required_checks_and_task_criteria_are_independent_obligations() {
         store.verify(&task.task_id, &["unknown".into()], "unknown"),
         Err(Error::Invalid(_))
     ));
+    assert!(matches!(
+        store.verify(
+            &task.task_id,
+            &["value".into(), "unknown".into()],
+            "mixed-selection"
+        ),
+        Err(Error::Invalid(_))
+    ));
+    assert_eq!(store.status(&task.task_id).unwrap(), task);
     configured.checks[1].required = false;
     let task = store
         .begin(configured.clone(), "pi", None, "optional")

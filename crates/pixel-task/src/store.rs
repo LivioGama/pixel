@@ -960,6 +960,35 @@ mod tests {
     }
 
     #[test]
+    fn journal_open_errors_never_fall_back_to_legacy_state() {
+        let root = repo();
+        let store = Store::open(root.path()).unwrap();
+        let path = store.directory("legacy").unwrap();
+        fs::create_dir_all(&path).unwrap();
+        fs::write(
+            path.join("task.json"),
+            serde_json::to_vec(&json!({
+                "version": 1,
+                "task_id": "legacy",
+                "spec": {"objective": "legacy objective"},
+                "status": "complete"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("journal.jsonl", path.join("journal.jsonl")).unwrap();
+        assert!(matches!(
+            store.status("legacy"),
+            Err(Error::Io(error)) if error.raw_os_error() == Some(libc::ELOOP)
+        ));
+        fs::remove_file(path.join("journal.jsonl")).unwrap();
+        assert_eq!(
+            store.status("legacy").unwrap().contract.objective,
+            "legacy objective"
+        );
+    }
+
+    #[test]
     fn legacy_schema_and_task_identity_are_checked_independently() {
         let root = repo();
         let store = Store::open(root.path()).unwrap();

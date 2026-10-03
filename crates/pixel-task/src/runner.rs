@@ -189,12 +189,13 @@ fn output_summary(path: &Path) -> Result<(String, u64)> {
     let mut bytes = 0;
     let mut buffer = vec![0; 8192];
     loop {
-        let count = file.read(&mut buffer)?;
-        if count == 0 {
-            break;
+        match file.read(&mut buffer)? {
+            0 => break,
+            count => {
+                hash.update(&buffer[..count]);
+                bytes += count as u64;
+            }
         }
-        hash.update(&buffer[..count]);
-        bytes += count as u64;
     }
     Ok((hex::encode(hash.finalize()), bytes))
 }
@@ -504,6 +505,10 @@ mod tests {
         assert_eq!(
             fs::metadata(&path).unwrap().permissions().mode() & 0o777,
             0o600
+        );
+        assert_eq!(
+            output_summary(&path).unwrap(),
+            (hex::encode(Sha256::digest(b"")), 0)
         );
         fs::write(&path, "kept").unwrap();
         assert!(output_file(&path).is_err());

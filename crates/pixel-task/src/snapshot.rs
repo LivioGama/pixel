@@ -619,6 +619,27 @@ mod tests {
     }
 
     #[test]
+    fn source_listing_rejects_submodule_directories_before_capturing_files() {
+        let root = repo();
+        let head = String::from_utf8(git(root.path(), &["rev-parse", "HEAD"])).unwrap();
+        git(
+            root.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{},module", head.trim()),
+            ],
+        );
+        fs::create_dir(root.path().join("module")).unwrap();
+        assert!(matches!(
+            listed(root.path(), &contract(), CaptureLimits::default()),
+            Err(Error::Unavailable(message))
+                if message == "submodule or directory source requires explicit capture support: module"
+        ));
+    }
+
+    #[test]
     fn tracked_reserved_paths_submodules_and_nonmissing_io_errors_fail_closed() {
         for reserved in [".pixel", "target"] {
             let root = repo();
