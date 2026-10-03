@@ -250,7 +250,10 @@ Invariants enforced by `Service::handle`:
   `trace`, `changes`, `context`, `symbol`, `processes`, `clusters`, `plan`) gets an
   `epistemics` object. Ops that hit a cap name it in `basis` and mirror it as
   a warning. Ops that attested nothing get a conservative not-closed-world
-  default instead of an implied claim of completeness.
+  default instead of an implied claim of completeness. `search` also returns
+  each cap that fired as `cap_hits` (`{kind, text}`, kinds `byte_cap`,
+  `row_limit`, `ranked_pool`, `credential_hidden`), so a reader that already
+  stated a bound drops it by kind rather than by matching its sentence.
 - Retrieval ops and git-state ops (`inspect`, `review`, `diff`, `status`,
   `changes`) get a `snapshot` so the caller can correlate the answer with the
   working tree it was computed against. Only `inspect` and `review` carry the

@@ -33,8 +33,11 @@ pub const GRAPH_DB_FILE: &str = "graph.v2.db";
 /// to 7 with the Envelope v2 migration: the wire shape changed from
 /// `{ok, error, data}` to the full `Envelope` (`ok, op, protocol, requestId,
 /// snapshot, epistemics, budget, result, error, warnings`), gated by
-/// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`. 12 adds the deterministic
-/// `targets_facts` request, which older daemons reject as an unknown variant.
+/// `pixel_proto::ENVELOPE_PROTOCOL_VERSION`. 10: the `plan` op, which a
+/// daemon of an older build rejects as an unknown variant. 12 adds the
+/// deterministic `targets_facts` request (older daemons reject it as an
+/// unknown variant) and `search` names each cap that fired by kind
+/// (`cap_hits`), which the CLI reads instead of matching the cap sentences.
 pub const PROTOCOL_VERSION: u64 = 12;
 
 /// Rows a `search` returns when the request names no `limit`.
@@ -1243,31 +1246,49 @@ impl Service {
         let next_offset = truncated.then_some(offset.saturating_add(arr.len()));
         // Named caps for the envelope epistemics: every bound that actually
         // fired on THIS response, so a partial answer is explicitly bounded
-        // instead of silently truncated.
-        let mut caps: Vec<String> = Vec::new();
+        // instead of silently truncated. Each carries its kind, so a reader
+        // that already stated a bound can drop it without matching the
+        // sentence (`cap_hits`); `caps` keeps the sentences the envelope's
+        // `basis` names.
+        let mut cap_hits: Vec<(&str, String)> = Vec::new();
         if byte_capped {
-            caps.push(format!(
-                "output truncated by the {BYTE_CAP}-byte response cap; continue via next_offset"
+            cap_hits.push((
+                "byte_cap",
+                format!(
+                    "output truncated by the {BYTE_CAP}-byte response cap; continue via next_offset"
+                ),
             ));
         }
         if stats.truncated {
-            caps.push(format!(
-                "match list truncated at row limit {row_limit}; more matches exist — continue \
-                 via next_offset"
+            cap_hits.push((
+                "row_limit",
+                format!(
+                    "match list truncated at row limit {row_limit}; more matches exist — continue \
+                     via next_offset"
+                ),
             ));
         }
         if ranked_pool_capped {
-            caps.push(format!(
-                "ranked candidate pool capped at {SEARCH_MAX_ROWS} matches; ranking never saw \
-                 candidates beyond the cap"
+            cap_hits.push((
+                "ranked_pool",
+                format!(
+                    "ranked candidate pool capped at {SEARCH_MAX_ROWS} matches; ranking never saw \
+                     candidates beyond the cap"
+                ),
             ));
         }
-        if Self::credential_hidden_cap_line(credential_hidden).is_some() {
-            caps.push(Self::credential_hidden_cap_line(credential_hidden).expect("just checked"));
+        if let Some(line) = Self::credential_hidden_cap_line(credential_hidden) {
+            cap_hits.push(("credential_hidden", line));
         }
+        let caps: Vec<&str> = cap_hits.iter().map(|(_, text)| text.as_str()).collect();
+        let cap_kinds: Vec<Value> = cap_hits
+            .iter()
+            .map(|(kind, text)| json!({"kind": kind, "text": text}))
+            .collect();
         Ok(json!({
             "matches": arr,
             "caps": caps,
+            "cap_hits": cap_kinds,
             "truncated": truncated,
             "offset": offset,
             "next_offset": next_offset,
@@ -8400,6 +8421,66 @@ mod tests {
     /// produce no cap (a healthy search with no hidden matches is not a
     /// partial answer); a non-zero hidden count must produce a cap the
     /// envelope surfaces, with the exact count visible in the line.
+    /// A reader that already stated a bound (the CLI's `⚠ results
+    /// truncated` line) drops it by kind; `cap_hits` must name every cap
+    /// `caps` names, in the same order, with the same text.
+    #[test]
+    fn search_should_name_each_cap_that_fired_by_kind() {
+        let root = tmpdir("search-cap-kinds");
+        git(&root, &["init", "-q"]);
+        for i in 0..4 {
+            std::fs::write(root.join(format!("f{i}.rs")), "fn capKindNeedle() {}\n").unwrap();
+        }
+        std::fs::write(root.join(".env"), "capKindNeedle=1\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "fixture"]);
+        let mut svc = Service::open(&root).unwrap();
+        let resp = svc.handle(Request::Search {
+            paths: None,
+            pattern: "capKindNeedle".into(),
+            json: true,
+            limit: Some(2),
+            offset: None,
+            scope: None,
+        });
+        assert!(resp.ok, "search: {resp:?}");
+        let data = resp.data();
+        let kinds: Vec<&str> = data["cap_hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hit| hit["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, ["row_limit", "credential_hidden"], "{data}");
+        let texts: Vec<&Value> = data["cap_hits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|hit| &hit["text"])
+            .collect();
+        let caps: Vec<&Value> = data["caps"].as_array().unwrap().iter().collect();
+        assert_eq!(texts, caps, "{data}");
+        assert_eq!(
+            data["cap_hits"][0]["text"],
+            "match list truncated at row limit 2; more matches exist — continue via next_offset"
+        );
+
+        let resp = svc.handle(Request::Search {
+            paths: Some(vec!["f0.rs".into()]),
+            pattern: "capKindNeedle".into(),
+            json: true,
+            limit: None,
+            offset: None,
+            scope: None,
+        });
+        assert_eq!(
+            resp.data()["cap_hits"],
+            json!([]),
+            "a complete answer names no cap"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn op_search_surfaces_a_credential_cap_only_when_hidden_is_positive() {
         // Zero hidden → no cap line. A healthy search is not a partial

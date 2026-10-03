@@ -3643,9 +3643,10 @@ fn run_search_one(
         && let Some(basis) = e.get("basis").and_then(Value::as_str)
         && let Some(note) = bounded_result_note(
             basis,
+            data.get("cap_hits")
+                .and_then(Value::as_array)
+                .map_or(&[][..], Vec::as_slice),
             row_cap_warned,
-            limit,
-            data.get("byte_cap").and_then(Value::as_u64).unwrap_or(0),
         )
     {
         eprintln!("note: bounded result — {note}");
@@ -4516,42 +4517,28 @@ fn read_only_invocation(matches: &ArgMatches) -> bool {
 /// The bounded-result note for search's line output, with the caps the
 /// `⚠ results truncated` line already stated removed: the daemon restates
 /// the row and byte caps inside `basis`, and the same bound on two stderr
-/// lines reads as two problems. Every other named cap (credential hiding,
-/// the ranked-pool cap) carries information the warning does not and stays.
-/// `None` when nothing unique remains.
-fn bounded_result_note(
-    basis: &str,
-    truncation_warned: bool,
-    row_limit: u64,
-    byte_cap: u64,
-) -> Option<String> {
+/// lines reads as two problems. The daemon names each cap that fired by
+/// kind in `cap_hits`, so the row limit and the byte cap go whatever numbers
+/// they carry (a filtered search pages the daemon with a limit of its own).
+/// Every other named cap (credential hiding, the ranked-pool cap) carries
+/// information the warning does not and stays. `None` when nothing unique
+/// remains.
+fn bounded_result_note(basis: &str, cap_hits: &[Value], truncation_warned: bool) -> Option<String> {
     if !truncation_warned {
         return Some(basis.to_string());
     }
-    // Each truncation cap is composed from this same response's fields, so
-    // the exact strings reconstruct from `row_limit` and `byte_cap`; a cap
-    // whose numbers differ is from another shape and must survive. Each cap
-    // is stripped with its own `"; "` joiner, so the caps around it stay
-    // separated; the last cap has none, which the final trim covers.
-    let (tier, caps) = basis.split_once("; caps: ")?;
-    let mut rest = caps.to_string();
-    for fired in [
-        format!(
-            "match list truncated at row limit {row_limit}; more matches exist — continue via next_offset"
-        ),
-        format!("output truncated by the {byte_cap}-byte response cap; continue via next_offset"),
-    ] {
-        // With its `"; "` joiner first, so a middle cap leaves no gap; the
-        // bare form covers the last cap, which has no joiner to take.
-        rest = rest.replace(&format!("{fired}; "), "");
-        rest = rest.replace(&fired, "");
-    }
-    let rest = rest.trim_matches(|c| c == ';' || c == ' ').trim();
-    if rest.is_empty() {
-        None
-    } else {
-        Some(format!("{tier}; caps: {rest}"))
-    }
+    let tier = basis.split_once("; caps: ").map_or(basis, |(tier, _)| tier);
+    let rest: Vec<&str> = cap_hits
+        .iter()
+        .filter(|hit| {
+            !matches!(
+                hit.get("kind").and_then(Value::as_str),
+                Some("row_limit" | "byte_cap")
+            )
+        })
+        .filter_map(|hit| hit.get("text").and_then(Value::as_str))
+        .collect();
+    (!rest.is_empty()).then(|| format!("{tier}; caps: {}", rest.join("; ")))
 }
 
 /// One stderr line naming the deployed prompts that differ from this
@@ -9083,76 +9070,81 @@ mod renamed_command_tests {
         assert_eq!(both.lines().count(), 1, "{both}");
     }
 
+    const ROW_CAP: &str =
+        "match list truncated at row limit 100; more matches exist — continue via next_offset";
+    const BYTE_CAP: &str =
+        "output truncated by the 65536-byte response cap; continue via next_offset";
+    const CREDENTIAL_CAP: &str = "2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches";
+    const RANKED_CAP: &str = "ranked candidate pool capped at 10000 matches; ranking never saw candidates beyond the cap";
+
+    /// `cap_hits` as the daemon sends them, and the `basis` the envelope
+    /// builds from the same caps.
+    fn cap_hits(caps: &[(&str, &str)]) -> (String, Vec<serde_json::Value>) {
+        let texts: Vec<&str> = caps.iter().map(|(_, text)| *text).collect();
+        let basis = if texts.is_empty() {
+            "text index".to_string()
+        } else {
+            format!("text index; caps: {}", texts.join("; "))
+        };
+        let hits = caps
+            .iter()
+            .map(|(kind, text)| serde_json::json!({"kind": kind, "text": text}))
+            .collect();
+        (basis, hits)
+    }
+
     #[test]
     fn bounded_result_note_keeps_the_basis_when_no_truncation_was_warned() {
         // Without a ⚠ line above it, the cap text inside the note is the
         // only place the bound is named; it must stay.
-        let row = "text index; caps: match list truncated at row limit 100; more matches exist — continue via next_offset";
-        assert_eq!(
-            bounded_result_note(row, false, 100, 65_536).as_deref(),
-            Some(row)
-        );
-        let credential = "text index; caps: 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches";
-        assert_eq!(
-            bounded_result_note(credential, false, 100, 65_536).as_deref(),
-            Some(credential)
-        );
+        for caps in [
+            &[("row_limit", ROW_CAP)][..],
+            &[("credential_hidden", CREDENTIAL_CAP)][..],
+        ] {
+            let (basis, hits) = cap_hits(caps);
+            assert_eq!(
+                bounded_result_note(&basis, &hits, false).as_deref(),
+                Some(basis.as_str())
+            );
+        }
     }
 
     #[test]
     fn bounded_result_note_drops_only_the_caps_the_warning_named() {
-        let basis = "text index; caps: output truncated by the 65536-byte response cap; continue via next_offset; match list truncated at row limit 100; more matches exist — continue via next_offset; 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches";
+        let (basis, hits) = cap_hits(&[
+            ("byte_cap", BYTE_CAP),
+            ("row_limit", ROW_CAP),
+            ("credential_hidden", CREDENTIAL_CAP),
+            ("ranked_pool", RANKED_CAP),
+        ]);
         assert_eq!(
-            bounded_result_note(basis, true, 100, 65_536).as_deref(),
-            Some(
-                "text index; caps: 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches"
-            )
+            bounded_result_note(&basis, &hits, true).as_deref(),
+            Some(format!("text index; caps: {CREDENTIAL_CAP}; {RANKED_CAP}").as_str())
         );
     }
 
     #[test]
     fn bounded_result_note_is_dropped_when_the_warning_said_everything() {
-        let row = "text index; caps: match list truncated at row limit 100; more matches exist — continue via next_offset";
-        assert_eq!(bounded_result_note(row, true, 100, 65_536), None);
-        let byte = "text index; caps: output truncated by the 65536-byte response cap; continue via next_offset";
-        assert_eq!(bounded_result_note(byte, true, 100, 65_536), None);
-        assert_eq!(bounded_result_note("text index", true, 100, 65_536), None);
+        for caps in [
+            &[("row_limit", ROW_CAP)][..],
+            &[("byte_cap", BYTE_CAP)][..],
+            &[("byte_cap", BYTE_CAP), ("row_limit", ROW_CAP)][..],
+            &[][..],
+        ] {
+            let (basis, hits) = cap_hits(caps);
+            assert_eq!(bounded_result_note(&basis, &hits, true), None, "{basis}");
+        }
     }
 
+    /// A `-g`/`-t` search pages the daemon 10 000 rows at a time and warns
+    /// with its own limit: the daemon's row cap names another number and is
+    /// still the bound the warning stated. Matching the sentence printed it
+    /// twice.
     #[test]
-    fn bounded_result_note_keeps_a_cap_whose_numbers_do_not_match() {
-        // The strip keys on the exact cap text the daemon composed from this
-        // response's own limit and byte cap; anything else is a different
-        // cap and must survive.
-        let row = "text index; caps: match list truncated at row limit 100; more matches exist — continue via next_offset";
-        assert_eq!(
-            bounded_result_note(row, true, 200, 65_536).as_deref(),
-            Some(row)
-        );
-    }
-
-    #[test]
-    fn bounded_result_note_closes_the_gap_a_stripped_middle_cap_leaves() {
-        let basis = "text index; caps: 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches; match list truncated at row limit 100; more matches exist — continue via next_offset; ranked candidate pool capped at 10000 matches; ranking never saw candidates beyond the cap";
-        assert_eq!(
-            bounded_result_note(basis, true, 100, 65_536).as_deref(),
-            Some(
-                "text index; caps: 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches; ranked candidate pool capped at 10000 matches; ranking never saw candidates beyond the cap"
-            )
-        );
-    }
-
-    #[test]
-    fn bounded_result_note_trims_the_joiner_a_last_cap_strips_leave() {
-        // The last cap carries no `"; "` joiner, so its bare strip leaves the
-        // previous cap's joiner behind; the trim must take it.
-        let basis = "text index; caps: 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches; match list truncated at row limit 100; more matches exist — continue via next_offset";
-        assert_eq!(
-            bounded_result_note(basis, true, 100, 65_536).as_deref(),
-            Some(
-                "text index; caps: 2 match(es) in credential-shaped files hidden by the daemon; continue via next_offset for adjacent matches"
-            )
-        );
+    fn bounded_result_note_drops_the_row_cap_whatever_limit_it_names() {
+        let filtered_page = "match list truncated at row limit 10000; more matches exist — continue via next_offset";
+        let (basis, hits) = cap_hits(&[("row_limit", filtered_page)]);
+        assert_eq!(bounded_result_note(&basis, &hits, true), None);
     }
 
     #[test]
