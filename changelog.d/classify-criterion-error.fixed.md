@@ -1,0 +1,1 @@
+**classify:** a `--criterion` argument missing its `label=` prefix now fails with the declared labels and a complete valid invocation, so the fix is one copy-paste away instead of one re-read of the docs.
