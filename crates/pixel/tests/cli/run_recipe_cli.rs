@@ -4,10 +4,11 @@
 //! process.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::support::{Scratch, git, pixel_command};
+use crate::support::{Scratch, assert_no_daemon, daemons_serving, git, pixel_command};
 
 fn fixture(tag: &str) -> Scratch {
     let dir = Scratch::for_test("pixel-locate-cli", tag);
@@ -132,6 +133,15 @@ impl Drop for StopDaemonOnDrop<'_> {
         if !std::thread::panicking() {
             let stop = stop.unwrap();
             assert!(stop.status.success(), "{stop:?}");
+            // Shutdown acknowledges the request before the process finishes
+            // releasing its watcher and acceptor. Keep the fixture root alive
+            // until that exit, so Scratch's immediate leak scan cannot race it.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !daemons_serving(self.0).is_empty() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // A real leak still fails and is killed by the shared leak guard.
+            assert_no_daemon(self.0);
         }
     }
 }
