@@ -64,6 +64,15 @@ jobs:
       # The commit the shards mutate: the range's right end on a dispatch,
       # empty on a pull request (the checkout's default, its merge commit).
       ref: ${{ steps.diff.outputs.ref }}
+      # The skip guard's finding (#590): whether a green verdict already
+      # exists for this exact tree (same UTC day), the run that recorded it,
+      # and the tree the shards mutate -- the merge commit's on a pull
+      # request, the range tip's on a dispatch. The gate saves a fresh
+      # verdict under it.
+      duplicate: ${{ steps.dup.outputs.duplicate }}
+      verdict-run: ${{ steps.dup.outputs.verdict_run }}
+      tree: ${{ steps.key.outputs.tree }}
+      day: ${{ steps.key.outputs.day }}
     steps:
       # Full history so the merge base with the target branch is available.
       - uses: useblacksmith/checkout@25227e61ff9dafe400e22fa487b673eac4e4409a # v1
@@ -119,6 +128,45 @@ jobs:
           echo "ref=$tip" >> "$GITHUB_OUTPUT"
           echo "src=$RUNNER_TEMP/tip" >> "$GITHUB_OUTPUT"
 
+      # The skip-guard key (see ci.yml's changes job): the tree of the code
+      # the shards mutate. A dispatch's shards mutate the range tip, not the
+      # checkout, so the key comes from that worktree; a pull request's
+      # shards mutate the merge commit.
+      - name: Mutated tree and UTC day
+        id: key
+        env:
+          SRC: ${{ steps.diff.outputs.src }}
+        run: |
+          echo "tree=$(git -C "$SRC" rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
+          echo "day=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      # A green gate recorded a marker under mutants-verdict-<tree>-<day>
+      # (the gate below): a repush with no content change restores it and
+      # skips the shards entirely -- every mutant the diff produces was
+      # already judged by the run the marker points at. The listing still
+      # runs, so the gate's artifact and outputs keep their shape. The
+      # Actions cache makes the key a fact: an entry exists only if a green
+      # gate of this exact tree wrote it, and an entry is immutable.
+      - name: Restore a green verdict for this exact tree
+        id: verdict
+        if: github.event_name == 'pull_request'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/verdict
+          key: mutants-verdict-${{ steps.key.outputs.tree }}-${{ steps.key.outputs.day }}
+
+      - name: Skip when the tree already has a green verdict
+        id: dup
+        if: steps.verdict.outputs.cache-hit == 'true'
+        run: |
+          if [ ! -f "$RUNNER_TEMP/verdict/green" ]; then
+            echo "the restored cache holds no marker; running"
+            exit 0
+          fi
+          echo "duplicate=true" >> "$GITHUB_OUTPUT"
+          echo "verdict_run=$(cat "$RUNNER_TEMP/verdict/green")" >> "$GITHUB_OUTPUT"
+          echo "Mutants: this merge tree already has a green verdict (same UTC day); the shards will be skipped." >> "$GITHUB_STEP_SUMMARY"
+
       # `cargo mutants` exits 0 both when every mutant was caught and when it
       # produced none at all, and the run's own output cannot tell those
       # apart after the fact. `--list` builds nothing, so this costs seconds.
@@ -165,7 +213,7 @@ jobs:
     # 2/5`. cargo-mutants numbers shards from 0.
     name: Mutants shard ${{ matrix.shard }}
     needs: plan
-    if: needs.plan.outputs.mutants != '0'
+    if: needs.plan.outputs.mutants != '0' && needs.plan.outputs.duplicate != 'true'
     # Compiling happens here tens of mutants at a time, which is where a self-hosted
     # runner pays off most: PIXEL_RUNNER_LABELS (see ci.yml) moves the shards to it on
     # every event, pull requests included. That is deliberate: the pre-push gate
@@ -367,11 +415,24 @@ jobs:
       # gate reads both). A shard that left no artifact leaves its mutants
       # without a verdict, and the next step counts them as such.
       - name: Download every shard's mutants.out
-        if: needs.plan.outputs.mutants != '0'
+        if: needs.plan.outputs.mutants != '0' && needs.plan.outputs.duplicate != 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: mutants-out-*
           path: shards
+
+      # The shards were skipped because this exact tree already has a green
+      # verdict from today (#590): say so instead of failing on unjudged
+      # mutants -- the outcomes the report step would demand were judged by
+      # the run the verdict points at.
+      - name: Report the reused verdict
+        if: needs.plan.outputs.duplicate == 'true'
+        run: |
+          {
+            echo "### Mutants in diff: skipped"
+            echo
+            echo "This merge tree already has a green verdict from ${{ needs.plan.outputs.verdict-run }} (same UTC day); no shard re-ran."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # A green job is not the same claim as "this diff was gated": a diff
       # whose every file is excluded produces no mutants, which reads as a
@@ -384,6 +445,26 @@ jobs:
       # was caught or unviable: a survivor in any shard, or a shard that
       # crashed or was cancelled before judging its slice.
       - name: Report what the gate actually tested
+        if: needs.plan.outputs.duplicate != 'true'
         run: >
           python3 scripts/mutants-gate.py --diff pr.diff --list mutants-list.txt
           --outcomes-root shards --summary "$GITHUB_STEP_SUMMARY"
+
+      # A green verdict records the mutated tree in the Actions cache under
+      # mutants-verdict-<tree>-<day>: the plan job of a later run with an
+      # identical tree finds it and skips the shards (#590). No always()
+      # here on purpose: the steps above leave a failed gate before this
+      # runs, so a run with a survivor or an unjudged mutant records
+      # nothing, and a duplicate has nothing to record (the entry exists).
+      - name: Record the green verdict
+        if: needs.plan.outputs.duplicate != 'true'
+        run: |
+          mkdir -p "$RUNNER_TEMP/verdict"
+          printf '%s\n' "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" > "$RUNNER_TEMP/verdict/green"
+
+      - name: Save the verdict under the tree-and-day key
+        if: needs.plan.outputs.duplicate != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/verdict
+          key: mutants-verdict-${{ needs.plan.outputs.tree }}-${{ needs.plan.outputs.day }}

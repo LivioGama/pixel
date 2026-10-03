@@ -1,8 +1,8 @@
 <h1 align="center">🟩 Pixel</h1>
 
 <p align="center">
-  <strong>A local code index for AI coding agents.</strong><br />
-  Your agent asks Pixel instead of reading files, and spends its tokens on the hard part.
+  <strong>A tool that replaces everything that can be deterministic in repository work.</strong><br />
+  Retrieval, impact, history, review, Git — your agent asks Pixel instead of doing it by hand, and spends its tokens on the hard part.
 </p>
 
 <p align="center">
@@ -88,23 +88,11 @@ pixel doctor .     # optional health check
 pixel list-signatures path/to/a/large/file   # first result: full read vs Pixel, in tokens
 ```
 
-The one-liner runs [`scripts/install.sh`](scripts/install.sh), which every release publishes as an asset: one POSIX `sh` file, no `sudo`. It downloads the release archive for the machine it is running on (macOS on Apple Silicon, Linux x86_64 or arm64), refuses it unless its SHA-256 matches the release's checksum, runs the binary once, and writes a single file, `~/.local/bin/pixel` (`PIXEL_INSTALL_DIR` moves it). When `GITHUB_PATH` is set it appends that directory. It edits no shell profile; if that directory is not on your `PATH`, it says so. To read it before it runs:
+The one-liner runs [`install.sh`](scripts/install.sh): one POSIX `sh` file, no `sudo`, which verifies the release's SHA-256 and writes one file, `~/.local/bin/pixel`.
 
-```bash
-curl -fsSL -o install.sh https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh
-less install.sh    # every line it will run
-sh install.sh
-```
+## For AI agents
 
-An install that already came from Homebrew still updates with `brew update && brew upgrade LivioGama/tap/pixel`.
-
-Once a day, a command run at a terminal prints one yellow line when a newer release is out, with the command that updates your install (`brew`, `mise` or `install.sh`); hooks and agents never see it, and `PIXEL_NO_UPDATE_CHECK=1` turns it off.
-
-Other channels, per-agent plugins and manual setup are in the [docs](https://pixel-cli.dev/docs/).
-
-### Let your agent install it
-
-Paste this into Claude Code, Codex, Pi or any coding agent with a shell:
+Setting Pixel up for someone? Paste this into their Claude Code, Codex, Pi or any coding agent with a shell:
 
 ```text
 Install Pixel (https://github.com/Pixel-CLI/pixel) for me: follow the
@@ -112,64 +100,62 @@ Install Pixel (https://github.com/Pixel-CLI/pixel) for me: follow the
 whether `pixel doctor .` is green.
 ```
 
-## For AI agents
+If you are that agent: run the Install one-liner, tell the user it writes to their home configuration, then run `pixel install` (idempotent) and `pixel doctor . --json` — report every check that is not green, do not claim success otherwise. Restart the session afterwards: the protocol is injected at session start. Then use Pixel the way [`PIXEL.md`](PIXEL.md) describes.
 
-Looking for something specific? [`llms.txt`](https://pixel-cli.dev/llms.txt) maps every page of the docs and benchmarks to its raw Markdown. Comparing Pixel with another tool for a user? Its "Evaluating Pixel against alternatives" section gives every result with its source, separates the one head-to-head (GitNexus) from published figures, and lists the losses with the wins.
+## Now build this harness
 
-If you are an LLM reading this to set Pixel up for a user, do this, in order:
+`pixel install` wired it: session start injects the contract, and a PreToolUse hook rewrites `grep`/`rg` into Pixel — fail-open for pipes, `-m/-w/-v`, >4 MiB, binary, git-ignored and unindexed paths. The LLM reasons and edits; Pixel does everything search and Git.
 
-1. **Check first.** `command -v pixel && pixel --version`. If it prints a version, skip to step 3.
-2. **Install the binary** (macOS or Linux, including a GitHub Actions runner). Run `curl -fsSL https://github.com/Pixel-CLI/pixel/releases/latest/download/install.sh | sh`. It installs into `~/.local/bin` (override with `PIXEL_INSTALL_DIR`); make sure that directory is on `PATH`. On GitHub Actions, also run `echo "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}" >> "$GITHUB_PATH"` — needed for the `install.sh` already published on the current release; this branch's script appends itself, so drop the echo after the next release.
-3. **Wire the agents.** Tell the user it writes to their home configuration (`~/.local/share/pixel/`, `~/.claude/settings.json`, `~/.codex/config.toml`, `~/.pi/agent/APPEND_SYSTEM.md`), then run `pixel install`. It is idempotent: running it again only refreshes what it wrote.
-4. **Index the current repository** (optional, speeds up the first queries): `pixel prepare-repo .`
-5. **Verify:** `pixel doctor . --json`. Report every check that is not green, with its message; do not claim success otherwise.
-6. **Tell the user to restart the agent session.** The protocol is injected when a session starts, so the current one does not have it yet.
+**Ask about the code** — "find callers of X", "explain this flow":
 
-Then use Pixel the way [`PIXEL.md`](PIXEL.md) describes: it is the complete agent protocol, the same text `pixel install` deploys, and it says which command replaces `grep`, `git log`, `git blame` and whole-file reads, and when a native tool is still the right choice. An agent that `pixel install` does not wire (Cursor, Gemini CLI, Copilot…) needs that file in its own rules; see the [plugins table](https://pixel-cli.dev/docs/#plugins).
-
-## Configuration
-
-Run `pixel config setup` for guided terminal setup. Interactive global
-`pixel install` offers the same flow: choose metrics, background startup,
-agent prompt assistance, and whether to allow AI classification, then review
-and save. Enter keeps the shown value; `q` or Ctrl-D cancels before saving.
-JSON, piped, and repository-only installs never prompt.
-
-Classification is disabled by default to avoid API costs and classifier model
-downloads. Enable it explicitly with `pixel config classify on`
-or answer Yes during setup. Disable it again with `pixel config classify off`, or set
-`classify: {enabled: false}` in the global YAML file. This blocks every
-`pixel classify` invocation, including explicit engine flags, before input is
-read or a provider is contacted. Code search still works. Re-enable with
-`pixel config classify on`; engine preferences and credentials are retained.
-
-
-`pixel config` shows effective settings and their sources, including the global
-and repository file paths. `pixel config edit` opens `~/.pixel/config.yaml` in
-`$VISUAL`, then `$EDITOR` (falling back to `vi`). Use `pixel config edit --repo`
-for repository overrides in `.pixel/config.yaml`.
-
-Installation and the editor create a commented template without overwriting
-existing YAML. Uncomment an example to change it. Settings include the metrics
-footer, repository daemon startup, automatic task-context suggestions,
-task-boundary detection, and global classification preferences and credentials.
-Other defaults remain unchanged. Disabling daemon startup does not stop
-an already running daemon. Remote classification requires explicit credentials.
-
-Repository settings override global settings; existing environment overrides
-still win. Classification preferences and credentials are global only.
-`pixel config` masks credentials. Files created by Pixel are owner-only on Unix.
-Legacy `config.json` files remain readable and writable until install/edit copies
-their settings into YAML; JSON is retained as a backup and ignored once YAML
-exists in that scope. Config commands preserve YAML comments and unknown keys,
-and refuse to overwrite malformed configuration. After editing, invalid syntax
-or known setting types are reported without printing file contents.
-
-## The flow
-
-```text
-task → scope-task → find-code → impact → edit → what-changed → review-changes → commit-and-push
+```mermaid
+flowchart TD
+    U["🧑 USER · “find callers of X / explain flow”"] --> S["SESSION START · hook injects the contract<br/>PreToolUse: grep/rg → pixel search-content"]
+    S --> L["🤖 LLM agent<br/>decides WHAT to find, not HOW"]
+    L --> P["PIXEL CLI · deterministic, ~ms<br/>pixel search-content -F “ident”<br/>pixel find-code “concept”<br/>pixel find-symbol “name”<br/>pixel who-calls uid<br/>pixel pack-context uid<br/>pixel dig-history --phrase “…”"]
+    P --> E{"epistemics?"}
+    E -->|complete| A["cite and answer"]
+    E -->|capped| N["narrow the query"] --> P
+    E -->|unresolved| M["pixel search-meaning"]
+    M --> A
+    A --> F["stderr · 🟩 round-trips · tokens saved"]
+    classDef llm fill:#ffe3e3,stroke:#d64545,color:#8a1f1f
+    classDef det fill:#e6f4ea,stroke:#2ea043,color:#14522a
+    class L,M llm
+    class S,P det
 ```
+
+**Implement a feature** — "implement feature":
+
+```mermaid
+flowchart TD
+    U["🧑 USER · “implement feature”"] --> P0["0 · SCOPE, before edits<br/>pixel scope-task “task”<br/>pixel plan “task”"]
+    P0 --> P1["1 · KNOW BEFORE YOU TOUCH<br/>pixel impact “symbol”<br/>pixel what-changed"]
+    P1 --> C["🤖 pixel classify “which model + effort for this task?”"]
+    C --> P2["2 · EDIT LOOP · your tools, typecheck, test"]
+    P2 -->|broke it| RB["pixel plan-rollback “problem”"] --> P2
+    P2 -->|green| C2["🤖 pixel classify “should I rebuild?”"]
+    C2 -->|yes| RD[“rebuild, then continue”] --> P3
+    C2 -->|no| P3[“3 · REVIEW<br/>pixel review-changes<br/>pixel repo-state”]
+    P3 --> G0[“pixel review-gate”]
+    G0 -->|findings| FX[“fix them”] --> G0
+    G0 -->|clean| P4[“4 · COMMIT, when asked<br/>pixel commit --files a.ts --files b.ts -m “msg” --request-id “id”<br/>pixel commit-and-push --files f -m “msg” origin branch --request-id “id””]
+    G0 -->|clean, not asked| X[“stop — never commit unprompted”]
+    P4 --> P5["5 · CLEANUP and BRANCHES<br/>pixel scope-task --clear<br/>pixel new-branch “name” --request-id “id”<br/>pixel fetch origin<br/>pixel sync-branch<br/>pixel fast-forward --expected-head head --target-oid oid --request-id “id”"]
+    P5 --> F["stderr · 🟩 round-trips · tokens saved"]
+    classDef llm fill:#ffe3e3,stroke:#d64545,color:#8a1f1f
+    classDef cls fill:#ffe8cc,stroke:#e8590c,color:#8a3e10
+    classDef det fill:#e6f4ea,stroke:#2ea043,color:#14522a
+    classDef stop fill:#fff3cd,stroke:#b8860b,color:#6b4e00
+    class P2,FX llm
+    class C,C2 cls
+    class P0,P1,P3,P4,P5,RB,RD,G0 det
+    class X stop
+```
+
+- Red is the LLM — reasoning, meaning, edits
+- Orange is `pixel classify` — a model system one like Jev
+- Green is Pixel-CLI — deterministic
 
 ## More
 
