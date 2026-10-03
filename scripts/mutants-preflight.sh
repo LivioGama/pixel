@@ -115,9 +115,11 @@ if [ "$mode" = --run ]; then
             exec cargo mutants -vV --no-shuffle --in-place --iterate --in-diff "$diff_file"
         fi
     ) || run_status=$?
-    if [ -n "$iterate" ] && [ -d "$worktree/mutants.out" ]; then
-        rm -rf "$persist/mutants.out"
-        cp -R "$worktree/mutants.out" "$persist/mutants.out"
+    if [ -n "$iterate" ]; then
+        if [ -d "$worktree/mutants.out" ]; then
+            rm -rf "$persist/mutants.out"
+            cp -R "$worktree/mutants.out" "$persist/mutants.out"
+        fi
     fi
     outcomes="$worktree/mutants.out/mutants.out"
     if [ -f "$outcomes" ]; then
