@@ -149,20 +149,34 @@ fn doctor_list_should_name_every_check_with_its_fix() {
 }
 
 /// After an upgrade the prompts `pixel install` deployed are the old
-/// release's, and agents keep reading them: every ordinary command names
-/// them in one stderr line, while `doctor`, which reports them itself, a
-/// home where nothing was ever deployed, and the `pixel-dev` side build stay
+/// release's, and agents keep reading them: every ordinary command of an
+/// installed `pixel` names them in one stderr line, while `doctor`, which
+/// reports them itself, a home where nothing was ever deployed, and the
+/// developer builds (`pixel-dev`, a binary run from `target/`, #549) stay
 /// quiet.
 #[test]
 fn a_stale_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
     let (home, repo) = fixture("stale-prompt");
-    let ordinary = || {
-        pixel_command()
+    let bin = home.join(".local/bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let install = |name: &str| {
+        let installed = bin.join(name);
+        std::fs::hard_link(env!("CARGO_BIN_EXE_pixel"), &installed)
+            .or_else(|_| std::fs::copy(env!("CARGO_BIN_EXE_pixel"), &installed).map(drop))
+            .unwrap();
+        installed
+    };
+    let run = |exe: &std::path::Path| {
+        std::process::Command::new(exe)
             .args(["action-log", "--limit", "1"])
+            .env("PIXEL_DAEMON_AUTO_START", "0")
             .env("HOME", &*home)
+            .current_dir(crate::support::neutral_cwd())
             .output()
             .unwrap()
     };
+    let installed = install("pixel");
+    let ordinary = || run(&installed);
     let never_installed = ordinary();
     assert!(never_installed.status.success(), "{never_installed:?}");
     let stderr = String::from_utf8_lossy(&never_installed.stderr).into_owned();
@@ -190,25 +204,23 @@ fn a_stale_deployed_prompt_is_named_by_ordinary_commands_but_not_by_doctor() {
         notes[0]
     );
 
-    // The same binary installed as the `pixel-dev` side build: the deployed
+    // The same binary as a developer build: installed as the `pixel-dev`
+    // side build, or run from cargo's `target/` as built. The deployed
     // prompts are the managed pixel's, and the `pixel install` the note
     // names would move every repository's hooks onto this build.
-    let bin = home.join(".local/bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let side_build = bin.join("pixel-dev");
-    std::fs::hard_link(env!("CARGO_BIN_EXE_pixel"), &side_build)
-        .or_else(|_| std::fs::copy(env!("CARGO_BIN_EXE_pixel"), &side_build).map(drop))
-        .unwrap();
-    let quiet = std::process::Command::new(&side_build)
-        .args(["action-log", "--limit", "1"])
-        .env("PIXEL_DAEMON_AUTO_START", "0")
-        .env("HOME", &*home)
-        .current_dir(crate::support::neutral_cwd())
-        .output()
-        .unwrap();
-    assert!(quiet.status.success(), "{quiet:?}");
-    let stderr = String::from_utf8_lossy(&quiet.stderr).into_owned();
-    assert!(!stderr.contains("pixel install"), "{stderr}");
+    for developer_build in [
+        install("pixel-dev"),
+        std::path::PathBuf::from(env!("CARGO_BIN_EXE_pixel")),
+    ] {
+        let quiet = run(&developer_build);
+        assert!(quiet.status.success(), "{quiet:?}");
+        let stderr = String::from_utf8_lossy(&quiet.stderr).into_owned();
+        assert!(
+            !stderr.contains("pixel install"),
+            "{}: {stderr}",
+            developer_build.display()
+        );
+    }
 
     let report = doctor(&home, &repo, &["--only", "install.agent-prompt"]);
     let stderr = String::from_utf8_lossy(&report.stderr).into_owned();

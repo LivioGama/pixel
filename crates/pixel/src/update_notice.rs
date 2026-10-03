@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{ManagedRoot, is_cargo_target_path};
+use crate::{ManagedRoot, is_developer_build};
 
 /// Seconds between two release checks, and between two notices.
 pub(crate) const CHECK_INTERVAL_SECS: u64 = 86_400;
@@ -165,12 +165,7 @@ fn shell_quote(text: &str) -> String {
 /// command; anything else gets `install.sh`, told where to write when the
 /// binary lives outside its default `~/.local/bin`.
 pub(crate) fn upgrade_hint(exe: &Path, roots: &[ManagedRoot], home: &Path) -> Option<String> {
-    if is_cargo_target_path(exe)
-        || exe.file_name()
-            == Some(std::ffi::OsStr::new(
-                pixel_install::config::PIXEL_DEV_EXECUTABLE,
-            ))
-    {
+    if is_developer_build(exe) {
         return None;
     }
     if let Some(owner) = roots.iter().find(|r| exe.starts_with(&r.root)) {
