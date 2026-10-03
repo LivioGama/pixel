@@ -1,0 +1,1 @@
+**graph:** Rust literal environment reads (`env::var`, `env::var_os`, `env!`, `option_env!`, also nested in another macro) are indexed as `env_read` concepts, the name only, so `find-code PIXEL_FLOW_DIR` lands on the reads with their owner; an all-caps query no longer stops at a lowercase same-letters function. `EXTRACTOR_VERSION` 12 rebuilds existing graphs. Task #521.

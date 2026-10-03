@@ -103,7 +103,9 @@ pub const EXTRACTOR_VERSION_KEY: &str = "extractor_version";
 ///    (`runner.x()` with `runner: &GitRunner`, `GitRunner::new(root).x()`)
 ///    records that type as its receiver, and a module-path receiver
 ///    (`signals::is_test_path`) resolves to that module's free function.
-pub const EXTRACTOR_VERSION: &str = "11";
+/// 12: Rust literal environment reads (`env::var("NAME")`, `env::var_os`,
+///    `env!`, `option_env!`) are stored as `env_read` concepts.
+pub const EXTRACTOR_VERSION: &str = "12";
 
 /// True iff the graph's rows were written by the current extractor.
 fn extractor_is_current(store: &GraphStore) -> Result<bool, BoxErr> {
