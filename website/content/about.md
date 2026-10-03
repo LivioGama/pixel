@@ -9,6 +9,8 @@ Two developers make Pixel, in the open, and use it every day to build Pixel itse
 
 ## The problem we kept paying for
 
+For Livio, it did not make sense to wait 15 seconds to watch an LLM do a commit and push. Tired of seeing models do archaeology in the Git history to retrieve trivial things, after building [usable-git](https://github.com/LivioGama/usable-git) and experimenting with the slowness of [GitNexus](/vs/gitnexus/), he decided to check what the next phone Google invented after the Google Nexus was — and that is how GitPixel was born. But, very quickly, the "git" particle did not make sense anymore, and this was the [just-Facebook moment](https://en.wikipedia.org/wiki/History_of_Facebook#TheFacebook).
+
 For Navid, it started at work, on a large monolith. The coding agents were good at the hard part and wasteful at everything before it. Ask one to change a method and it would open the whole model, then the whole controller, then the whole service it called, just to learn the names of things. The same files came back into the context session after session. We were paying for reading, not for reasoning.
 
 That was not the agent's fault. It had no way to ask "who calls this?" or "what is in this file?" without reading the file. Real codebases are like that, not like the tidy projects in the demos, and that is where the waste costs the most.
@@ -30,9 +32,13 @@ Pixel has two co-founders, who share the project as equals:
 
 {{% team %}}
 
-Livio started Pixel and gave it its shape. The first commit, on 29 August 2026, brought in the workspace it grew from. Navid brought the monolith problem above, taught Pixel to read Ruby and Rails, and has written most of the code since. We work on the same `main`, and today every change reaches it through a public pull request.
+Livio started Pixel and gave it its shape. The first commit, on 29 August 2026, brought in the workspace it grew from. Navid brought the monolith problem above and taught Pixel to read Ruby and Rails. We work on the same `main`, and today every change reaches it through a public pull request.
 
 Everyone else who has contributed code is on the repository's [contributors page](https://github.com/Pixel-CLI/pixel/graphs/contributors).
+
+## Funny fact
+
+Pixel has a `pixel-qa` bot that uses Pixel to fix pull requests efficiently: the bot runs the same retrieval and guarded Git writes you get, and closes the loop on its own PRs.
 
 ## Why you can trust it on your code
 

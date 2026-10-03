@@ -198,7 +198,7 @@
         <li><strong>Your past sessions too</strong><code>pixel recall</code> searches the agent sessions already on your disk. Nothing is uploaded.</li>
         <li><strong>No MCP server</strong>A command-line tool and hooks: the agent calls it from the shell it already has.</li>
         <li><strong>No hosted index</strong>The index lives in <code>.pixel/</code>, inside your repository.</li>
-        <li><strong>No LLM in the loop</strong>Answers come from the index, not a chat model. The one LLM feature, <code>pixel classify</code>, is off by default.</li>
+        <li><strong>No LLM between question and answer</strong>Your agent picks and runs the pixel command; the answer comes from the index, not a chat model. The one model-backed feature, <code>pixel classify</code>, is off by default and can run a local model.</li>
       </ul>
       <p class="toolbox__more" data-reveal><a class="link" href="{{ "docs/" | relURL }}#commands">All commands</a></p>
     </section>

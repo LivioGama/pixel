@@ -1,7 +1,7 @@
 # Manual Setup
 
 Prefer to control your own setup, or using an agent `pixel install` does not
-wire (Cursor, Gemini CLI, Copilot, ...)? You don't need `pixel install`.
+wire (Cursor, Copilot, ...)? You don't need `pixel install`.
 
 `pixel install` does these things, and you can do each of them by hand:
 

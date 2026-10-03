@@ -40,7 +40,7 @@ The same script. The second line is for the `install.sh` already published on th
     echo "${PIXEL_INSTALL_DIR:-$HOME/.local/bin}" >> "$GITHUB_PATH"
 ```
 
-An install that already came from Homebrew still updates with `brew update && brew upgrade LivioGama/tap/pixel`. New installs use the script.
+New installs use the script; re-running the same `curl … | sh` line updates an existing one. A binary managed by Homebrew or mise keeps being upgraded by its manager.
 
 To build from source, see [CONTRIBUTING.md](https://github.com/Pixel-CLI/pixel/blob/main/CONTRIBUTING.md).
 
@@ -63,7 +63,7 @@ The index, the code graph and the optional history data live in `.pixel/` at the
 
 Each agent's page under [For your agent](../for/) names the files, the check and the removal, including the agents `pixel install` leaves alone.
 
-`pixel uninstall` removes everything `pixel install` wrote, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: `brew uninstall LivioGama/tap/pixel`, or `mise uninstall pixel`.
+`pixel uninstall` removes everything `pixel install` wrote, and the binary at `~/.local/bin/pixel`, where the install script puts it. A package manager removes its own copy: uninstall with the manager that owns it (`mise uninstall pixel`, or the Homebrew equivalent).
 
 ### Per-repository guards
 
@@ -86,7 +86,6 @@ Upgrading replaces the binary only. The agent prompt and the per-agent config ke
 
 | Installed with | Upgrade the binary |
 | --- | --- |
-| Homebrew | `brew update && brew upgrade LivioGama/tap/pixel` |
 | mise | `mise upgrade pixel` |
 | `install.sh` | run the same `curl … \| sh` line again |
 | Source checkout | `pixel self-update` rebuilds and reinstalls the running binary |
@@ -110,9 +109,8 @@ Each agent CLI below can load Pixel's protocol through its own plugin mechanism,
 | Codex | `codex plugin marketplace add Pixel-CLI/pixel`, then `codex plugin add pixel@pixel` |
 | Copilot CLI | `copilot plugin marketplace add Pixel-CLI/pixel`, then `copilot plugin install pixel@pixel` |
 | Devin | add `github.com/Pixel-CLI/pixel` as a Devin plugin |
-| Gemini CLI | `gemini extensions install https://github.com/Pixel-CLI/pixel` |
 | Pi | `pi install git:github.com/Pixel-CLI/pixel` |
-| Cursor, Windsurf, Kiro, Cline, Qoder | rules ship under `.cursor/rules/`, `.windsurf/rules/`, `.kiro/steering/`, `.clinerules/` and `.qoder/rules/`: copy them into your project |
+| Cursor, Kiro, Cline, Qoder | rules ship under `.cursor/rules/`, `.kiro/steering/`, `.clinerules/` and `.qoder/rules/`: copy them into your project |
 
 OpenCode has no Pixel plugin package published yet, so it is not in the table: `pixel install` puts the protocol in its global `AGENTS.md` instead ([Pixel for OpenCode](../for/opencode/)).
 
