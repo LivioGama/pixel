@@ -11,9 +11,11 @@ merge-base with the remote default on a clean one) and lists findings as
 
 Before every `git push` of a feature branch, in this order:
 
-1. `git fetch origin && git rebase origin/<default>` — the remote default is
-   fetched first; never review or push against a stale base. Resolve
-   conflicts hunk by hunk; the rebase finishes before the review runs.
+1. `git fetch origin && git rebase origin/<default>` — fetch the actual PR
+   base first (`origin/main` for main-targeted work; the immediate base for a
+   stack), then use that fetched ref for validation and diffing. Never review
+   or push against a stale local `main` or tracking ref. Resolve conflicts
+   hunk by hunk; the rebase finishes before the review runs.
 2. `pixel review-gate .` — read every finding.
 3. Fix each `BLOCKER` and `CONCERN` (the finding's `fix:` line names the
    move). `SUGGESTION` and `NIT` items are judgement calls — fix the cheap

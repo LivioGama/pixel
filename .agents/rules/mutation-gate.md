@@ -6,8 +6,9 @@ paths:
 # Code That Passes the Mutation Gate on the First Run
 
 Loaded when a Rust source file is in play. The gate is `cargo mutants --in-diff`,
-run by the CI `Mutants` job (90-minute limit) on every PR; it is not run
-locally, so the code must come out clean on the first CI pass.
+run first by the remote pre-push campaign and again by the CI `Mutants` job
+(90-minute limit) on every PR; it is not run on the laptop, so the code must
+come out clean before a push and remain clean in CI.
 
 For every function with a line in the diff, the gate generates the
 mutants that sit on the changed lines (operators, match arms, guards) plus
@@ -18,8 +19,8 @@ the exposure before pushing, in seconds and without building:
 `git diff <base>...HEAD > target/pr.diff && cargo mutants --list --in-diff
 target/pr.diff` (a file, not `<(…)`: fish has no process substitution),
 then read it line by line: every listed mutant names the test that fails
-under it, or gets one before the push: each failed CI run is a
-5-to-10-minute round trip, and 42 of 121 failed from 2026-09-21 to 26. Two
+under it, or gets one before the push: each failed remote or CI run costs a
+round trip, and 42 of 121 failed from 2026-09-21 to 26. Two
 settings in `.cargo/mutants.toml` shape the answer: `test_workspace = false` runs only
 the mutated crate's tests (a CLI contract test never kills a library
 mutant), and `crates/*/build.rs` is excluded: cargo build scripts only, so
@@ -76,9 +77,9 @@ first `cargo mutants` run come back clean:
   --batch-check <object>` that git rejects, so every blob measured 0 bytes),
   fix the bug in its own PR with a `changelog.d/` fragment, below the PR that
   found it. Do not bend the test to the broken behaviour.
-- **Fix from the CI report, verify locally only per function.** Read the
-  `MISSED`/`TIMEOUT` lines (the `Mutants in diff` summary gathers every
-  shard's), write the test, and if asked to
+- **Fix from the remote or CI report, verify locally only per function.** Read
+  the `MISSED`/`TIMEOUT` lines (the remote gate reports them before a blocked
+  push; `Mutants in diff` gathers every CI shard's), write the test, and if asked to
   check before pushing run `cargo mutants --in-diff <diff> -F <function>`
   (minutes). Never the full in-diff run: it is the job's work. Never edit
   the tree while a run is in flight: it mutates files in place. After a

@@ -10,12 +10,13 @@ Always loaded: how to run the long gates without losing an afternoon.
   command, complete log and exit status. A previous pass never covers a
   subsequent behavior change. Keep Cargo builds sequential per build
   directory and do not clean output used by a running gate.
-- **Mutants run in CI, not on the laptop.** The `Mutants` workflow is the
-  gate; the local machine is for writing code. A 231-mutant campaign held a
-  laptop's tree for two hours (`--in-place` forbids edits meanwhile) for
-  24 survivors that sat in six functions, all readable from the job log.
+- **Mutants run remotely, not on the laptop.** Before a Rust push, the tracked
+  hook sends the committed candidate to the gate host and blocks on its
+  verdict; CI repeats that verdict as the merge gate. A 231-mutant campaign
+  held a laptop's tree for two hours (`--in-place` forbids edits meanwhile)
+  for 24 survivors that sat in six functions, all readable from the report.
   Only when explicitly asked, run `cargo mutants --in-diff <diff> -F '<fn>'`
-  on the one or two functions in question (minutes) and never the full diff.
+  on one or two functions (minutes), never the full diff.
 - **Measure before you launch anything.** `cargo mutants --list --in-diff
   <diff> | wc -l` gives the mutant count; CI costs about 25 s per `pixel-cli`
   mutant after a 3 min baseline and 10 to 15 s per library-crate mutant.
