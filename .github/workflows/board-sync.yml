@@ -24,7 +24,11 @@ concurrency:
 
 jobs:
   sync:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # The metadata-only a2 runner: this job never checks out the PR's code
+    # (one gh api call against the project), so pull_request_target on a
+    # self-hosted runner stays safe, and a lifecycle event costs no
+    # Blacksmith minutes.
+    runs-on: a2
     steps:
       - name: Sync project 3 status with the PR lifecycle
         env:
