@@ -43,6 +43,7 @@ fn completion_requires_actual_current_receipts_and_review() {
         .unwrap();
     assert!(!store.decision(&task.task_id, Gate::Finish).unwrap().allowed);
     let task = store.verify(&task.task_id, &[], "verify").unwrap();
+    assert_eq!(task.phase, Phase::Reviewing);
     assert_eq!(task.receipts.len(), 1);
     assert_eq!(
         task.receipts[0].outcome,
