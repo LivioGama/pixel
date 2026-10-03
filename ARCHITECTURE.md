@@ -78,7 +78,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel search-like-rg` | Native-output literal file search for automatic routing; unsupported inputs execute the original rg/grep command without modification |
 | `pixel run-recipe` | Compile and execute one bounded deterministic retrieval recipe |
 | `pixel search-meaning` | Semantic code search: embed a natural-language question ("how is authentication handled?") and rank files by fusing semantic and BM25 lexical ranks over symbol chunks (tree-sitter symbols with their doc comments, windows for unparsed files); tests, configuration/data and docs are weighted below code unless the question names them. |
-| `pixel scope-task` | Sniper target list: task description in, closed prioritized file list out (P0 = start here, P1 = likely, P2 = droppable). |
+| `pixel scope-task` | Sniper target list: task description in, closed prioritized file list out (P0 = start here, P1 = likely, P2 = droppable). `--read-only` instead returns a typed deterministic fact envelope only from a compatible running daemon; it never starts a daemon, builds/refreshes indexes, or writes the targets manifest. |
 | `pixel plan-rollback` | Surgical revert planner: locate the files a problem points at, list recent versions with the likely-breaking commit flagged, recommend a last-known-good candidate. |
 | `pixel ai-cli-readify` | Provider readiness for the four agent CLIs (Codex, Claude Code, Antigravity, Devin): probe Ollama Cloud, then probe each agent in its own lane, reporting an agent blocked when the provider did not answer; `--apply` points the agents' configs at the provider that answered; `--approve --workspace <dir>` clears the named folder's startup gate through Codex's own `config/batchWrite` RPC and Claude's `~/.claude.json`. |
 | `pixel find-symbol` | Look up symbols by name in the code graph |
@@ -167,7 +167,12 @@ Per repository, under `.pixel/` (git-ignored):
 | `config.yaml` (legacy `config.json`) | CLI `config` | Repository-level settings over `~/.pixel/config.yaml` (`pixel config edit --repo`). |
 | `pi-policy.jsonl` | Pi extension (`pi-pixel.ts`) | The Pi harness's policy decisions ([docs/pi-harness.md](docs/pi-harness.md)). |
 
-The prompt-submit hook emits a `[PIXEL:TASK_BOUNDARY]` notice and reads
+The prompt-submit hook emits a `[PIXEL:TASK_CONTEXT]` fact packet only when a
+compatible warm daemon can serve fresh `targets_facts`; the packet is bounded,
+declares its snapshot identity, and is omitted rather than partially rendered
+on timeout or unavailable/stale facts. It is evidence and candidate entry
+points, never an action recommendation or a read/edit boundary. The hook also
+emits a `[PIXEL:TASK_BOUNDARY]` notice and reads
 `.pixel/actions.jsonl`, then `~/.pixel/actions.jsonl`, to spot a task that
 just ended. On Claude Code it also writes the task-runtime packet above. It
 never rejects a prompt: every failure path exits 0 and the prompt proceeds.

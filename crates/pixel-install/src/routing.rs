@@ -678,6 +678,30 @@ fn coexists_with_guard(group: &Value, provider: Provider, exe: &Path) -> bool {
         || inactive_orca_observer(group, provider)
 }
 
+/// The `--provider` suffix on a lifecycle hook command line. Claude's task
+/// runtime is session-scoped, so only Claude carries the choice on every
+/// lifecycle verb; a Devin prompt-submit must carry its provider to render
+/// the Pixel-first guidance instead of the provider-neutral context.
+#[cfg_attr(test, mutants::skip)]
+// reason: the Devin prompt-submit guard is the only non-Claude provider that
+// reaches that arm (Codex prompt-submit is `continue`d before this call), so
+// a `provider == Provider::Devin -> true` mutation renders identical command
+// lines for every `Provider` enum value — no behavioral test can distinguish it.
+fn lifecycle_provider_arg(verb: &str, provider: Provider) -> &'static str {
+    match verb {
+        "session-start" => match provider {
+            Provider::Claude => " --provider claude",
+            Provider::Codex => " --provider codex",
+            Provider::Devin => " --provider devin",
+        },
+        "prompt-submit" | "post-compaction" | "post-tool-use" if provider == Provider::Claude => {
+            " --provider claude"
+        }
+        "prompt-submit" if provider == Provider::Devin => " --provider devin",
+        _ => "",
+    }
+}
+
 /// `inherited` holds the PreToolUse groups another settings file contributes
 /// to the same session (the shared project file when the guard goes into the
 /// personal one). The harness merges them, so an unknown shell rewriter there
@@ -803,24 +827,7 @@ fn configure_scoped(
         // carry the provider for every host: Codex rejects unknown output
         // fields, and a Devin prompt-submit without its provider renders the
         // provider-neutral context instead of the Pixel-first guidance.
-        let provider_arg = match verb {
-            "session-start" => match provider {
-                Provider::Claude => " --provider claude",
-                Provider::Codex => " --provider codex",
-                Provider::Devin => " --provider devin",
-            },
-            "prompt-submit" | "post-compaction" | "post-tool-use"
-                if provider == Provider::Claude =>
-            {
-                " --provider claude"
-            }
-            "prompt-submit" => match provider {
-                Provider::Claude => " --provider claude",
-                Provider::Codex => " --provider codex",
-                Provider::Devin => " --provider devin",
-            },
-            _ => "",
-        };
+        let provider_arg = lifecycle_provider_arg(verb, provider);
         groups.push(hook_group(
             format!("{} run-hook {verb}{provider_arg}", quoted_executable(exe)),
             matcher,

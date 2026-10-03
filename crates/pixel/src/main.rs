@@ -76,7 +76,9 @@ use pixel_daemon::daemon;
 use pixel_index::index::{build, shard_path};
 use pixel_index::shard::Shard;
 use pixel_index::{Crc32Weigher, GramExtractor, SparseGramExtractor, TrigramExtractor};
-use pixel_proto::{QueryKind, QueryStatus, compile_query};
+use pixel_proto::{
+    QueryKind, QueryStatus, TargetsFactsResult, TargetsFactsUnavailableReason, compile_query,
+};
 use serde_json::{Value, json};
 
 /// `pixel --version` (long form): the crate version plus where the binary
@@ -324,6 +326,11 @@ enum Command {
         /// Skip writing the enforcement manifest.
         #[arg(long)]
         no_manifest: bool,
+        /// Serve only already-published deterministic facts from a compatible
+        /// running daemon. Never starts a daemon or builds/refreshes indexes.
+        /// This mode never writes a targets manifest.
+        #[arg(long)]
+        read_only: bool,
         /// Deactivate scoping: delete .pixel/targets.json and exit.
         #[arg(long)]
         clear: bool,
@@ -2128,6 +2135,31 @@ fn execute(path: &Path, req: Request, no_daemon: bool) -> Result<Value, String> 
     });
     serve_trace::record(step);
     unwrap_response(resp.map_err(|e| e.to_string())?)
+}
+
+/// Read-only fact retrieval intentionally has no in-process or autostart
+/// fallback. A missing or incompatible daemon is data for the caller, never a
+/// reason to create an index as a side effect of a fact query.
+#[cfg_attr(test, mutants::skip)] // the `!= DaemonProbe::Current` branch is only observable when a live daemon answers Ping; unit tests have none, and their absent-daemon path funnels identically through `unavailable`, so this preference check cannot be distinguished in-process
+fn execute_targets_facts_read_only(
+    path: &Path,
+    task: String,
+    limit: Option<usize>,
+) -> Result<Value, String> {
+    let root = discover_root(path)?;
+    let unavailable = || {
+        serde_json::to_value(TargetsFactsResult::Unavailable {
+            reason: TargetsFactsUnavailableReason::DaemonUnavailable,
+        })
+        .map_err(|error| error.to_string())
+    };
+    if probe_daemon(&root) != DaemonProbe::Current {
+        return unavailable();
+    }
+    match send_to_daemon(&root, &Request::TargetsFacts { task, limit }) {
+        DaemonRoute::Served(response) => unwrap_response(*response).or_else(|_| unavailable()),
+        DaemonRoute::Absent | DaemonRoute::Declined => unavailable(),
+    }
 }
 
 fn unwrap_response(resp: Response) -> Result<Value, String> {
@@ -4923,6 +4955,7 @@ fn run_command(
             json,
             limit,
             no_manifest,
+            read_only,
             clear,
             max_tier,
             precision,
@@ -4966,22 +4999,33 @@ fn run_command(
             let manifest_path = root
                 .join(pixel_index::index::SHARD_DIR)
                 .join("targets.json");
-            let data = execute(
-                &path,
-                Request::Targets {
-                    task: task.clone(),
-                    limit,
-                    max_tier: max_tier.clone(),
-                    precision,
-                },
-                false,
-            )?;
-            let active_tasks = if no_manifest {
+            if read_only && (max_tier.is_some() || precision) {
+                return Err("--read-only does not support --max-tier or --precision".to_string());
+            }
+            let data = if read_only {
+                execute_targets_facts_read_only(&path, task.clone(), limit)?
+            } else {
+                execute(
+                    &path,
+                    Request::Targets {
+                        task: task.clone(),
+                        limit,
+                        max_tier: max_tier.clone(),
+                        precision,
+                    },
+                    false,
+                )?
+            };
+            let active_tasks = if no_manifest || read_only {
                 None
             } else {
                 Some(write_targets_manifest(&manifest_path, &task, &data)?)
             };
-            finish_graph_cmd(data, json, pretty_targets)?;
+            if read_only {
+                print_data(&data, true)?;
+            } else {
+                finish_graph_cmd(data, json, pretty_targets)?;
+            }
             if let Some(active) = active_tasks {
                 eprintln!(
                     "targets manifest active: {} ({active} task(s)) — scoping enforced; run `pixel scope-task --clear` when the task ends",
@@ -7890,6 +7934,112 @@ mod tests {
         drop(pixel_facts::FactsStore::open(root).unwrap());
         let block = facts_status(root).expect("present once built");
         assert_eq!(block["commits_indexed"], 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_only_targets_refuse_an_absent_daemon_without_creating_an_index() {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-targets-facts-read-only-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.as_path();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let data = execute_targets_facts_read_only(root, "change login".into(), Some(8)).unwrap();
+
+        assert_eq!(data["status"], "unavailable");
+        assert_eq!(data["reason"], "daemon_unavailable");
+        assert!(
+            !root.join(".pixel").exists(),
+            "a read-only fact query must not create index state"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `--read-only` is a pure facts protocol; it takes none of the scoping
+    /// tuning flags and must refuse each of them before any daemon/index
+    /// work. Regression for the `&&` twin of the `max_tier || precision`
+    /// guard: an `--read-only --max-tier P0` call must error, not silently
+    /// proceed and drop the tunings.
+    #[test]
+    fn read_only_scope_task_rejects_tuning_flags() {
+        let logger = pixel_actionlog::ActionLog::noop();
+        let owned_exit = std::cell::Cell::new(None);
+        // Isolated git repo: no pre-existing `.pixel/targets.json`, and the
+        // read-only pass-through path (no tuning flags) must not create one.
+        let dir =
+            std::env::temp_dir().join(format!("pixel-read-only-tunings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = dir.as_path();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let base = || Command::ScopeTask {
+            task: Some("a task".into()),
+            path: root.to_path_buf(),
+            json: false,
+            limit: None,
+            no_manifest: false,
+            read_only: true,
+            clear: false,
+            max_tier: None,
+            precision: false,
+        };
+
+        let reject = |read_only: bool, max_tier: Option<&str>, precision: bool| {
+            let mut cmd = base();
+            match &mut cmd {
+                Command::ScopeTask {
+                    read_only: ro,
+                    max_tier: mt,
+                    precision: p,
+                    ..
+                } => {
+                    *ro = read_only;
+                    *mt = max_tier.map(str::to_string);
+                    *p = precision;
+                }
+                _ => unreachable!(),
+            }
+            run_command(cmd, &logger, &owned_exit).err()
+        };
+
+        assert_eq!(
+            reject(true, Some("P0"), false).as_deref(),
+            Some("--read-only does not support --max-tier or --precision")
+        );
+        assert_eq!(
+            reject(true, None, true).as_deref(),
+            Some("--read-only does not support --max-tier or --precision")
+        );
+        // With neither tuning flag a read-only scope-task passes the guard
+        // and still never writes an enforcement manifest (read-only arm of
+        // `no_manifest || read_only`).
+        assert!(reject(true, None, false).is_none());
+        assert!(
+            !root
+                .join(pixel_index::index::SHARD_DIR)
+                .join("targets.json")
+                .exists(),
+            "a read-only scope-task must never write a targets manifest"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
