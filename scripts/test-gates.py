@@ -42,6 +42,11 @@ class GatesContract(unittest.TestCase):
                 f"open(os.environ['CONTRACT_LOG'], 'a').write('{name}\\n')\n"
                 "sys.exit(int(os.environ.get('FAIL_CONTRACT', '0')))\n"
             )
+        (self.repo / "scripts" / "test-pre-push.sh").write_text(
+            "#!/bin/sh\n"
+            "printf '%s\\n' test-pre-push.sh >> \"$CONTRACT_LOG\"\n"
+            "exit \"${FAIL_CONTRACT:-0}\"\n"
+        )
         (self.repo / "src").mkdir()
         (self.repo / "src/lib.rs").write_text("pub fn a() {}\n")
         (self.repo / "README.md").write_text("readme\n")
@@ -128,9 +133,9 @@ class GatesContract(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
             self.contracts(),
-            ["test-prepare.py", "test-gates.py", "test-mutants-config.py",
-             "test-mutants-gate-host.sh", "test-clean.py",
-             "test-harness-recorder.py"],
+            ["test-prepare.py", "test-gates.py", "test-pre-push.sh",
+             "test-mutants-config.py", "test-mutants-gate-host.sh",
+             "test-clean.py", "test-harness-recorder.py"],
         )
         self.assertEqual(self.invocations(), [])
 

@@ -615,8 +615,9 @@ suppression. Chat relay remains a host-supported, separately verifiable boundary
     (`.config/nextest.toml`: one process per test, retry once but fail on
     flaky, kill after 180 s), `cargo test --doc`, a check that the tests left
     the checkout's `.pixel/actions.jsonl` alone, the `scripts/test-*.py`
-    contract scripts (installer, gate runner, mutation pre-push and remote
-    host, release prepare, Homebrew formula and Linux bottles, homebrew-core formula,
+    contract scripts (installer, gate runner, pre-push baseline, mutation
+    pre-push and remote host, release prepare, Homebrew formula and Linux
+    bottles, homebrew-core formula,
     nightly mutants, mutants
     config, action pins, clean), the
     pixel-retro lead-time contract (`.agents/skills/pixel-retro/test_lead_time.py`)

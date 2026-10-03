@@ -101,6 +101,7 @@ step() {
 # pull request went red twice on gates no local run could reach.
 step "release prepare contract" python3 scripts/test-prepare.py
 step "gate runner contract" python3 scripts/test-gates.py
+step "pre-push contract" sh scripts/test-pre-push.sh
 step "mutants config contract" python3 scripts/test-mutants-config.py
 step "mutants gate host contract" sh scripts/test-mutants-gate-host.sh
 step "clean contract" python3 scripts/test-clean.py

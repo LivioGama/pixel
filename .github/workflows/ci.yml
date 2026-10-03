@@ -351,6 +351,10 @@ jobs:
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: python3 scripts/test-gates.py
 
+      - name: Pre-push contract (stub cargo, disposable repo)
+        if: ${{ needs.changes.outputs.scripts == 'true' }}
+        run: sh scripts/test-pre-push.sh
+
       - name: Mutation exposure pre-push contract (stub cargo, disposable repo)
         if: ${{ needs.changes.outputs.scripts == 'true' }}
         run: sh scripts/test-mutants-preflight.sh

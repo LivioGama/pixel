@@ -142,9 +142,13 @@ finding locally, scope the run to the function:
 git diff main...HEAD > target/pr.diff && cargo mutants --in-diff target/pr.diff -F '<function name>'
 ```
 
-The tracked pre-push hook runs `scripts/mutants-remote-gate.sh` before each
-Rust branch update. Nothing mutant-related compiles or runs locally: the hook
-bundles the committed three-dot diff and its exact base commit to the gate host (`PIXEL_MUTANTS_GATE_HOST`,
+The tracked pre-push hook fetches the current base before each Rust branch
+update, verifies the branch is rebased on it, and runs `cargo check
+--all-targets` when Rust source changed. A failed compile is therefore fixed
+before the remote mutation campaign can report an unjudged baseline. Nothing
+mutant-related compiles or runs locally: the hook then
+bundles the committed three-dot diff and its exact base commit to the gate
+host (`PIXEL_MUTANTS_GATE_HOST`,
 default the ssh alias `a2`), which checks it out and executes the same campaign
 CI's shards run — `scripts/mutants-preflight.sh --run` — against a warm
 `target/`, seeded with the traveling outcome cache (`target/mutants-preflight/`,
@@ -485,7 +489,8 @@ gates under "Gates (run before every PR)".
 | Stage | Checks | Completion condition |
 | --- | --- | --- |
 | Editing | Tests for the changed contract and affected consumers; crate-scoped compilation/Clippy as needed | The behavior is covered, including relevant failure paths |
-| Unit ready | Full local format, Clippy, workspace tests and doctests; dependency policy when its inputs change; mutant listing and review | Local gates pass on the final tree, and each prospective mutant has a killing test or a justified skip |
+| Unit ready | Full local format, Clippy, workspace tests and doctests; dependency policy when its inputs change; mutant listing and review | Local gates pass on a frozen candidate, and each prospective mutant has a killing test or a justified skip |
+| Push | Fetch/rebase, `pixel review-gate`, then the hook's all-target baseline compile and remote mutation campaign for Rust | The exact candidate and current base pass before the update reaches GitHub |
 | PR | Existing CI tests, lint, feature lanes, MSRV, cross-build and mutants as selected by their path filters; CodeRabbit review | Current-head workflows complete successfully, mutation counts have a valid verdict, and review findings are answered |
 
 Use `scripts/gates.sh` for the full local run. It skips Cargo when its path
