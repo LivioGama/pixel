@@ -1,0 +1,217 @@
+//! `run-recipe --kind locate`: one call that resolves a phrase, shows the
+//! context of what it singles out, lists the test files among the callers,
+//! and says how far the answer gets, the same through the daemon and in
+//! process.
+
+use std::path::Path;
+
+use serde_json::Value;
+
+use crate::support::{Scratch, git, pixel_command};
+
+fn fixture(tag: &str) -> Scratch {
+    let dir = Scratch::for_test("pixel-locate-cli", tag);
+    std::fs::create_dir_all(dir.join("src")).unwrap();
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    let files = [
+        (
+            "src/flow.ts",
+            "export function flowDir(): string {\n  return process.env.FLOW_DIR ?? \"\"\n}\n",
+        ),
+        (
+            "src/render.ts",
+            "export function render(x: number): number {\n  return x + 1\n}\n",
+        ),
+        (
+            "src/other.ts",
+            "export function render(x: number): number {\n  return x + 2\n}\n",
+        ),
+        (
+            "tests/flow.test.ts",
+            "import { flowDir } from '../src/flow'\nexport function checkFlow(): string {\n  return flowDir()\n}\n",
+        ),
+    ];
+    for (path, content) in files {
+        std::fs::write(dir.join(path), content).unwrap();
+    }
+    git(&dir, &["init", "-q"]);
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-qm", "init"]);
+    dir
+}
+
+fn locate(root: &Path, phrase: &str, budget: &str, extra: &[&str]) -> Value {
+    let out = pixel_command()
+        .args([
+            "run-recipe",
+            phrase,
+            "--kind",
+            "locate",
+            "--json",
+            "--budget",
+            budget,
+        ])
+        .arg("--path")
+        .arg(root)
+        .args(extra)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "run-recipe: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn locate_should_show_one_exact_symbol_with_its_test_files_in_one_call() {
+    let root = fixture("located");
+    let answer = locate(&root, "where is `flowDir`", "1500", &["--no-daemon"]);
+    let locate = &answer["locate"];
+    assert_eq!(locate["status"], "located", "{answer}");
+    assert_eq!(locate["targets"][0]["uid"], "src/flow.ts#flowDir#function");
+    assert!(
+        locate["targets"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("return process.env.FLOW_DIR"),
+        "{answer}"
+    );
+    assert_eq!(
+        locate["tests_found"],
+        serde_json::json!(["tests/flow.test.ts"])
+    );
+    assert!(locate["next_action"].is_null(), "{answer}");
+    assert_eq!(answer["result"]["plan"][0]["recipe"], "locate.v2");
+    // resolve, context, callers: one round trip each, no subprocess.
+    assert_eq!(answer["metrics"]["operations"], 3);
+    let rendered = answer["metrics"]["rendered_tokens_estimate"]
+        .as_u64()
+        .unwrap();
+    assert!(rendered <= 1500, "{rendered} over budget");
+}
+
+#[test]
+fn locate_should_give_the_same_answer_through_the_daemon_and_in_process() {
+    let root = fixture("parity");
+    let in_process = locate(&root, "where is `flowDir`", "1500", &["--no-daemon"]);
+    let start = pixel_command()
+        .args(["daemon", "start"])
+        .arg(&*root)
+        .output()
+        .unwrap();
+    assert!(start.status.success(), "{start:?}");
+    let through_daemon = locate(&root, "where is `flowDir`", "1500", &[]);
+    let stop = pixel_command()
+        .args(["daemon", "stop"])
+        .arg(&*root)
+        .output()
+        .unwrap();
+    assert!(stop.status.success(), "{stop:?}");
+    assert_eq!(through_daemon["locate"], in_process["locate"]);
+}
+
+#[test]
+fn locate_should_call_homonyms_ambiguous_and_name_how_to_pick_one() {
+    let root = fixture("ambiguous");
+    let answer = locate(&root, "where is `render`", "1500", &["--no-daemon"]);
+    let locate = &answer["locate"];
+    assert_eq!(locate["status"], "ambiguous", "{answer}");
+    let mut uids: Vec<&str> = locate["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["uid"].as_str())
+        .collect();
+    uids.sort_unstable();
+    assert_eq!(
+        uids,
+        [
+            "src/other.ts#render#function",
+            "src/render.ts#render#function"
+        ]
+    );
+    assert!(
+        locate["next_action"]
+            .as_str()
+            .unwrap()
+            .starts_with("pick the intended candidate by uid, e.g. pixel pack-context 'src/"),
+        "{answer}"
+    );
+}
+
+#[test]
+fn locate_should_send_a_miss_to_an_exact_search() {
+    let root = fixture("miss");
+    let answer = locate(&root, "where is `zzqxMissing`", "1500", &["--no-daemon"]);
+    let locate = &answer["locate"];
+    assert_eq!(locate["status"], "needs_search", "{answer}");
+    assert_eq!(
+        locate["next_action"],
+        "pixel search-content -F 'zzqxMissing'"
+    );
+    assert_eq!(locate["targets"], serde_json::json!([]));
+}
+
+#[test]
+fn locate_should_ask_each_homonym_by_uid_when_their_list_does_not_fit() {
+    let root = fixture("by-uid");
+    // Shares of 240 and 60 tokens: the two-candidate list needs about 110,
+    // one symbol's context fits.
+    let answer = locate(&root, "where is `render`", "400", &["--no-daemon"]);
+    let mut uids: Vec<&str> = answer["locate"]["targets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|t| t["uid"].as_str())
+        .collect();
+    uids.sort_unstable();
+    assert_eq!(
+        uids,
+        [
+            "src/other.ts#render#function",
+            "src/render.ts#render#function"
+        ],
+        "{answer}"
+    );
+}
+
+#[test]
+fn locate_should_say_what_a_small_budget_cost_it() {
+    let root = fixture("budget");
+    let answer = locate(&root, "where is `render`", "120", &["--no-daemon"]);
+    let rendered = answer["metrics"]["rendered_tokens_estimate"]
+        .as_u64()
+        .unwrap();
+    let limits = answer["locate"]["limits"].to_string();
+    assert!(
+        limits.contains("unavailable") || limits.contains("dropped to fit the budget"),
+        "a 120-token answer cannot hold two contexts silently: {answer}"
+    );
+    assert!(
+        rendered <= 120 || limits.contains("exceeds the budget by about"),
+        "an answer over its budget says so: {answer}"
+    );
+}
+
+#[test]
+fn locate_text_should_lead_with_the_status() {
+    let root = fixture("text");
+    let out = pixel_command()
+        .args([
+            "run-recipe",
+            "where is `flowDir`",
+            "--kind",
+            "locate",
+            "--no-daemon",
+        ])
+        .arg("--path")
+        .arg(&*root)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.starts_with("locate: located — `flowDir`\n"), "{text}");
+    assert!(text.contains("tests found: tests/flow.test.ts ("), "{text}");
+}

@@ -258,7 +258,11 @@ agree).
 ## Request path from the CLI
 
 1. `main.rs` parses argv with clap. Commands that need the repository call
-   `execute(path, Op, no_daemon)`.
+   `execute(path, Op, no_daemon)`. A command may compose several ops:
+   `run-recipe --kind locate` calls `execute` once per op (resolve, a context
+   per target, callers, file targets on a miss), never a CLI subprocess, so
+   the daemon and in-process paths give the same answer; it compares the
+   responses' snapshots and states a mismatch as a limit.
 2. `execute` discovers the repo root, then tries the daemon: connect to the
    socket, ping (5 s timeout), and send the op. If no daemon answers, or one
    answers on an older `PROTOCOL_VERSION` (it is shut down first), it spawns

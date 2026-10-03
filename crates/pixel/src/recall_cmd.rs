@@ -434,7 +434,7 @@ fn print_daemon_result(data: &serde_json::Value, json: bool) {
 }
 
 /// Same convention as pixel-context::estimate_tokens (len/4, ceil).
-fn estimate_tokens(text: &str) -> usize {
+pub(crate) fn estimate_tokens(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 

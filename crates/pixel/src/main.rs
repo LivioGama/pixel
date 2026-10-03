@@ -8112,6 +8112,9 @@ fn run_query(
         let output = serde_json::to_value(&result).map_err(|error| error.to_string())?;
         return print_data(&output, true);
     }
+    if result.plan[0].recipe == "locate.v2" {
+        return run_locate(result, &path, budget, json_output, no_daemon);
+    }
     let operation = result.plan[0].operations[0].as_str();
     let evidence = match operation {
         "resolve" => {
@@ -8172,6 +8175,295 @@ fn run_query(
         "epistemics": {"closed_world": false, "lower_bound": true, "basis": "compiled bounded recipe"}
     });
     print_data(&output, json_output)
+}
+
+/// At most this many symbols get their context in a locate answer.
+const LOCATE_MAX_TARGETS: usize = 3;
+
+/// What every locate answer says about the test files it lists.
+const LOCATE_TESTS_NOTE: &str = "test files among the callers at depth 1; Rust #[test] \
+     functions are not indexed, so an empty list is not an absence of tests";
+
+/// `run-recipe --kind locate`: resolve the phrase, show the context of the
+/// symbols it singles out (fresh source only, one shared budget), list the
+/// test files among the best one's callers, and rank files for the task
+/// when nothing resolved. Every operation goes through [`execute`], so the
+/// daemon and the in-process service give the same answer.
+fn run_locate(
+    mut result: pixel_proto::QueryResult,
+    path: &Path,
+    budget: usize,
+    json_output: bool,
+    no_daemon: bool,
+) -> Result<(), String> {
+    use pixel_proto::query::{
+        LocateStatus, caller_test_files, candidate_uid_in, context_is_stale, locate_candidates,
+        locate_next_action, locate_status, locate_targets, same_snapshot, split_context_budget,
+    };
+    let phrase = result
+        .intent
+        .trim_start_matches("where is `")
+        .trim_end_matches('`')
+        .to_owned();
+    let mut operations = 0usize;
+    let mut limits: Vec<String> = Vec::new();
+    let mut responses: Vec<Value> = Vec::new();
+
+    let resolve = execute(
+        path,
+        Request::Resolve {
+            phrase: phrase.clone(),
+            limit: None,
+        },
+        no_daemon,
+    )?;
+    operations += 1;
+    let candidates = locate_candidates(&resolve);
+    let picked = locate_targets(&candidates, LOCATE_MAX_TARGETS);
+    let shares = split_context_budget(budget, picked.len());
+    let mut targets: Vec<Value> = Vec::new();
+    let mut target_uids: Vec<String> = Vec::new();
+    let mut best_fresh = false;
+    for (index, (candidate, share)) in picked.iter().zip(shares).enumerate() {
+        let name = candidate.symbol.clone().unwrap_or_default();
+        let ask = |uid: String| {
+            execute(
+                path,
+                Request::Context {
+                    uid,
+                    budget_tokens: Some(share),
+                },
+                no_daemon,
+            )
+        };
+        // Ask by the likely uid first: a homonym's candidate list may not fit
+        // a small share, while one symbol's context does. A small share may
+        // also leave the `symbol` field out, so the uid asked is the one kept.
+        let mut asked: Option<(Value, Option<String>)> = None;
+        if let Some(uid) = candidate.likely_uid() {
+            operations += 1;
+            if let Ok(context) = ask(uid.clone())
+                && !context["candidates"].is_array()
+            {
+                asked = Some((context, Some(uid)));
+            }
+        }
+        if asked.is_none() {
+            operations += 1;
+            match ask(name.clone()) {
+                // A homonym answers with candidates: ask again for the one in
+                // the matched file.
+                Ok(context) => match candidate_uid_in(&context, &candidate.path) {
+                    Some(uid) => {
+                        operations += 1;
+                        match ask(uid.clone()) {
+                            Ok(again) => asked = Some((again, Some(uid))),
+                            Err(error) => {
+                                limits.push(format!("context of `{name}` unavailable: {error}"));
+                            }
+                        }
+                    }
+                    None => asked = Some((context, None)),
+                },
+                Err(error) => limits.push(format!("context of `{name}` unavailable: {error}")),
+            }
+        }
+        let Some((context, asked_uid)) = asked else {
+            continue;
+        };
+        let text = context["text"].as_str().unwrap_or_default().to_owned();
+        let uid = if context_is_stale(&context) {
+            None
+        } else {
+            context["symbol"]["uid"]
+                .as_str()
+                .map(str::to_owned)
+                .or(asked_uid)
+        };
+        if index == 0 {
+            best_fresh = uid.is_some();
+        }
+        if uid.is_none() {
+            limits.push(format!(
+                "`{name}` in {}: no fresh source to show",
+                candidate.path
+            ));
+        }
+        target_uids.extend(uid.clone());
+        targets.push(json!({
+            "uid": uid,
+            "path": candidate.path,
+            "start_line": candidate.start_line,
+            "end_line": candidate.end_line,
+            "reasons": candidate.reasons,
+            "context_layer": context["context_layer"],
+            "truncated": context["truncated"],
+            "text": text,
+        }));
+        responses.push(context);
+    }
+
+    let status = locate_status(resolve["tier"].as_str(), &candidates, best_fresh);
+    let mut tests_found: Vec<String> = Vec::new();
+    if let Some(uid) = target_uids.first() {
+        let uses = execute(
+            path,
+            Request::Uses {
+                uid_or_name: uid.clone(),
+                role: "callers".into(),
+                offset: None,
+            },
+            no_daemon,
+        )?;
+        operations += 1;
+        tests_found = caller_test_files(&uses);
+        if uses["truncated"] == true {
+            limits.push("callers were capped: more test files may exist".into());
+        }
+        responses.push(uses);
+    }
+    let mut files: Vec<Value> = Vec::new();
+    if status == LocateStatus::NeedsSearch {
+        let ranked = execute(
+            path,
+            Request::Targets {
+                task: result.intent.clone(),
+                limit: Some(5),
+                max_tier: None,
+                precision: false,
+            },
+            no_daemon,
+        )?;
+        operations += 1;
+        files = ranked["targets"]
+            .as_array()
+            .map(|targets| {
+                targets
+                    .iter()
+                    .map(|t| json!({"path": t["path"], "tier": t["tier"], "reasons": t["reasons"]}))
+                    .collect()
+            })
+            .unwrap_or_default();
+        responses.push(ranked);
+    }
+    responses.push(resolve);
+    let all: Vec<&Value> = responses.iter().collect();
+    if !same_snapshot(&all) {
+        limits.push(
+            "the composed calls saw different snapshots: re-run for one consistent answer".into(),
+        );
+    }
+    let next_action = locate_next_action(
+        status,
+        &phrase,
+        &result.intent,
+        &target_uids,
+        candidates.first(),
+    );
+
+    let mut locate = json!({
+        "status": status,
+        "phrase": phrase,
+        "targets": targets,
+        "tests_found": tests_found,
+        "tests_note": LOCATE_TESTS_NOTE,
+        "files": files,
+        "next_action": next_action,
+        "limits": limits,
+    });
+    // Drop the least-ranked context texts first until the answer fits.
+    let tokens = |v: &Value| recall_cmd::estimate_tokens(&v.to_string());
+    let mut dropped = 0usize;
+    for index in (0..targets.len()).rev() {
+        if tokens(&locate) <= budget {
+            break;
+        }
+        locate["targets"][index]["text"] = json!("");
+        dropped += 1;
+    }
+    if dropped > 0 {
+        locate["limits"]
+            .as_array_mut()
+            .expect("limits is an array")
+            .push(json!(format!(
+                "context text of {dropped} target(s) dropped to fit the budget"
+            )));
+    }
+    let over = tokens(&locate).saturating_sub(budget);
+    if over > 0 {
+        locate["limits"]
+            .as_array_mut()
+            .expect("limits is an array")
+            .push(json!(format!(
+                "the answer exceeds the budget by about {over} tokens without its dropped text"
+            )));
+    }
+    result.evidence.clear();
+    let output = json!({
+        "op": "query",
+        "result": result,
+        "locate": locate,
+        "metrics": {
+            "budget_tokens": budget,
+            "rendered_tokens_estimate": tokens(&locate),
+            "operations": operations,
+        },
+        "epistemics": {"closed_world": false, "lower_bound": true, "basis": "composed bounded recipe: resolve, context, callers"}
+    });
+    if json_output {
+        return print_data(&output, true);
+    }
+    operation_metrics::observe(&output);
+    write_stdout(&render_locate(&output["locate"]))
+}
+
+/// The human rendering of a locate answer: status, each target with its
+/// context, the test files, the next step and every limit.
+fn render_locate(locate: &Value) -> String {
+    let mut out = format!(
+        "locate: {} — `{}`\n",
+        locate["status"].as_str().unwrap_or("?"),
+        locate["phrase"].as_str().unwrap_or_default()
+    );
+    for target in locate["targets"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "\n{}:{}-{} {}\n",
+            target["path"].as_str().unwrap_or("?"),
+            target["start_line"],
+            target["end_line"],
+            target["uid"].as_str().unwrap_or("(no fresh source)")
+        ));
+        out.push_str(target["text"].as_str().unwrap_or_default());
+    }
+    for file in locate["files"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "candidate file: {} ({})\n",
+            file["path"].as_str().unwrap_or("?"),
+            file["tier"].as_str().unwrap_or("?")
+        ));
+    }
+    let tests: Vec<&str> = locate["tests_found"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    out.push_str(&format!(
+        "\ntests found: {} ({})\n",
+        if tests.is_empty() {
+            "none".to_owned()
+        } else {
+            tests.join(", ")
+        },
+        locate["tests_note"].as_str().unwrap_or_default()
+    ));
+    if let Some(next) = locate["next_action"].as_str() {
+        out.push_str(&format!("next: {next}\n"));
+    }
+    for limit in locate["limits"].as_array().into_iter().flatten() {
+        out.push_str(&format!("limit: {}\n", limit.as_str().unwrap_or_default()));
+    }
+    out
 }
 
 /// `pixel log` — the self-assessment surface over the async action log every
