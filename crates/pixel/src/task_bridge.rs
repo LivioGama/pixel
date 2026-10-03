@@ -674,9 +674,11 @@ mod tests {
     struct Scratch(std::path::PathBuf);
     impl Scratch {
         fn new() -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
-                "pixel-task-bridge-{}",
-                crate::task_commands::request()
+                "pixel-task-bridge-{}-{}",
+                crate::task_commands::request(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             ));
             std::fs::create_dir(&root).unwrap();
             Self(root)
@@ -757,6 +759,30 @@ mod tests {
             assert!(observed(&root.0, "pi", "stop", "s", &json!({})).is_err());
             assert_eq!(std::fs::read_to_string(&path).unwrap(), corrupt);
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn observed_marker_read_errors_must_not_replace_existing_state() {
+        let root = Scratch::new();
+        std::fs::create_dir(root.0.join(".pixel")).unwrap();
+        let path = root.0.join(".pixel/task-hook-observations.json");
+        let target = Path::new("task-hook-observations.json");
+        std::os::unix::fs::symlink(target, &path).unwrap();
+        let read_error = std::fs::read(&path).unwrap_err();
+        assert_eq!(read_error.raw_os_error(), Some(libc::ELOOP));
+        assert_eq!(
+            observed(&root.0, "codex", "stop", "session", &json!({})).unwrap_err(),
+            read_error.to_string()
+        );
+        assert_eq!(std::fs::read_link(&path).unwrap(), target);
+
+        std::fs::remove_file(&path).unwrap();
+        observed(&root.0, "codex", "stop", "session", &json!({})).unwrap();
+        let marker: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(marker.as_object().unwrap().len(), 1);
+        assert_eq!(marker["codex"]["session_id"], "session");
+        assert_eq!(marker["codex"]["event"], "stop");
     }
 
     #[test]

@@ -129,6 +129,42 @@ fn hook_with_policy(
 }
 
 #[test]
+fn task_mutation_should_require_the_exact_expected_revision() {
+    let root = repo("expected-revision");
+    let id = begin(&root);
+    let store = pixel_task::Store::open(&root).unwrap();
+    let before = store.status(&id).unwrap();
+    let wrong = (before.revision + 1).to_string();
+    let rejected = command(
+        &root,
+        &[
+            "task",
+            "cancel",
+            &id,
+            "--expected-revision",
+            &wrong,
+            "--json",
+        ],
+    );
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("task revision conflict"));
+    assert_eq!(store.status(&id).unwrap(), before);
+    let accepted = good(
+        &root,
+        &[
+            "task",
+            "cancel",
+            &id,
+            "--expected-revision",
+            &before.revision.to_string(),
+            "--json",
+        ],
+    );
+    assert_eq!(accepted["phase"], "cancelled");
+    assert_eq!(accepted["revision"], before.revision + 1);
+}
+
+#[test]
 fn task_should_verify_and_finish_an_unborn_repository() {
     let root = Scratch::for_test("task-cli", "unborn");
     git(&root, &["init", "-q"]);

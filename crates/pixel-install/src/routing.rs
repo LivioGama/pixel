@@ -305,6 +305,11 @@ pub(crate) fn task_hooks_registered(value: &Value, provider: Provider, exe: &Pat
 /// Every entry [`is_pixel_hook`] recognises goes, so one pass also collapses
 /// entries an earlier install stacked.
 pub(crate) fn remove_pixel_hooks(hooks: &mut Map<String, Value>, exe: &Path) {
+    remove_matching_hooks(hooks, |command| is_pixel_hook(command, exe));
+}
+
+/// Remove matching commands without disturbing foreign hooks or group metadata.
+fn remove_matching_hooks(hooks: &mut Map<String, Value>, remove: impl Fn(&str) -> bool) {
     hooks.retain(|_, groups| {
         let Some(groups) = groups.as_array_mut() else {
             return true;
@@ -317,7 +322,7 @@ pub(crate) fn remove_pixel_hooks(hooks: &mut Map<String, Value>, exe: &Path) {
                 !hook
                     .get("command")
                     .and_then(Value::as_str)
-                    .is_some_and(|command| is_pixel_hook(command, exe))
+                    .is_some_and(&remove)
             });
             !inner.is_empty()
         });
@@ -656,13 +661,13 @@ fn configure(
 
 /// A PreToolUse group that can run beside Pixel's guard: it cannot touch a
 /// shell call, or it is one of the known observers that never rewrite one.
-fn coexists_with_guard(group: &Value, provider: Provider) -> bool {
+fn coexists_with_guard(group: &Value, provider: Provider, exe: &Path) -> bool {
     !shell_overlap(group, provider)
         // Task gates can deny but never rewrite the tool's input.
         || group.get("hooks").and_then(Value::as_array).is_some_and(|hooks| {
             !hooks.is_empty() && hooks.iter().all(|hook| {
                 hook.get("command").and_then(Value::as_str)
-                    .and_then(|command| pixel_hook_verb(command, Path::new("pixel")))
+                    .and_then(|command| pixel_hook_verb(command, exe))
                     == Some(format!("task-event --provider {} --event pre-tool-use", provider.name()).as_str())
             })
         })
@@ -714,11 +719,11 @@ fn configure_scoped(
             .as_array_mut()
             .ok_or("PreToolUse is not an array")?;
         let blocked = pre.iter().any(|group| {
-            !(coexists_with_guard(group, provider)
+            !(coexists_with_guard(group, provider, exe)
                 || provider == Provider::Claude && exact_rtk(group))
         }) || inherited
             .iter()
-            .any(|group| !coexists_with_guard(group, provider));
+            .any(|group| !coexists_with_guard(group, provider, exe));
         if !blocked {
             if provider == Provider::Claude {
                 pre.retain(|group| {
@@ -1272,7 +1277,14 @@ pub(crate) fn remove_pre_tool_use_guard(
     let mut event = Map::new();
     event.insert("PreToolUse".into(), before.clone());
     let delegated = has_delegate(&event, exe);
-    remove_pixel_hooks(&mut event, exe);
+    remove_matching_hooks(&mut event, |command| {
+        pixel_hook_verb(command, exe).is_some_and(|verb| {
+            matches!(
+                verb.split_whitespace().next(),
+                Some("guard" | "composed-guard" | config::GUARD_HOOK | config::OLD_GUARD_HOOK)
+            )
+        })
+    });
     if delegated {
         restore_rtk(&mut event, &[rtk_group()]);
     }
@@ -1319,7 +1331,7 @@ pub(crate) fn install_project_claude_at(
     } else {
         global_pre_tool_use(&global_path)
     };
-    let blocking = blocking_claude_groups(&global);
+    let blocking = blocking_claude_groups(&global, exe);
     let global_blockers = hook_commands(&blocking);
     // A guard a full install of an older release left in the global file:
     // the current global install takes it out.
@@ -1403,10 +1415,10 @@ pub(crate) fn global_pre_tool_use(path: &Path) -> (Vec<Value>, Option<String>) {
 /// The groups that cannot run beside the Claude guard: shell rewriters,
 /// the exact RTK group included, since only the file that holds it can hand
 /// it to the guard.
-pub(crate) fn blocking_claude_groups(groups: &[Value]) -> Vec<Value> {
+pub(crate) fn blocking_claude_groups(groups: &[Value], exe: &Path) -> Vec<Value> {
     groups
         .iter()
-        .filter(|group| !coexists_with_guard(group, Provider::Claude))
+        .filter(|group| !coexists_with_guard(group, Provider::Claude, exe))
         .cloned()
         .collect()
 }
@@ -1855,6 +1867,43 @@ mod tests {
     }
 
     #[test]
+    fn shared_guard_cleanup_should_preserve_task_gates_inside_mixed_groups() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let task = json!({"type":"command","command":"'/p/pixel' run-hook task-event --provider claude --event pre-tool-use","timeout":10});
+        let foreign = json!({"type":"command","command":"other run-hook guard --provider claude"});
+        let retained = json!({"matcher":"Bash","hooks":[task, foreign],"custom":"keep"});
+        for command in [
+            "'/p/pixel' run-hook guard",
+            "'/p/pixel' hook guard --provider claude",
+            "'/p/pixel' run-hook guard --provider codex",
+            "'/p/pixel' run-hook guard --provider devin",
+            "'/p/pixel' run-hook guard --provider zcode",
+            "'/p/pixel' run-hook composed-guard --provider codex",
+            config::GUARD_HOOK,
+            config::OLD_GUARD_HOOK,
+        ] {
+            let mut mixed = retained.clone();
+            mixed["hooks"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"type":"command","command":command}));
+            install::write_settings(&path, &json!({"hooks":{"PreToolUse":[mixed]}}), false)
+                .unwrap();
+            assert_eq!(
+                remove_pre_tool_use_guard(&path, release(), false).unwrap(),
+                (vec![retained.clone()], true),
+                "{command}"
+            );
+            assert_eq!(
+                install::read_settings(&path).unwrap(),
+                json!({"hooks":{"PreToolUse":[retained.clone()]}}),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
     fn remove_pre_tool_use_guard_should_drop_an_emptied_event_and_restore_a_delegated_rtk() {
         let dir = tempfile::tempdir().unwrap();
         let only_guard = dir.path().join("only.json");
@@ -1948,6 +1997,46 @@ mod tests {
                 has_pixel_guard(&value, "run-hook guard --provider claude", release()),
                 expect_enabled,
                 "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn renamed_task_gate_should_coexist_without_accepting_another_executable() {
+        let exe = Path::new("/opt/custom tools/our-agent");
+        let task = hook_group(
+            format!(
+                "{} run-hook task-event --provider claude --event pre-tool-use",
+                quoted_executable(exe)
+            ),
+            None,
+        );
+        let foreign = hook_group(
+            "'/opt/foreign-agent' run-hook task-event --provider claude --event pre-tool-use"
+                .into(),
+            None,
+        );
+        assert!(blocking_claude_groups(std::slice::from_ref(&task), exe).is_empty());
+        assert_eq!(
+            blocking_claude_groups(&[task.clone(), foreign.clone()], exe),
+            vec![foreign.clone()]
+        );
+        for (inherited, allowed) in [(vec![task.clone()], true), (vec![task, foreign], false)] {
+            let mut value = json!({});
+            let (enabled, adopted) = configure_scoped(
+                &mut value,
+                Provider::Claude,
+                exe,
+                &[],
+                HookScope::GuardOnly,
+                &inherited,
+            )
+            .unwrap();
+            assert_eq!(enabled, allowed);
+            assert!(adopted.is_empty());
+            assert_eq!(
+                has_pixel_guard(&value, "run-hook guard --provider claude", exe),
+                allowed
             );
         }
     }

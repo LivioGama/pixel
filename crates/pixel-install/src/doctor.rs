@@ -1119,7 +1119,7 @@ pub fn doctor(options: &DoctorOptions) -> Result<DoctorReport> {
             for other in others {
                 let (groups, _) = crate::routing::global_pre_tool_use(other);
                 for command in
-                    crate::routing::hook_commands(&crate::routing::blocking_claude_groups(&groups))
+                    crate::routing::hook_commands(&crate::routing::blocking_claude_groups(&groups, &exe))
                 {
                     rivals.push(format!("{command} in {}", other.display()));
                 }
