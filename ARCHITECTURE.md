@@ -53,7 +53,7 @@ MCP server. `pixel install` registers no MCP server with any agent.
 | `pixel-task` | Durable completion contracts, deterministic workflow gates, source manifests, private verification receipts, measured task trajectories, pure policy replay, and explicit controlled evaluation. | git, ops |
 | `pixel-release` | `pixel check-release`: the consistency checks a release tag must pass (CLI version, `Cargo.lock` freshness, changelog cut). Pure functions over file contents. | none |
 | `pixel-flow` | Deterministic browser and configuration flow replay: save, get, list, revise, replay, delete proven agent-browser paths. Flows live under `~/.local/share/pixel/flows/`. | none |
-| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`. Global install: the bundled prompts, Claude Code lifecycle hooks (removing the retired `claude()` shell wrapper), the Codex `developer_instructions` key plus `UserPromptSubmit` and metrics hooks, the Pi `APPEND_SYSTEM.md` block, and, when their config exists, the OpenCode `AGENTS.md` block, the Antigravity plugin and hooks, Devin's own lifecycle hooks (`~/.config/devin/config.json` — Devin imports Claude's hooks, so without them its sessions get the imported Claude text instead of its own protocol), and the zcode guard. `--repo`: project guards for Claude, Codex, Devin and Pi, and the Pixel-first `AGENTS.md` rule (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups and ends on a `backups` step listing them with the quoted `rm --` command that drops them. | proto, daemon, index, facts, git |
+| `pixel-install` | Idempotent `pixel install`, `pixel uninstall`, `pixel doctor`. Global install: the bundled prompts, Claude Code lifecycle hooks (removing the retired `claude()` shell wrapper), the Codex `developer_instructions` key plus `UserPromptSubmit` and metrics hooks, the Pi `APPEND_SYSTEM.md` block, and, when their config exists, the OpenCode `AGENTS.md` block and guard plugin, the Antigravity plugin and hooks, Devin's own lifecycle hooks (`~/.config/devin/config.json` — Devin imports Claude's hooks, so without them its sessions get the imported Claude text instead of its own protocol), and the zcode guard. `--repo`: project guards for Claude, Codex, Devin and Pi, and the Pixel-first `AGENTS.md` rule (see "Agent integration"). Backs up changed files (`<file>.pixel-bak.<nanos>-<seq>` beside each); `uninstall` keeps those backups and ends on a `backups` step listing them with the quoted `rm --` command that drops them. | proto, daemon, index, facts, git |
 | `pixel-ultraflow` | The classify-driven browser loop over saved flows: the observation (`agent-browser snapshot -i` parsed into numbered slots, `elements`), the indexed action space of operation-target pairs (`action`), the decision seam (`decide`), the discovery loop and its single-cycle unit (`discover`), the composition of what worked into a `pixel-flow` document whose `conditional` steps carry the conditions that tell its branches apart (`compose`), and the replay that decides those conditions with `pixel classify` and re-decides a step whose page moved on (`replay`). Drives `pixel-flow`'s browser seam; the engine is a trait, so the whole loop is tested without a model, a network or a page. | flow |
 | `pixel-bench` | Criterion benches and a real-source corpus builder (gram extraction, latency, NDCG relevance). Not shipped. | index (dev: daemon, graph, proto, recall) |
 
@@ -125,7 +125,7 @@ ARCHITECTURE, CONTRIBUTING, `docs/manual-setup.md`, the site's `website/content/
 | `pixel dig-history` | Engine 2: history-wide discovery (rescue v2) |
 | `pixel sync-branch` | Engine 4: one-call deterministic branch sync |
 | `pixel record-event` | M5: journal a session event (fire-and-forget) |
-| `pixel install` | Idempotently deploy the agent prompt, the Claude shell wrapper, the Codex developer_instructions config key and — when `~/.config/opencode` exists — the managed prompt block in OpenCode's global `AGENTS.md` |
+| `pixel install` | Idempotently deploy the agent prompt, the Claude shell wrapper, the Codex developer_instructions config key and — when `~/.config/opencode` exists — the managed prompt block in OpenCode's global `AGENTS.md` plus the guard plugin `plugins/pixel.js` |
 | `pixel uninstall` | Remove everything `pixel install` wrote: managed blocks from agent-config files, hook entries from all settings files, hook scripts, the pi guard extension, the rule source file, and the pixel binary itself. |
 | `pixel check-release` | Check that a release tag is consistent with the tree before anything is built or published: crates/pixel/Cargo.toml carries the version, Cargo.lock is fresh for every workspace member, CHANGELOG.md has the `## [x.y.z]` heading and an empty Unreleased section. |
 | `pixel self-update` | Rebuild the binary, stop the daemon, copy the new binary to the install path, and optionally restart the daemon. |
@@ -425,7 +425,9 @@ each agent through its own extension point:
   repository extension (installed by `--repo`) registers the structured
   `pixel` tool and applies the [pre-execution Pi policy](docs/pi-harness.md)
   at `tool_call` time.
-- **OpenCode**, **Antigravity** (`~/.gemini/config`: plugin, config entry and
+- **OpenCode** (`~/.config/opencode`: the guard plugin `pixel.js`, auto-loaded
+  from `plugins/` and calling `pixel run-hook guard --provider opencode`),
+  **Antigravity** (`~/.gemini/config`: plugin, config entry and
   `run-hook guard --provider antigravity` hook) and **zcode**
   (`~/.zcode/cli/config.json`: `run-hook guard --provider zcode`): only when
   that agent's configuration already exists.
@@ -483,10 +485,18 @@ entries naming the deployed prompt (dead on v2, a duplicate on v1) and
 `plugin`/`plugins` entries whose `pixel.mjs` target no longer exists — a
 guaranteed load failure; entries resolving to a real file are left alone.
 A config that does not parse as strict JSON is skipped, not rewritten, and
-never blocks the AGENTS.md write. `doctor`
-(`install.opencode-agents-md`) verifies the block is current and skips
-when OpenCode is absent; `uninstall` strips the block (deleting the file
-when it held nothing else) and drops leftover instructions entries.
+never blocks the AGENTS.md write. The same install writes the guard plugin
+`pixel.js` into `~/.config/opencode/plugins/` — `.js`, not `.mjs`: the
+directory is auto-loaded by extension and a `.mjs` there is silently
+ignored — so no `opencode.json` edit is needed. The plugin forwards the
+guarded tool ids (`bash`, `read`, `grep`, …) to `pixel run-hook guard
+--provider opencode`, applies a returned rewrite by mutating keys inside
+`output.args`, and throws on a deny, which the host shows to the model.
+`doctor` (`install.opencode-agents-md`) verifies the block and the plugin
+are current — the plugin against this machine's binary, so a moved `pixel`
+is reported instead of silently failing open — and skips when OpenCode is
+absent; `uninstall` strips the block (deleting the file when it held
+nothing else), removes the plugin and drops leftover instructions entries.
 
 The hook entry points, all under `pixel run-hook` (alias `hook`), and where
 `pixel install` registers them:
@@ -496,7 +506,7 @@ The hook entry points, all under `pixel run-hook` (alias `hook`), and where
 | `SessionStart` | `pixel run-hook session-start` | Injects the agent prompt and the capability block from the op registry. For Claude Code the prompt is fitted to the 10 000-character inline limit of a hook's context (`CLAUDE_INLINE_CONTEXT_LIMIT` in `guard.rs`): `DEFERRABLE_SECTIONS` come out first and a closing line names them and the deployed prompt's path. Global for Claude Code and for Devin's own protocol; in a session that only imports Claude's configuration (Devin's `read_config_from.claude`), the entry carries the short Pixel-first guidance and the capability block instead of the Claude prompt. |
 | `UserPromptSubmit` | `pixel run-hook prompt-submit` | Task context/boundary detection and the task-intent verdict. Never rejects a prompt. The Claude task packet is written only in a Claude Code session, never in a session that only imports Claude's configuration (a `--provider claude` hook Devin re-runs from `~/.claude/settings.json` delivers target/boundary context alone). Codex carries an always-on Pixel-first guidance line ahead of any task context, but only in an indexed repository (a discovered root without a shard would make the same commands build a full index, so the guidance stays quiet there). Global for Claude Code, Codex, and Devin's own protocol. |
 | `SessionStart` matcher `compact` (`PostCompaction` on Devin) | `pixel run-hook post-compaction` | Re-injects the active task evidence as additional context. A `--provider claude` entry re-run by an importing host exits without emitting: the session id it would read belongs to the other harness. |
-| `PreToolUse` | `pixel run-hook guard` | Bounded compatible command routing; native fallback and host permissions remain authoritative. Repo-local (`--repo`) for Claude Code and Devin; global for Antigravity and zcode. |
+| `PreToolUse` | `pixel run-hook guard` | Bounded compatible command routing; native fallback and host permissions remain authoritative. Repo-local (`--repo`) for Claude Code and Devin; global for Antigravity and zcode; OpenCode reaches it through its auto-loaded plugin (`--provider opencode`), the one host whose plugin hook can throw a call away. |
 | `PostToolUse` (Claude `Edit`) | `pixel run-hook post-tool-use` | After an edit, emits the dependants of what was just changed. |
 | `PostToolUse` (Codex, Claude `Bash`, Devin `exec`) | `pixel run-hook metrics` | Codex tool results drop stderr, so the finalized invocation's 🟩 metrics line is re-emitted as `additionalContext` (Claude and Devin also get `systemMessage`/`additionalContext` output through the same relay, installed by `pixel install` and `pixel install --repo`; when the tool result already carries the box, Claude still receives it as `systemMessage` only while Codex and Devin stay silent) — correlated to the action record by cwd + argv, silent on any miss, and suppressed by the same `metrics` opt-out. An imported Claude entry re-run by an importing host exits without emitting, so it does not double Devin's own relay. |
 | `PreToolUse` (Codex, `<repo>/.codex/hooks.json`, `--repo`) | `pixel run-hook composed-guard` | Runs a sealed install-time snapshot of a foreign hook before Pixel's Codex rewrite. |
