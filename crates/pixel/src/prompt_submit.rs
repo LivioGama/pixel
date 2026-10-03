@@ -47,6 +47,13 @@ pub(crate) const DEVIN_PIXEL_GUIDANCE: &str = concat!(
     "If Pixel or the index is unavailable, continue normally with native tools; never block the task."
 );
 
+const CODEX_PIXEL_GUIDANCE: &str = concat!(
+    "Pixel-first retrieval (non-blocking): for this repository prompt, run a Pixel retrieval command before answering from memory. ",
+    "Use `pixel search-content -F '<identifier>'` for a known name, or `pixel find-code '<concept>'` for behavior-described code. ",
+    "Do not answer from memory, a generic web search, or a native repository read before that retrieval attempt. ",
+    "If Pixel or its index is unavailable, say so and continue with the best available evidence; never block the task."
+);
+
 /// Commands in actions.jsonl that signal task completion, under their current
 /// names. Entries logged before the command rename (`publish`, `ship`) are
 /// canonicalised before the lookup.
@@ -173,6 +180,19 @@ pub fn run(provider: Option<crate::guard::Provider>) -> ! {
     }
     if matches!(provider, Some(crate::guard::Provider::Devin)) {
         context = render_devin_context(&context);
+    }
+    // Codex reads no SessionStart prompt of its own for this contract, so
+    // every prompt in an *indexed* repository carries the Pixel-first
+    // guidance. A discovered root without a shard is not indexed: the same
+    // commands there would build a full index instead of answering (the
+    // sub-agent prompt carries the same rule), so the guidance stays quiet.
+    let indexed = root.as_deref().is_some_and(|root| {
+        root.join(pixel_index::index::SHARD_DIR)
+            .join(pixel_index::index::SHARD_FILE)
+            .is_file()
+    });
+    if matches!(provider, Some(crate::guard::Provider::Codex)) && indexed {
+        context = render_codex_context(&context);
     }
     if !context.is_empty() {
         emit_context(&context, event_name);
@@ -302,6 +322,14 @@ fn render_devin_context(context: &str) -> String {
         DEVIN_PIXEL_GUIDANCE.to_string()
     } else {
         format!("{DEVIN_PIXEL_GUIDANCE}\n\n{context}")
+    }
+}
+
+fn render_codex_context(context: &str) -> String {
+    if context.is_empty() {
+        CODEX_PIXEL_GUIDANCE.to_string()
+    } else {
+        format!("{CODEX_PIXEL_GUIDANCE}\n\n{context}")
     }
 }
 
@@ -790,6 +818,20 @@ mod tests {
         );
         assert!(context.contains("If Pixel or the index is unavailable, continue normally with native tools; never block the task."));
         assert!(context.ends_with("task targets"));
+    }
+
+    #[test]
+    fn codex_context_requires_pixel_evidence_on_every_repository_prompt() {
+        let context = render_codex_context("task targets");
+        assert!(context.starts_with("Pixel-first retrieval"));
+        assert!(context.contains("for this repository prompt"));
+        assert!(context.contains("Do not answer from memory, a generic web search"));
+        assert!(
+            context.contains("never block the task"),
+            "the guidance fails open, like Devin's"
+        );
+        assert!(context.ends_with("task targets"));
+        assert_eq!(render_codex_context(""), CODEX_PIXEL_GUIDANCE.to_string());
     }
     use std::process::Command;
 

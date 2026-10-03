@@ -1464,6 +1464,45 @@ fn prompt_submit_should_treat_a_harness_task_notification_as_no_prompt() {
     assert!(context.contains("Pixel-first retrieval"), "{context}");
 }
 
+/// Codex's UserPromptSubmit guidance is always-on, like Devin's: any
+/// repository prompt names the Pixel-first retrieval to attempt, never
+/// blocks, and stays quiet where there is no repository to retrieve from.
+#[test]
+fn codex_prompt_submit_injects_pixel_first_guidance_on_every_repository_prompt() {
+    let dir = indexed_dir("codex-prompt-context");
+    let submit = |cwd: &Path| {
+        hook(
+            &["run-hook", "prompt-submit", "--provider", "codex"],
+            &json!({
+                "hook_event_name":"UserPromptSubmit",
+                // A plain coding prompt: nothing Pixel-named, still guided.
+                "prompt":"where is the foreign-denial precedence decided in the guard?",
+                "cwd":cwd
+            }),
+            &[],
+        )
+    };
+    let response = submit(dir.as_ref());
+    let context = response["hookSpecificOutput"]["additionalContext"]
+        .as_str()
+        .expect("a repository prompt carries the Codex Pixel guidance");
+    assert!(context.starts_with("Pixel-first retrieval"), "{context}");
+    assert!(context.contains("pixel search-content -F"), "{context}");
+    assert!(context.contains("pixel find-code"), "{context}");
+    assert!(
+        context.contains("Do not answer from memory, a generic web search"),
+        "{context}"
+    );
+    assert!(context.contains("never block the task"), "{context}");
+    assert!(!response.get("decision").is_some(), "{response}");
+    let outside = Scratch::for_test("pixel-guard-policy", "codex-prompt-outside");
+    assert_eq!(
+        submit(outside.as_ref()),
+        Value::Null,
+        "outside a repository there is no index to point at"
+    );
+}
+
 /// Devin loads `~/.claude/settings.json` hooks verbatim, so the Claude entry
 /// `pixel install` wrote there runs inside a Devin session with its
 /// `--provider claude` argument intact. That argument names the install, not

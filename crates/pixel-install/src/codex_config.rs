@@ -40,6 +40,7 @@ pub const HOOKS_FILE: &str = "hooks.json";
 /// Substring unique to the installed metrics-relay command, used for
 /// idempotent merge and uninstall removal.
 pub const METRICS_HOOK_MARKER: &str = "run-hook metrics";
+pub const PROMPT_SUBMIT_HOOK_MARKER: &str = "run-hook prompt-submit --provider codex";
 
 /// The agent prompt as bundled in the binary.
 pub(crate) const AGENT_PROMPT_ASSET: &str = include_str!("../assets/pixel-agent-prompt.md");
@@ -237,6 +238,16 @@ fn metrics_hook_entry(exe: &Path) -> serde_json::Value {
     })
 }
 
+fn prompt_submit_hook_entry(exe: &Path) -> serde_json::Value {
+    serde_json::json!({
+        "hooks": [{
+            "type": "command",
+            "command": format!("{} run-hook prompt-submit --provider codex", crate::routing::quoted_executable(exe)),
+            "timeout": 10,
+        }]
+    })
+}
+
 fn read_hooks(path: &Path) -> std::result::Result<serde_json::Value, String> {
     match fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text)
@@ -259,8 +270,8 @@ fn write_hooks(path: &Path, value: &serde_json::Value) -> Result<()> {
     Ok(())
 }
 
-/// `pixel install` step: register the metrics relay in `hooks.json`,
-/// idempotently alongside whatever PostToolUse groups already exist.
+/// `pixel install` step: register Codex's metrics relay and task-boundary
+/// context hooks, idempotently alongside existing hook groups.
 pub(crate) fn install_metrics_hook(
     codex_home: &Path,
     exe: &Path,
@@ -268,7 +279,7 @@ pub(crate) fn install_metrics_hook(
 ) -> Result<InstallStep> {
     let path = codex_home.join(HOOKS_FILE);
     let detail = Some(format!(
-        "path={} event=PostToolUse marker={METRICS_HOOK_MARKER}",
+        "path={} events=PostToolUse,UserPromptSubmit markers={METRICS_HOOK_MARKER},{PROMPT_SUBMIT_HOOK_MARKER}",
         path.display()
     ));
     let step = |status, summary: String| InstallStep {
@@ -295,12 +306,18 @@ pub(crate) fn install_metrics_hook(
         ));
     };
     let before = hooks.clone();
-    let merged = crate::config::merge_hook_entry(
+    let merged_metrics = crate::config::merge_hook_entry(
         hooks.get("PostToolUse"),
         METRICS_HOOK_MARKER,
         metrics_hook_entry(exe),
     );
-    hooks.insert("PostToolUse".to_string(), merged);
+    let merged_prompt = crate::config::merge_hook_entry(
+        hooks.get("UserPromptSubmit"),
+        PROMPT_SUBMIT_HOOK_MARKER,
+        prompt_submit_hook_entry(exe),
+    );
+    hooks.insert("PostToolUse".to_string(), merged_metrics);
+    hooks.insert("UserPromptSubmit".to_string(), merged_prompt);
     if let Err(error) =
         crate::routing::merge_task_hooks(hooks, crate::routing::Provider::Codex, exe)
     {
@@ -309,11 +326,14 @@ pub(crate) fn install_metrics_hook(
     if *hooks == before {
         return Ok(step(
             CheckStatus::Green,
-            format!("verified metrics and task hooks in {}", path.display()),
+            format!(
+                "verified metrics, prompt-submit and task hooks in {}",
+                path.display()
+            ),
         ));
     }
     let summary = format!(
-        "{} metrics and task hooks in {}",
+        "{} metrics, prompt-submit and task hooks in {}",
         if path.is_file() {
             "updated"
         } else {
@@ -328,38 +348,42 @@ pub(crate) fn install_metrics_hook(
     Ok(step(CheckStatus::Green, summary))
 }
 
-/// `pixel doctor` check: the metrics relay is registered under PostToolUse.
+/// `pixel doctor` check: both global Codex hooks are registered.
 pub(crate) fn check_metrics_hook(
     codex_home: &Path,
 ) -> std::result::Result<(String, serde_json::Value), String> {
     let path = codex_home.join(HOOKS_FILE);
     let detail = serde_json::json!({
         "path": path.display().to_string(),
-        "event": "PostToolUse",
-        "marker": METRICS_HOOK_MARKER,
+        "events": ["PostToolUse", "UserPromptSubmit"],
+        "markers": [METRICS_HOOK_MARKER, PROMPT_SUBMIT_HOOK_MARKER],
     });
     let value = read_hooks(&path)?;
-    let registered = value
-        .get("hooks")
-        .and_then(|h| h.get("PostToolUse"))
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|entries| {
-            entries.iter().any(|entry| {
-                entry
-                    .get("hooks")
-                    .and_then(serde_json::Value::as_array)
-                    .is_some_and(|hooks| {
-                        hooks.iter().any(|hook| {
-                            hook.get("command")
-                                .and_then(serde_json::Value::as_str)
-                                .is_some_and(|c| c.contains(METRICS_HOOK_MARKER))
+    let has_marker = |event: &str, marker: &str| {
+        value
+            .get("hooks")
+            .and_then(|hooks| hooks.get(event))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|entries| {
+                entries.iter().any(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|hooks| {
+                            hooks.iter().any(|hook| {
+                                hook.get("command")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(|command| command.contains(marker))
+                            })
                         })
-                    })
+                })
             })
-        });
-    if !registered {
+    };
+    if !has_marker("PostToolUse", METRICS_HOOK_MARKER)
+        || !has_marker("UserPromptSubmit", PROMPT_SUBMIT_HOOK_MARKER)
+    {
         return Err(format!(
-            "no metrics PostToolUse hook in {} — run `pixel install`",
+            "missing Pixel Codex hook in {} — run `pixel install`",
             path.display()
         ));
     }
@@ -375,7 +399,7 @@ pub(crate) fn check_metrics_hook(
     }
     Ok((
         format!(
-            "metrics and task hooks registered in {} (runtime activity checked separately)",
+            "metrics, prompt-submit and task hooks registered in {} (runtime activity checked separately)",
             path.display()
         ),
         detail,
@@ -809,6 +833,12 @@ mod tests {
         serde_json::from_str::<serde_json::Value>(&text).unwrap()["hooks"]["PostToolUse"].clone()
     }
 
+    fn user_prompt_submit(home: &Path) -> serde_json::Value {
+        let text = fs::read_to_string(home.join(HOOKS_FILE)).unwrap();
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["hooks"]["UserPromptSubmit"]
+            .clone()
+    }
+
     #[test]
     fn metrics_hook_install_verify_and_preserve_foreign_entries() {
         let home = scratch_codex_home("install");
@@ -838,6 +868,17 @@ mod tests {
             command.starts_with('\''),
             "the exe path is shell-quoted: {command}"
         );
+        let prompt_entries = user_prompt_submit(&home).as_array().unwrap().clone();
+        assert_eq!(
+            prompt_entries.len(),
+            2,
+            "prompt-submit guidance plus the task-event group"
+        );
+        assert!(
+            prompt_entries[0]["hooks"][0]["command"]
+                .as_str()
+                .is_some_and(|command| command.contains(PROMPT_SUBMIT_HOOK_MARKER))
+        );
         assert!(
             check_metrics_hook(&home).is_ok(),
             "doctor check sees the registration"
@@ -847,6 +888,7 @@ mod tests {
         let step = install_metrics_hook(&home, exe, false).unwrap();
         assert!(step.summary.contains("verified"), "{}", step.summary);
         assert_eq!(post_tool_use(&home).as_array().unwrap().len(), 3);
+        assert_eq!(user_prompt_submit(&home).as_array().unwrap().len(), 2);
         let _ = fs::remove_dir_all(&home);
     }
 
@@ -925,7 +967,7 @@ mod tests {
         .unwrap();
         assert!(
             check_metrics_hook(&home).is_err(),
-            "metrics alone cannot satisfy task gate registration"
+            "metrics alone satisfies neither the UserPromptSubmit nor the task gate registration"
         );
         install_metrics_hook(&home, Path::new("pixel"), false).unwrap();
         assert!(check_metrics_hook(&home).is_ok());

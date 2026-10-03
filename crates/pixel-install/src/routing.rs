@@ -165,6 +165,7 @@ pub(crate) fn pixel_hook_verb<'a>(command: &'a str, exe: &Path) -> Option<&'a st
                 "session-start --provider devin",
                 "prompt-submit",
                 "prompt-submit --provider claude",
+                "prompt-submit --provider codex",
                 "prompt-submit --provider devin",
                 "post-compaction",
                 "post-compaction --provider claude",
@@ -805,7 +806,11 @@ fn configure_scoped(
             {
                 " --provider claude"
             }
-            "prompt-submit" if provider == Provider::Devin => " --provider devin",
+            "prompt-submit" => match provider {
+                Provider::Claude => " --provider claude",
+                Provider::Codex => " --provider codex",
+                Provider::Devin => " --provider devin",
+            },
             _ => "",
         };
         groups.push(hook_group(
@@ -2081,7 +2086,7 @@ mod tests {
                 // guidance.
                 assert!(prompt_command.ends_with("hook prompt-submit --provider devin"));
             } else {
-                assert!(prompt_command.ends_with("hook prompt-submit"));
+                assert!(prompt_command.ends_with("hook prompt-submit --provider codex"));
             }
             if provider != Provider::Devin {
                 assert_eq!(value["hooks"]["SessionStart"][2]["matcher"], "compact");

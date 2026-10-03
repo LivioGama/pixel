@@ -22,7 +22,7 @@ use crate::install::{self, CheckStatus, InstallStep, Result};
 /// blocks unmanaged beside a second copy.
 const RULES_BEGIN: &str = "<!-- pixel:warp-retrieval:begin -->";
 const RULES_END: &str = "<!-- pixel:warp-retrieval:end -->";
-const RULES_BODY: &str = "This repository has a Pixel index (`.pixel/`). Optional retrieval helpers: `pixel search-content -F '<identifier>'` for exact identifiers, `pixel find-code '<concept>'` for behavior-described code, and `pixel impact '<symbol>'` before renames. Use them when they fit; native tools stay available, and two fruitless pixel calls mean switch to grep.\n";
+const RULES_BODY: &str = "This repository has a Pixel index (`.pixel/`). Retrieval starts with Pixel: `pixel search-content -F '<identifier>'` for exact identifiers, `pixel find-code '<concept>'` for behavior-described code, and `pixel impact '<symbol>'` before renames — a native grep/rg over indexed code is a missed retrieval; native tools stay available for everything Pixel does not cover, and two fruitless pixel calls mean switch to grep.\n";
 
 /// Install Pixel-first retrieval guidance in the repository's root `AGENTS.md`.
 pub(crate) fn install_rules(repo: &Path, dry_run: bool) -> Result<InstallStep> {
@@ -209,7 +209,11 @@ mod tests {
     fn check_rules_should_mark_changed_managed_content_stale() {
         let repo = tempfile::tempdir().unwrap();
         let path = repo.path().join("AGENTS.md");
-        fs::write(&path, rules_block().replace("Optional", "Mandatory")).unwrap();
+        fs::write(
+            &path,
+            rules_block().replace("missed retrieval", "optional retrieval"),
+        )
+        .unwrap();
         assert_eq!(check_rules(repo.path()).unwrap(), Some(false));
 
         install_rules(repo.path(), false).unwrap();
@@ -261,7 +265,7 @@ mod tests {
         // A changed word, and two words glued together: both are policy
         // edits, whatever the layout around them.
         for edited in [
-            reflowed_block().replace("Optional", "Mandatory"),
+            reflowed_block().replace("missed retrieval", "optional retrieval"),
             reflowed_block().replace("fruitless pixel", "fruitlesspixel"),
         ] {
             let repo = tempfile::tempdir().unwrap();

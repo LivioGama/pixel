@@ -6946,7 +6946,7 @@ mod tests {
                 "{provider:?}"
             );
             for kept in [
-                "# Pixel — indexed code retrieval (optional)",
+                "# Pixel — indexed code retrieval",
                 "## Retrieval commands",
                 "## Reading results",
                 "## When native tools are right",

@@ -23,12 +23,15 @@ Make sure the repo is indexed (once per clone/worktree):
 
 If `.pixel/` already exists in the repo root, skip straight to the commands.
 
-# Pixel — indexed code retrieval (optional)
+# Pixel — indexed code retrieval
 
-Pixel indexes this repository for deterministic code retrieval. Retrieval
-guidance here is optional: use it when it fits, keep native tools when they are
-faster, and never block on pixel — an unavailable or unhelpful result is a
-normal outcome, not an error to work around.
+Pixel indexes this repository for deterministic code retrieval. Repository
+retrieval starts with Pixel: `pixel search-content -F '<id>'` for a known
+name, `pixel find-code '<concept>'` for behavior. A native grep/rg/cat over
+indexed code is a missed retrieval — the guard rewrites it anyway — and after
+two fruitless pixel calls switch to grep. Keep native tools for everything
+Pixel does not cover, and never block on pixel: an unavailable or unhelpful
+result is a normal outcome, not an error to work around.
 
 ## Retrieval commands
 
