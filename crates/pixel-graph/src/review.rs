@@ -323,6 +323,19 @@ fn report_level(rule: &str, severity: &str, risk: &str) -> ReviewFinding {
     }
 }
 
+/// The review word a finding's severity prints as: CRITICAL is a BLOCKER,
+/// HIGH a CONCERN, MEDIUM a SUGGESTION, LOW a NIT. Anything else prints as
+/// it came, so an unknown severity is never relabelled.
+pub fn severity_label(severity: &str) -> &str {
+    match severity {
+        "CRITICAL" => "BLOCKER",
+        "HIGH" => "CONCERN",
+        "MEDIUM" => "SUGGESTION",
+        "LOW" => "NIT",
+        other => other,
+    }
+}
+
 /// Severity of an uncovered range by what made it unanchored: a binary or
 /// mode-only change is not a coverage gap, everything else is.
 fn motif_severity(motif: &crate::changes::UncoveredMotif) -> &'static str {
@@ -333,8 +346,9 @@ fn motif_severity(motif: &crate::changes::UncoveredMotif) -> &'static str {
 }
 
 /// Total order for stabilising a report: CRITICAL first, then HIGH, then
-/// MEDIUM, then LOW — the tail a truncation cuts first.
-fn severity_rank(severity: &str) -> u8 {
+/// MEDIUM, then LOW — the tail a truncation cuts first. The CLI's
+/// `--fail-on` threshold compares against the same scale.
+pub fn severity_rank(severity: &str) -> u8 {
     match severity {
         "CRITICAL" => 4,
         "HIGH" => 3,
@@ -618,6 +632,15 @@ mod tests {
         for (line, expected) in SECRET_CASES {
             assert_eq!(scan_line_for_secret(line), *expected, "line: {line:?}");
         }
+    }
+
+    #[test]
+    fn severity_label_names_each_level_and_keeps_an_unknown_one() {
+        assert_eq!(severity_label("CRITICAL"), "BLOCKER");
+        assert_eq!(severity_label("HIGH"), "CONCERN");
+        assert_eq!(severity_label("MEDIUM"), "SUGGESTION");
+        assert_eq!(severity_label("LOW"), "NIT");
+        assert_eq!(severity_label("?"), "?");
     }
 
     #[test]

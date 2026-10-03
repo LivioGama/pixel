@@ -190,6 +190,55 @@ pub fn failure_response(op: &str, msg: impl Into<String>) -> Response {
 // service
 // ---------------------------------------------------------------------------
 
+/// Facts/history visibility for `op_status`, and for a CLI that talks to a
+/// daemon too old to send it: enough counters to tell a
+/// healthy db from a dead or poisoned one at a glance, and its size
+/// against the budget. Read-only — never triggers ingest (status must
+/// stay cheap) and never creates the db: history is built on the first
+/// history query, not on a status call.
+pub fn facts_visibility(root: &Path) -> Value {
+    let facts = match FactsStore::open_existing(root) {
+        Ok(Some(f)) => f,
+        Ok(None) => return json!({"present": false}),
+        Err(e) => return json!({"present": false, "error": e.to_string()}),
+    };
+    let state = facts.index_state();
+    let count = |sql: &str| -> i64 { facts.conn().query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
+    let phase_a_done: bool = facts
+        .conn()
+        .query_row(
+            "SELECT status FROM ingest_jobs WHERE phase = 'A'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .is_ok_and(|s| s == "done");
+    // Full repo commit count via rev-list so a frozen enumeration is
+    // visible as commits_indexed < total_commits. The facts universe also
+    // covers stash/reflog-only commits that `--all` doesn't count, so take
+    // the max — indexed exceeding rev-list is healthy, not suspicious.
+    let total_commits = pixel_git::GitRunner::new(root)
+        .rev_list_count_all()
+        .unwrap_or(0)
+        .max(state.total_commits);
+    json!({
+        "present": true,
+        "schema_version": state.schema_version,
+        "phase": state.phase,
+        "phase_a_done": phase_a_done,
+        "commits_indexed": state.commits_indexed,
+        "total_commits": total_commits,
+        "diff_indexed_pct": state.diff_indexed_pct,
+        "hunks_with_text": count(
+            "SELECT count(*) FROM hunks WHERE length(added) > 0 OR length(removed) > 0"
+        ),
+        "used_bytes": facts.used_bytes().unwrap_or(0),
+        "budget_bytes": pixel_facts::store::HistoryLimits::from_env().budget_bytes,
+        "diffs_evicted": state.diffs_evicted,
+        "diff_coverage_since": state.diff_coverage_since,
+        "fresh": state.fresh,
+    })
+}
+
 pub struct Service {
     root: PathBuf,
     index: Arc<RwLock<IndexSet>>,
@@ -2529,7 +2578,7 @@ impl Service {
                 "graph_update_failures": self.graph_failures.count(),
                 "notify_errors": self.watcher_failures.count(),
             },
-            "facts": self.facts_visibility(),
+            "facts": facts_visibility(&self.root),
         }))
     }
 
@@ -2668,55 +2717,6 @@ impl Service {
         }
         merge_build_info(&mut out, built);
         Ok(out)
-    }
-
-    /// Facts/history visibility for `op_status`: enough counters to tell a
-    /// healthy db from a dead or poisoned one at a glance, and its size
-    /// against the budget. Read-only — never triggers ingest (status must
-    /// stay cheap) and never creates the db: history is built on the first
-    /// history query, not on a status call.
-    fn facts_visibility(&self) -> Value {
-        let facts = match FactsStore::open_existing(&self.root) {
-            Ok(Some(f)) => f,
-            Ok(None) => return json!({"present": false}),
-            Err(e) => return json!({"present": false, "error": e.to_string()}),
-        };
-        let state = facts.index_state();
-        let count =
-            |sql: &str| -> i64 { facts.conn().query_row(sql, [], |r| r.get(0)).unwrap_or(0) };
-        let phase_a_done: bool = facts
-            .conn()
-            .query_row(
-                "SELECT status FROM ingest_jobs WHERE phase = 'A'",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .is_ok_and(|s| s == "done");
-        // Full repo commit count via rev-list so a frozen enumeration is
-        // visible as commits_indexed < total_commits. The facts universe also
-        // covers stash/reflog-only commits that `--all` doesn't count, so take
-        // the max — indexed exceeding rev-list is healthy, not suspicious.
-        let total_commits = pixel_git::GitRunner::new(&self.root)
-            .rev_list_count_all()
-            .unwrap_or(0)
-            .max(state.total_commits);
-        json!({
-            "present": true,
-            "schema_version": state.schema_version,
-            "phase": state.phase,
-            "phase_a_done": phase_a_done,
-            "commits_indexed": state.commits_indexed,
-            "total_commits": total_commits,
-            "diff_indexed_pct": state.diff_indexed_pct,
-            "hunks_with_text": count(
-                "SELECT count(*) FROM hunks WHERE length(added) > 0 OR length(removed) > 0"
-            ),
-            "used_bytes": facts.used_bytes().unwrap_or(0),
-            "budget_bytes": pixel_facts::store::HistoryLimits::from_env().budget_bytes,
-            "diffs_evicted": state.diffs_evicted,
-            "diff_coverage_since": state.diff_coverage_since,
-            "fresh": state.fresh,
-        })
     }
 
     // -- Engine 1 / M3 / M4 / M5 ops --------------------------------------
@@ -7687,8 +7687,9 @@ mod tests {
     #[test]
     fn facts_visibility_reports_the_history_index_before_and_after_ingest() {
         let root = signals_repo("facts-visibility");
-        let svc = Service::open(&root).unwrap();
-        let before = svc.facts_visibility();
+        // An open service must not have created the db either.
+        let _svc = Service::open(&root).unwrap();
+        let before = facts_visibility(&root);
         assert_eq!(before, json!({"present": false}), "{before}");
         assert!(
             !pixel_facts::store::history_db_path(&root).exists(),
@@ -7703,7 +7704,7 @@ mod tests {
         )
         .unwrap();
         assert!(report.fresh, "{report:?}");
-        let after = svc.facts_visibility();
+        let after = facts_visibility(&root);
         assert_eq!(after["phase_a_done"], true, "{after}");
         assert_eq!(after["commits_indexed"], 2, "{after}");
         assert_eq!(after["total_commits"], 2, "{after}");

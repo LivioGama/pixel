@@ -159,15 +159,6 @@ impl ReviewFailOn {
     }
 }
 
-fn review_severity_rank(severity: &str) -> u8 {
-    match severity {
-        "CRITICAL" => 4,
-        "HIGH" => 3,
-        "MEDIUM" => 2,
-        _ => 1,
-    }
-}
-
 impl FailOn {
     fn threshold(self) -> pixel_install::doctor::CheckStatus {
         match self {
@@ -2639,7 +2630,7 @@ fn review_gate_blocked(data: &Value, threshold: u8) -> bool {
         .into_iter()
         .flatten()
         .filter_map(|f| f.get("severity").and_then(Value::as_str))
-        .map(review_severity_rank)
+        .map(pixel_graph::review::severity_rank)
         .max()
         .unwrap_or(0);
     worst >= threshold
@@ -2682,13 +2673,9 @@ fn pretty_review_gate(d: &Value) -> Option<String> {
                 (Some(file), None) => file.to_string(),
                 _ => "repo-wide".to_string(),
             };
-            let severity = match f.get("severity").and_then(Value::as_str).unwrap_or("?") {
-                "CRITICAL" => "BLOCKER",
-                "HIGH" => "CONCERN",
-                "MEDIUM" => "SUGGESTION",
-                "LOW" => "NIT",
-                other => other,
-            };
+            let severity = pixel_graph::review::severity_label(
+                f.get("severity").and_then(Value::as_str).unwrap_or("?"),
+            );
             output.push_str(&format!(
                 "{:<10} {}  {}\n",
                 severity,
@@ -4321,25 +4308,6 @@ fn mib(bytes: u64) -> String {
     format!("{:.1} MiB", bytes as f64 / 1_048_576.0)
 }
 
-/// Facts/history visibility block for `pixel status`: phase, commits indexed
-/// vs the git rev-list count, diff coverage, freshness, and schema version.
-/// `None` when history was never built: this runs on every session start,
-/// and opening the db for writing would create it in every repository.
-fn facts_status(root: &Path) -> Option<Value> {
-    let store = pixel_facts::FactsStore::open_existing(root).ok()??;
-    let state = store.index_state();
-    Some(json!({
-        "phase": state.phase,
-        "commits_indexed": state.commits_indexed,
-        "total_commits": pixel_git::GitRunner::new(root)
-            .rev_list_count_all()
-            .unwrap_or(state.total_commits),
-        "diff_indexed_pct": state.diff_indexed_pct,
-        "fresh": state.fresh,
-        "schema_version": state.schema_version,
-    }))
-}
-
 /// Parse argv, dispatch, and record the invocation to the per-repo action
 /// log (`<root>/.pixel/actions.jsonl`) so a session can be self-assessed
 /// later. Logging is best-effort and asynchronous — it can never fail or
@@ -5711,14 +5679,11 @@ fn run_command(
             // `status` is the compact freshness answer: keep the snapshot's
             // head/branch but collapse the dirty list to a count.
             compact_snapshot(&mut data);
-            // The daemon/service now attaches a rich `facts` block itself
-            // (schema version, phase-A state, hunk/gram counts). Only fill in
-            // the client-side fallback when talking to an older daemon that
-            // doesn't send one.
-            if data.get("facts").is_none_or(serde_json::Value::is_null)
-                && let Some(facts) = facts_status(&path)
-            {
-                data["facts"] = facts;
+            // The daemon/service attaches the `facts` block itself. A daemon
+            // too old to send one gets the same block from the same producer,
+            // never a client-side recount.
+            if data.get("facts").is_none_or(serde_json::Value::is_null) {
+                data["facts"] = pixel_daemon::api::facts_visibility(&path);
             }
             let facts_block = present_facts(&data);
             if statusline {
@@ -6611,7 +6576,7 @@ fn run_command(
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
                     repo.insert("graph_present".into(), Value::Bool(graph_present));
-                    if let Some(f) = facts_status(&root) {
+                    if let Some(f) = present_facts(&data) {
                         repo.insert(
                             "facts_phase".into(),
                             f.get("phase").cloned().unwrap_or(Value::Null),
@@ -7899,29 +7864,6 @@ mod tests {
         assert_eq!(mib(0), "0.0 MiB");
         assert_eq!(mib(268_435_456), "256.0 MiB");
         assert_eq!(mib(1_572_864), "1.5 MiB");
-    }
-
-    /// `status` runs on every session start: a repository that never asked
-    /// for history must come out of it without a history db.
-    #[test]
-    fn facts_status_reports_nothing_and_creates_nothing_before_history_is_built() {
-        let dir = std::env::temp_dir().join(format!("pixel-facts-status-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let root = dir.as_path();
-        let ok = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(root)
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
-        assert_eq!(facts_status(root), None);
-        assert!(!pixel_facts::store::history_db_path(root).exists());
-        drop(pixel_facts::FactsStore::open(root).unwrap());
-        let block = facts_status(root).expect("present once built");
-        assert_eq!(block["commits_indexed"], 0);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
