@@ -428,7 +428,16 @@ fn added_secret_findings(
     let mut capped = false;
     let mut files_read = 0usize;
     for fd in file_diffs {
-        if !fd.text || fd.status == FileStatus::Deleted || fd.added_ranges.is_empty() {
+        // One clause per `if`: `parse_diff` never gives a non-text or
+        // deleted entry added ranges, so `||`/`&&` mutants between these
+        // terms are unreachable through real diffs.
+        if !fd.text {
+            continue;
+        }
+        if fd.status == FileStatus::Deleted {
+            continue;
+        }
+        if fd.added_ranges.is_empty() {
             continue;
         }
         if files_read >= SECRET_FILES_CAP {
@@ -1184,6 +1193,35 @@ mod tests {
             "on the cfg(test) line: {findings:?}"
         );
         assert_eq!(at(4).severity, "MEDIUM", "inside cfg(test): {findings:?}");
+    }
+
+    /// A credential assigned in a test/fixture path is fixture data — one
+    /// rung lower. The `||`→`&&` mutant on the first term of the
+    /// `test_fixture` chain would require a bare literal too and leave the
+    /// assignment CRITICAL.
+    #[test]
+    fn an_assigned_secret_in_a_fixture_path_downgrades_to_medium() {
+        let dir = tmpdir("fixture-secret");
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/table_tests.rs"),
+            "const K: &str = \"ghp_abc\";\n",
+        )
+        .unwrap();
+        let text = [
+            "diff --git a/src/table_tests.rs b/src/table_tests.rs",
+            "index 1111111..2222222 100644",
+            "--- a/src/table_tests.rs",
+            "+++ b/src/table_tests.rs",
+            "@@ -0,0 +1,1 @@",
+            "+const K: &str = \"ghp_abc\";",
+        ]
+        .join("\n");
+        let files = parse_diff(&text);
+        let (findings, _) = added_secret_findings(root, &files).expect("scan runs");
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].severity, "MEDIUM", "{findings:?}");
     }
 
     /// The file cap counts only files that were scanned. A deleted entry is
