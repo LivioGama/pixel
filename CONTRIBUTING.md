@@ -117,8 +117,8 @@ check` needs the network for the advisory database and is not part of
 `scripts/gates.sh` runs the same commands (nextest when installed, `cargo
 test` otherwise) (plus `--mutants` for the
 mutation gate below) with two additions for a laptop: it exits 0 without
-compiling when neither the diff against `main` nor the working tree
-touches a Rust-affecting path (`*.rs`, `Cargo.*`, `build.rs`, `.cargo/`,
+compiling when neither the diff against fetched `origin/main` (falling back
+to local `main`) nor the working tree touches a Rust-affecting path (`*.rs`, `Cargo.*`, `build.rs`, `.cargo/`,
 toolchain and lint config), and it runs cargo under `nice` with
 `CARGO_BUILD_JOBS=-2` (two CPUs left free) and `RUST_TEST_THREADS` at half
 the CPUs, unless those variables are already set. `--force` runs the gates
@@ -144,7 +144,7 @@ git diff main...HEAD > target/pr.diff && cargo mutants --in-diff target/pr.diff 
 
 The tracked pre-push hook runs `scripts/mutants-remote-gate.sh` before each
 Rust branch update. Nothing mutant-related compiles or runs locally: the hook
-bundles the committed three-dot diff to the gate host (`PIXEL_MUTANTS_GATE_HOST`,
+bundles the committed three-dot diff and its exact base commit to the gate host (`PIXEL_MUTANTS_GATE_HOST`,
 default the ssh alias `a2`), which checks it out and executes the same campaign
 CI's shards run — `scripts/mutants-preflight.sh --run` — against a warm
 `target/`, seeded with the traveling outcome cache (`target/mutants-preflight/`,

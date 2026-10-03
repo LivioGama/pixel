@@ -42,4 +42,7 @@ if [ -f "$tmp/mutants.out" ]; then
     cp "$tmp/mutants.out" "$persist/mutants.out"
 fi
 
-exec sh "$repo/scripts/mutants-preflight.sh" --run
+# The client bundled the diff from this exact base. `origin/main` can advance
+# while the payload is in flight, so letting preflight use its default would
+# silently validate a different mutation surface than the one being pushed.
+exec env PIXEL_MUTANTS_BASE="$base_oid" sh "$repo/scripts/mutants-preflight.sh" --run

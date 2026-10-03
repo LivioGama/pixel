@@ -28,7 +28,15 @@ class GatesContract(unittest.TestCase):
         # them and honours their exit code, not what the real ones check.
         self.prepare_log = self.root / "contracts.log"
         for name in ("test-prepare.py", "test-gates.py", "test-mutants-config.py",
-                     "test-clean.py", "test-harness-recorder.py"):
+                     "test-mutants-gate-host.sh", "test-clean.py",
+                     "test-harness-recorder.py"):
+            if name.endswith(".sh"):
+                (self.repo / "scripts" / name).write_text(
+                    "#!/bin/sh\n"
+                    f"printf '%s\\n' '{name}' >> \"$CONTRACT_LOG\"\n"
+                    "exit \"${FAIL_CONTRACT:-0}\"\n"
+                )
+                continue
             (self.repo / "scripts" / name).write_text(
                 "import os, sys\n"
                 f"open(os.environ['CONTRACT_LOG'], 'a').write('{name}\\n')\n"
@@ -95,6 +103,16 @@ class GatesContract(unittest.TestCase):
         self.assertIn("skipping", result.stdout)
         self.assertEqual(self.invocations(), [])
 
+    def test_fetched_main_wins_over_a_stale_local_main(self):
+        """Upstream Rust must not make an unchanged feature branch compile."""
+        (self.repo / "src/lib.rs").write_text("pub fn upstream() {}\\n")
+        self.git("commit", "-am", "upstream rust")
+        self.git("update-ref", "refs/remotes/origin/main", "HEAD")
+        result = self.gates()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("skipping", result.stdout)
+        self.assertEqual(self.invocations(), [])
+
     def test_the_script_contracts_run_even_when_the_cargo_gates_are_skipped(self):
         """prepare.sh and gates.sh are not Rust-affecting paths.
 
@@ -111,7 +129,8 @@ class GatesContract(unittest.TestCase):
         self.assertEqual(
             self.contracts(),
             ["test-prepare.py", "test-gates.py", "test-mutants-config.py",
-             "test-clean.py", "test-harness-recorder.py"],
+             "test-mutants-gate-host.sh", "test-clean.py",
+             "test-harness-recorder.py"],
         )
         self.assertEqual(self.invocations(), [])
 
