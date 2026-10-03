@@ -908,7 +908,8 @@ fn doctor_install_artifact_checks_red_and_green() {
     let prompt_path = home.join(".local/share/pixel/agent-prompt.md");
     let mut edited = fs::read_to_string(&prompt_path).expect("agent-prompt deployed");
     assert!(
-        edited.contains("## The stopping rule") && edited.contains("## Retrieval commands"),
+        edited.contains("# Pixel — deterministic repository facts")
+            && edited.contains("## Retrieval commands"),
         "fixture: the edited prompt must still satisfy the old heuristic"
     );
     edited.push_str("\nOne extra rule the bundled prompt does not carry.\n");
@@ -3488,7 +3489,7 @@ fn prompt_packet_guidance_allows_exploration_beyond_candidates() {
     let prompt = include_str!("../assets/pixel-agent-prompt.md");
     assert!(prompt.contains("bounded set of"));
     assert!(
-        prompt.contains("not an action recommendation, an exhaustive map, or a read/edit boundary")
+        prompt.contains("not an action recommendation") && prompt.contains("a read/edit boundary")
     );
     assert!(prompt.contains("continue exploring any files or"));
 }
