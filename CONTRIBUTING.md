@@ -341,6 +341,7 @@ pixel self-update --repo . --build "cargo build --profile dev-release -p pixel-c
 pixel build-index --history .   # rebuild facts/history index
 pixel install             # redeploy the agent prompt and hooks, Codex config
 pixel doctor . --fix --fail-on yellow   # must exit 0; report any non-green check in the PR
+                                        # (a worktree Codex never runs in: --skip repo.codex-hook-review, see AGENTS.md)
 scripts/pixel-smoke-test.sh   # the installed binary end to end (read-only)
 ```
 
