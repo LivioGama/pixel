@@ -395,6 +395,22 @@ fn scan_line_for_secret(line: &str) -> Option<(&'static str, bool)> {
     None
 }
 
+/// Test and fixture paths carry credential-shaped strings on purpose —
+/// a table of patterns a scanner test feeds itself is not a leak. The
+/// finding still fires one rung lower; a real key pasted into a test file
+/// is still committed.
+fn test_fixture_path(path: &str) -> bool {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    path.contains("/tests/")
+        || path.contains("/fixtures/")
+        || path.contains("/fixture")
+        || name.starts_with("test_")
+        || name.contains("_test.")
+        || name.contains("_tests.")
+        || name.contains(".test.")
+        || name.contains("tests.rs")
+}
+
 /// Scan every added line of every changed file for credential-shaped
 /// content. Only *added* ranges carry risk — a deletion removes, it does
 /// not introduce — and the finding never echoes the matched value, only the
@@ -419,6 +435,13 @@ fn added_secret_findings(
             // Gone since the diff was written: nothing to scan.
             continue;
         };
+        // Everything after `#[cfg(test)]` is test code: fixture strings in
+        // an inline test module are data, not leaks.
+        let test_region_start = content
+            .lines()
+            .position(|line| line.contains("#[cfg(test)]"))
+            .map(|i| i as u32 + 1);
+        let test_fixture_path = test_fixture_path(&fd.path);
         for &(start, end) in &fd.added_ranges {
             for (i, line) in content
                 .lines()
@@ -429,9 +452,24 @@ fn added_secret_findings(
                 let Some((class, strong)) = scan_line_for_secret(line) else {
                     continue;
                 };
+                // Fixture strings legitimately match the patterns; a live
+                // key in a test file is still a leak, so the finding is
+                // kept but drops a rung: CRITICAL→MEDIUM, MEDIUM→LOW.
+                // A bare quoted literal (`"ghp_abc",`) is a pattern table
+                // entry, not an assignment — same downgrade.
+                let trimmed = line.trim_start();
+                let bare_literal = trimmed.starts_with('"') && !trimmed.contains('=');
+                let test_fixture = test_fixture_path
+                    || bare_literal
+                    || test_region_start.is_some_and(|t| start + i as u32 >= t);
                 out.push(ReviewFinding {
                     rule: "possible-secret".into(),
-                    severity: if strong { "CRITICAL" } else { "MEDIUM" }.into(),
+                    severity: match (strong, test_fixture) {
+                        (true, false) => "CRITICAL",
+                        (true, true) | (false, false) => "MEDIUM",
+                        (false, true) => "LOW",
+                    }
+                    .into(),
                     file: Some(fd.path.clone()),
                     line: Some(start + i as u32),
                     evidence: format!("added line matches the {class} pattern"),
@@ -650,6 +688,44 @@ mod tests {
         );
         assert_eq!(uncovered[0].file.as_deref(), Some("src/a.rs"));
         assert_eq!(uncovered[0].line, Some(2));
+    }
+
+    /// A strong token in a `#[cfg(test)]` region or a bare literal in a
+    /// pattern table is fixture data, not a leak — one rung lower. The same
+    /// token assigned in production code stays CRITICAL.
+    #[test]
+    fn review_downgrades_secret_matches_in_test_regions_and_pattern_tables() {
+        let dir = divergence_and_secret_fixture();
+        let root = dir.path();
+        let store = store_for(root);
+        std::fs::write(
+            root.join("src/a.rs"),
+            "pub fn produce() -> i32 { 2 }\n\
+             const REAL: &str = \"ghp_1234567890abcdef\";\n\
+             const TABLE: &[&str] = &[\n\
+             \x20   \"ghp_abcdef\",\n\
+             ];\n\
+             #[cfg(test)]\nmod tests {\n\
+             \x20   const CASE: &str = \"ghp_feedface\";\n\
+             }\n",
+        )
+        .unwrap();
+
+        let report = review(&store, root, None).expect("review runs");
+        let secrets: Vec<&ReviewFinding> = report
+            .findings
+            .iter()
+            .filter(|f| f.rule == "possible-secret")
+            .collect();
+        let at = |line: u32| {
+            secrets
+                .iter()
+                .find(|f| f.line == Some(line))
+                .unwrap_or_else(|| panic!("no possible-secret at line {line}: {secrets:?}"))
+        };
+        assert_eq!(at(2).severity, "CRITICAL", "assigned in prod code");
+        assert_eq!(at(4).severity, "MEDIUM", "bare literal in a table");
+        assert_eq!(at(8).severity, "MEDIUM", "inside the cfg(test) region");
     }
 
     /// A changed symbol whose file name is a test path is its own test: the
