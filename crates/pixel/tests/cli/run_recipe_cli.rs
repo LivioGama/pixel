@@ -220,8 +220,15 @@ fn locate_should_say_what_a_small_budget_cost_it() {
         .unwrap();
     let limits = answer["locate"]["limits"].to_string();
     assert!(
-        limits.contains("unavailable") || limits.contains("dropped to fit the budget"),
+        limits.contains("context of `render` unavailable"),
         "a 120-token answer cannot hold two contexts silently: {answer}"
+    );
+    // The target shown got no context text from its share, so no text was
+    // dropped to make room; the answer used to say one was.
+    assert_eq!(answer["locate"]["targets"][0]["text"], "", "{answer}");
+    assert!(
+        !limits.contains("dropped to fit the budget"),
+        "no text was dropped: {answer}"
     );
     assert!(
         rendered <= 120 || limits.contains("exceeds the budget by about"),

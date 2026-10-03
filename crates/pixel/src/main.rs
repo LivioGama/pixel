@@ -8197,8 +8197,9 @@ fn run_locate(
     no_daemon: bool,
 ) -> Result<(), String> {
     use pixel_proto::query::{
-        LocateStatus, caller_test_files, candidate_uid_in, context_is_stale, locate_candidates,
-        locate_next_action, locate_status, locate_targets, same_snapshot, split_context_budget,
+        LocateStatus, caller_test_files, candidate_uid_in, context_is_stale, fit_locate_to_budget,
+        locate_candidates, locate_next_action, locate_status, locate_targets, same_snapshot,
+        split_context_budget,
     };
     let phrase = result
         .intent
@@ -8371,33 +8372,8 @@ fn run_locate(
         "next_action": next_action,
         "limits": limits,
     });
-    // Drop the least-ranked context texts first until the answer fits.
     let tokens = |v: &Value| recall_cmd::estimate_tokens(&v.to_string());
-    let mut dropped = 0usize;
-    for index in (0..targets.len()).rev() {
-        if tokens(&locate) <= budget {
-            break;
-        }
-        locate["targets"][index]["text"] = json!("");
-        dropped += 1;
-    }
-    if dropped > 0 {
-        locate["limits"]
-            .as_array_mut()
-            .expect("limits is an array")
-            .push(json!(format!(
-                "context text of {dropped} target(s) dropped to fit the budget"
-            )));
-    }
-    let over = tokens(&locate).saturating_sub(budget);
-    if over > 0 {
-        locate["limits"]
-            .as_array_mut()
-            .expect("limits is an array")
-            .push(json!(format!(
-                "the answer exceeds the budget by about {over} tokens without its dropped text"
-            )));
-    }
+    fit_locate_to_budget(&mut locate, budget, tokens);
     result.evidence.clear();
     let output = json!({
         "op": "query",

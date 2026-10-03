@@ -394,9 +394,137 @@ pub fn same_snapshot(responses: &[&serde_json::Value]) -> bool {
     snapshots.all(|s| s == first)
 }
 
+/// Fits a locate answer to `budget` as `tokens` measures it: while the
+/// answer is over budget, empties the context text of its targets, the
+/// least-ranked first, then states in `limits` how many texts it emptied
+/// and by how much the answer still exceeds the budget. A target whose text
+/// was already empty is not counted: emptying it saves nothing, and
+/// counting it announced dropped context on an answer that showed none.
+pub fn fit_locate_to_budget(
+    answer: &mut serde_json::Value,
+    budget: usize,
+    tokens: impl Fn(&serde_json::Value) -> usize,
+) {
+    let count = answer["targets"].as_array().map_or(0, Vec::len);
+    let mut dropped = 0usize;
+    for index in (0..count).rev() {
+        if tokens(answer) <= budget {
+            break;
+        }
+        let text = &mut answer["targets"][index]["text"];
+        if text.as_str().is_some_and(|t| !t.is_empty()) {
+            *text = serde_json::Value::String(String::new());
+            dropped += 1;
+        }
+    }
+    let over = tokens(answer).saturating_sub(budget);
+    let Some(limits) = answer["limits"].as_array_mut() else {
+        return;
+    };
+    if dropped > 0 {
+        limits.push(serde_json::Value::String(format!(
+            "context text of {dropped} target(s) dropped to fit the budget"
+        )));
+    }
+    if over > 0 {
+        limits.push(serde_json::Value::String(format!(
+            "the answer exceeds the budget by about {over} tokens without its dropped text"
+        )));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One token per character of context text plus `overhead`: a measure
+    /// a test can reason about, unlike the CLI's byte estimate.
+    fn text_tokens(overhead: usize) -> impl Fn(&serde_json::Value) -> usize {
+        move |answer| {
+            overhead
+                + answer["targets"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|t| t["text"].as_str().unwrap().len())
+                    .sum::<usize>()
+        }
+    }
+
+    fn locate_answer(texts: &[&str]) -> serde_json::Value {
+        let targets: Vec<serde_json::Value> = texts
+            .iter()
+            .map(|text| serde_json::json!({ "text": text }))
+            .collect();
+        serde_json::json!({ "targets": targets, "limits": ["earlier limit"] })
+    }
+
+    fn texts_of(answer: &serde_json::Value) -> Vec<&str> {
+        answer["targets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["text"].as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn fit_locate_to_budget_should_drop_the_least_ranked_text_until_it_fits() {
+        // 12 tokens for a budget of 8: dropping the last text lands exactly
+        // on the budget, which fits, so the best two texts stay.
+        let mut answer = locate_answer(&["aaaa", "bbbb", "cccc"]);
+        fit_locate_to_budget(&mut answer, 8, text_tokens(0));
+        assert_eq!(texts_of(&answer), ["aaaa", "bbbb", ""]);
+        assert_eq!(
+            answer["limits"],
+            serde_json::json!([
+                "earlier limit",
+                "context text of 1 target(s) dropped to fit the budget"
+            ])
+        );
+
+        // Within budget: nothing changes and nothing is announced.
+        let mut answer = locate_answer(&["aaaa", "bbbb"]);
+        fit_locate_to_budget(&mut answer, 8, text_tokens(0));
+        assert_eq!(texts_of(&answer), ["aaaa", "bbbb"]);
+        assert_eq!(answer["limits"], serde_json::json!(["earlier limit"]));
+    }
+
+    #[test]
+    fn fit_locate_to_budget_should_not_count_a_text_that_was_already_empty() {
+        // The two empty texts after the best one save nothing: only the best
+        // text is dropped, and the answer, still over, says by how much.
+        let mut answer = locate_answer(&["aaaa", "", ""]);
+        fit_locate_to_budget(&mut answer, 5, text_tokens(10));
+        assert_eq!(texts_of(&answer), ["", "", ""]);
+        assert_eq!(
+            answer["limits"],
+            serde_json::json!([
+                "earlier limit",
+                "context text of 1 target(s) dropped to fit the budget",
+                "the answer exceeds the budget by about 5 tokens without its dropped text"
+            ])
+        );
+
+        // No text to drop at all: an answer over budget only says so.
+        let mut answer = locate_answer(&["", ""]);
+        fit_locate_to_budget(&mut answer, 5, text_tokens(7));
+        assert_eq!(
+            answer["limits"],
+            serde_json::json!([
+                "earlier limit",
+                "the answer exceeds the budget by about 2 tokens without its dropped text"
+            ])
+        );
+    }
+
+    #[test]
+    fn fit_locate_to_budget_should_call_an_answer_at_its_budget_within_it() {
+        let mut answer = locate_answer(&["aaaa"]);
+        fit_locate_to_budget(&mut answer, 9, text_tokens(5));
+        assert_eq!(texts_of(&answer), ["aaaa"]);
+        assert_eq!(answer["limits"], serde_json::json!(["earlier limit"]));
+    }
 
     #[test]
     fn compiles_only_exact_auto_intents() {
