@@ -1527,10 +1527,7 @@ fn codex_prompt_submit_injects_pixel_first_guidance_on_every_repository_prompt()
 #[test]
 fn prompt_submit_still_guides_when_task_features_are_disabled() {
     let dir = indexed_dir("prompt-features-disabled");
-    let envs = [
-        ("PIXEL_TASK_CONTEXT", "0"),
-        ("PIXEL_TASK_BOUNDARY", "0"),
-    ];
+    let envs = [("PIXEL_TASK_CONTEXT", "0"), ("PIXEL_TASK_BOUNDARY", "0")];
     let submit = |provider: &str| {
         hook(
             &["run-hook", "prompt-submit", "--provider", provider],
