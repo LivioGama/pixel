@@ -2680,7 +2680,16 @@ fn pretty_review_gate(d: &Value) -> Option<String> {
         .unwrap_or_default();
     let mut output = String::new();
     if findings.is_empty() {
-        output.push_str(&format!("clean — 0 findings ({anchor})\n"));
+        let status = if d
+            .get("caps")
+            .and_then(Value::as_array)
+            .is_some_and(|caps| !caps.is_empty())
+        {
+            "incomplete"
+        } else {
+            "clean"
+        };
+        output.push_str(&format!("{status} — 0 findings ({anchor})\n"));
     } else {
         for f in findings {
             let file = f.get("file").and_then(Value::as_str);

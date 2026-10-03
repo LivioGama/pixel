@@ -651,11 +651,8 @@ fn review_gate_json_contract_is_an_enveloped_finding_list() {
     assert_eq!(secret.len(), 1, "{doc}");
     assert_eq!(secret[0]["severity"], "CRITICAL", "{doc}");
     assert!(
-        !secret[0]["evidence"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("ghp_"),
-        "the finding must not echo the matched credential: {doc}"
+        !doc.to_string().contains("ghp_"),
+        "the JSON response must not echo the matched credential"
     );
 
     std::fs::remove_dir_all(&dir).ok();

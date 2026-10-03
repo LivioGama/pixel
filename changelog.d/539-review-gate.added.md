@@ -1,0 +1,1 @@
+**graph:** `pixel review-gate` checks branch and working-tree diffs for possible secrets and producer-reader divergence, then reports findings with evidence and fixes. ([#539](https://github.com/LivioGama/pixel/pull/539))

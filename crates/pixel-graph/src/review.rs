@@ -1,7 +1,7 @@
 //! `review-gate` — a deterministic pre-review pass over the working-tree
-//! diff.
+//! diff, or the branch merge-base diff on a feature branch.
 //!
-//! Reuses [`crate::changes::detect`] for the graph side (uncovered ranges,
+//! Reuses [`crate::changes::detect_diffs`] for the graph side (uncovered ranges,
 //! suggested tests, change-set risk, the lower-bound envelope) and adds the
 //! mechanical rules a code review would otherwise start from scratch on:
 //! a changed symbol whose callers were not themselves changed
@@ -54,10 +54,9 @@ const MAX_FINDINGS: usize = 200;
 /// finding's evidence without printing the matched value.
 const SECRET_VALUE_PATTERNS: &[(&str, &[&str])] = &[
     ("private-key", &["-----BEGIN ", "PRIVATE KEY-----"]),
-    ("cloud-access-key", &["AKIA"]),
     (
         "github-token",
-        &["ghp_", "github_pat_", "gho_", "ghu_", "ghs_"],
+        &["ghp_", "github_pat_", "gho_", "ghu_", "ghs_", "ghr_"],
     ),
     ("openai-key", &["sk-proj-", "sk-ant-", "sk-svca-"]),
     ("slack-token", &["xoxb-", "xoxp-", "xoxa-", "xoxr-"]),
@@ -99,8 +98,8 @@ pub struct ReviewReport {
     /// Findings, CRITICAL first, then by file/line/rule.
     pub findings: Vec<ReviewFinding>,
     /// The ref the diff ran against: `None` means the working tree's
-    /// uncommitted diff against the index/HEAD; `Some(oid)` on a clean
-    /// feature branch is the merge-base with the remote default branch.
+    /// uncommitted diff against the index/HEAD; `Some(oid)` on a feature
+    /// branch is the merge-base with the remote default branch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
     /// Named caps the pass fired; the daemon mirrors them into
@@ -108,12 +107,15 @@ pub struct ReviewReport {
     pub caps: Vec<String>,
 }
 
-/// A clean tree on a non-default branch means "review the branch": the
-/// merge-base of HEAD with the remote default (`origin/HEAD`, falling back
-/// to `origin/main`). `None` on the default branch itself, in detached
-/// HEAD, or when no remote default resolves.
+/// A non-default branch means "review the branch": the merge-base of HEAD
+/// with the remote default (`origin/HEAD` refreshed from the remote when it
+/// is reachable, falling back to `origin/main`). `None` on the default
+/// branch itself, in detached HEAD, or when no remote default resolves.
 fn branch_merge_base(runner: &GitRunner) -> Option<String> {
     let branch = runner.current_branch()?;
+    // A stale or missing `origin/HEAD` picks the wrong branch as the
+    // default; refresh it from the remote when the remote answers.
+    runner.run_opt(&["remote", "set-head", "origin", "--auto"]);
     let remote_default = runner
         .run_opt(&["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
         .map(|o| String::from_utf8_lossy(&o).trim().to_string())
@@ -133,24 +135,24 @@ fn branch_merge_base(runner: &GitRunner) -> Option<String> {
 }
 
 /// Run the deterministic review of the working tree against `base_ref`
-/// (default HEAD). `detect` supplies the graph side; the two extra passes
-/// walk the diff once more for added lines and read every changed symbol's
-/// callers.
+/// (default HEAD). The diff is read once and shared with the graph side via
+/// [`crate::changes::detect_diffs`]; the two extra passes walk the parsed
+/// diff for added lines and read every changed symbol's callers.
 pub fn review(
     store: &GraphStore,
     root: &Path,
     base_ref: Option<&str>,
 ) -> Result<ReviewReport, BoxError> {
     let runner = GitRunner::new(root);
-    // No explicit base: a dirty tree reviews the uncommitted diff; a clean
-    // tree on a feature branch reviews the whole branch diff.
+    // No explicit base: a feature branch reviews the whole merge-base diff
+    // (which already covers any uncommitted edits); anything else reviews
+    // the working tree's uncommitted diff.
     let mut base = base_ref.map(str::to_string);
-    let mut diff_bytes = runner.diff_unified0(base.as_deref()).unwrap_or_default();
+    let mut diff_bytes = runner.diff_unified0(base.as_deref())?;
     if base_ref.is_none()
-        && diff_bytes.is_empty()
         && let Some(merge_base) = branch_merge_base(&runner)
     {
-        let branch_diff = runner.diff_unified0(Some(&merge_base)).unwrap_or_default();
+        let branch_diff = runner.diff_unified0(Some(&merge_base))?;
         if !branch_diff.is_empty() {
             base = Some(merge_base);
             diff_bytes = branch_diff;
@@ -159,7 +161,7 @@ pub fn review(
     let diff = String::from_utf8_lossy(&diff_bytes).into_owned();
     let file_diffs = parse_diff(&diff);
     let changed_paths: BTreeSet<String> = file_diffs.iter().map(|fd| fd.path.clone()).collect();
-    let report = crate::changes::detect(store, root, base.as_deref(), true)?;
+    let report = crate::changes::detect_diffs(store, root, base.as_deref(), &file_diffs, true)?;
 
     let mut findings = Vec::new();
     let mut caps = Vec::new();
@@ -175,12 +177,8 @@ pub fn review(
     }
     findings.extend(consumers);
 
-    let (secrets, secrets_capped) = added_secret_findings(root, &file_diffs)?;
-    if secrets_capped {
-        caps.push(format!(
-            "secret scan capped at {SECRET_FILES_CAP} files / {SECRET_CAP} findings; the rest was not scanned"
-        ));
-    }
+    let (secrets, secret_caps) = added_secret_findings(root, &file_diffs)?;
+    caps.extend(secret_caps);
     findings.extend(secrets);
 
     findings.sort_by(|a, b| {
@@ -259,7 +257,7 @@ fn graph_findings(report: &ChangesReport, caps: &mut Vec<String>) -> Vec<ReviewF
                 "deleted symbol {name} has no anchor in the current graph",
                 name = u.name
             ),
-            fix_hint: "confirm references to {name} were renamed or removed, or re-index",
+            fix_hint: "confirm references to the deleted symbol were renamed or removed, or re-index",
         });
     }
 
@@ -352,10 +350,15 @@ fn consumers_outside_change(
             continue;
         };
         let edges = store.edges_to(sym.id, Some(EdgeKind::Calls))?;
-        if edges.get(CONSUMER_CAP).is_some() {
-            capped = true;
-        }
-        for edge in edges.into_iter().take(CONSUMER_CAP) {
+        // Filter and deduplicate by caller first — skipped edges and repeat
+        // call sites of one caller must not consume the cap or emit
+        // duplicate findings.
+        let mut seen_callers: BTreeSet<i64> = BTreeSet::new();
+        let mut callers = Vec::new();
+        for edge in edges {
+            if !seen_callers.insert(edge.src_id) {
+                continue;
+            }
             let Some(caller) = symbol_by_id(store, edge.src_id)? else {
                 continue;
             };
@@ -363,6 +366,12 @@ fn consumers_outside_change(
             if changed_paths.contains(&path) {
                 continue;
             }
+            callers.push((caller, path));
+        }
+        if callers.len() > CONSUMER_CAP {
+            capped = true;
+        }
+        for (caller, path) in callers.into_iter().take(CONSUMER_CAP) {
             out.push(ReviewFinding {
                 rule: "producer-reader-divergence".into(),
                 severity: "MEDIUM".into(),
@@ -381,6 +390,17 @@ fn consumers_outside_change(
     Ok((out, capped))
 }
 
+/// An AWS access key id is `AKIA` followed by 16 uppercase alphanumerics —
+/// a bare `AKIA` substring in prose or a shorter token is not a credential.
+fn has_aws_access_key(line: &str) -> bool {
+    line.as_bytes().windows(20).any(|window| {
+        window.starts_with(b"AKIA")
+            && window[4..]
+                .iter()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    })
+}
+
 /// The pattern class an added line matches, or `None`. The tuple's second
 /// field says whether the token is a credential-shaped *value* (strong) or
 /// only a secret-named *assignment* (weak).
@@ -390,9 +410,13 @@ fn scan_line_for_secret(line: &str) -> Option<(&'static str, bool)> {
             return Some((class, true));
         }
     }
+    if has_aws_access_key(line) {
+        return Some(("cloud-access-key", true));
+    }
+    let lower = line.to_ascii_lowercase();
     if SECRET_NAME_ASSIGN
         .iter()
-        .any(|needle| line.contains(needle))
+        .any(|needle| lower.contains(needle))
         && (line.contains('=') || line.contains(':'))
     {
         return Some(("credential-named-assignment", false));
@@ -406,14 +430,14 @@ fn scan_line_for_secret(line: &str) -> Option<(&'static str, bool)> {
 /// is still committed.
 fn test_fixture_path(path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path);
-    path.contains("/tests/")
-        || path.contains("/fixtures/")
-        || path.contains("/fixture")
+    path.split('/')
+        .any(|component| matches!(component, "tests" | "fixtures" | "fixture"))
+        || name == "fixture-gen.py"
         || name.starts_with("test_")
         || name.contains("_test.")
         || name.contains("_tests.")
         || name.contains(".test.")
-        || name.contains("tests.rs")
+        || name == "tests.rs"
 }
 
 /// Scan every added line of every changed file for credential-shaped
@@ -423,11 +447,12 @@ fn test_fixture_path(path: &str) -> bool {
 fn added_secret_findings(
     root: &Path,
     file_diffs: &[FileDiff],
-) -> Result<(Vec<ReviewFinding>, bool), BoxError> {
+) -> Result<(Vec<ReviewFinding>, Vec<String>), BoxError> {
     let mut out = Vec::new();
     let mut capped = false;
     let mut files_read = 0usize;
-    for fd in file_diffs {
+    let mut files_unread = 0usize;
+    'files: for fd in file_diffs {
         // One clause per `if`: `parse_diff` never gives a non-text or
         // deleted entry added ranges, so `||`/`&&` mutants between these
         // terms are unreachable through real diffs.
@@ -446,7 +471,9 @@ fn added_secret_findings(
         }
         files_read += 1;
         let Ok(content) = std::fs::read_to_string(root.join(&fd.path)) else {
-            // Gone since the diff was written: nothing to scan.
+            // Gone or unreadable since the diff was written: the lines
+            // were never scanned, and the report must say so.
+            files_unread += 1;
             continue;
         };
         // Everything after `#[cfg(test)]` is test code: fixture strings in
@@ -501,12 +528,23 @@ fn added_secret_findings(
                 });
                 if out.len() >= SECRET_CAP {
                     capped = true;
-                    return Ok((out, capped));
+                    break 'files;
                 }
             }
         }
     }
-    Ok((out, capped))
+    let mut caps = Vec::new();
+    if capped {
+        caps.push(format!(
+            "secret scan capped at {SECRET_FILES_CAP} files / {SECRET_CAP} findings; the rest was not scanned"
+        ));
+    }
+    if files_unread > 0 {
+        caps.push(format!(
+            "{files_unread} changed file(s) unreadable; their added lines were not scanned"
+        ));
+    }
+    Ok((out, caps))
 }
 
 #[cfg(test)]
@@ -525,12 +563,32 @@ mod tests {
             Some(("private-key", true)),
         ),
         (
-            "value = \"AKIA1234567890\"",
+            "value = \"AKIAIOSFODNN7EXAMPLE\"",
             Some(("cloud-access-key", true)),
         ),
+        // A bare or short `AKIA` substring is not an access key id.
+        ("AKIA appears in this prose", None),
+        ("value = \"AKIA1234567890\"", None),
+        ("token = \"ghr_abcdef\"", Some(("github-token", true))),
         ("xoxb-1234 = \"ignored\"", Some(("slack-token", true))),
         (
             "api_key = env(\"API_KEY\")",
+            Some(("credential-named-assignment", false)),
+        ),
+        (
+            "API_KEY = env(\"API_KEY\")",
+            Some(("credential-named-assignment", false)),
+        ),
+        (
+            "PASSWORD = \"hunter2\"",
+            Some(("credential-named-assignment", false)),
+        ),
+        (
+            "ApiKey: \"abc\"",
+            Some(("credential-named-assignment", false)),
+        ),
+        (
+            "Secret = \"abc\"",
             Some(("credential-named-assignment", false)),
         ),
         ("let login_token = \"abc\";", None),
@@ -943,6 +1001,8 @@ mod tests {
             "crates/pixel/src/main.rs",
             "src/latest.rs",
             "src/attest.rs",
+            "src/fixtures_prod/key.rs",
+            "src/contests.rs",
         ] {
             assert!(!test_fixture_path(no), "{no}");
         }
@@ -987,12 +1047,13 @@ mod tests {
         );
     }
 
-    /// A dirty feature branch reviews the uncommitted diff: the committed
-    /// part of the branch is out of scope until the tree is clean. A
-    /// `&&`→`||` mutant at the empty-diff check would substitute the
-    /// merge-base diff and lose the uncommitted secret.
+    /// A dirty feature branch reviews the merge-base diff: the committed
+    /// part of the branch is in scope, and the uncommitted edit rides the
+    /// same diff (`git diff <merge-base>` covers both). A `&&`→`||` mutant
+    /// at the base-selection condition would try to diff the merge-base on
+    /// `main` too.
     #[test]
-    fn a_dirty_feature_branch_reviews_the_uncommitted_diff() {
+    fn a_dirty_feature_branch_reviews_the_merge_base_diff() {
         let dir = tmpdir("dirty-branch");
         let root = dir.path();
         std::fs::create_dir_all(root.join("src")).unwrap();
@@ -1001,6 +1062,16 @@ mod tests {
         git(root, &["init", "-q"]);
         git(root, &["add", "."]);
         git(root, &["commit", "-qm", "base"]);
+        let base_oid = {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .unwrap();
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        git(root, &["update-ref", "refs/remotes/origin/main", &base_oid]);
         git(root, &["checkout", "-qb", "feat/x"]);
         std::fs::write(
             root.join("src/a.rs"),
@@ -1025,10 +1096,10 @@ mod tests {
             .collect();
         assert_eq!(
             secrets,
-            vec![3],
-            "only the uncommitted line is in the working diff: {report:?}"
+            vec![2, 3],
+            "the merge-base diff carries the committed and the uncommitted secret: {report:?}"
         );
-        assert_eq!(report.base, None, "{report:?}");
+        assert_eq!(report.base.as_deref(), Some(base_oid.as_str()), "{report:?}");
     }
 
     /// A changed symbol exercised by a suggested test is not flagged as
@@ -1100,13 +1171,13 @@ mod tests {
         let diff = GitRunner::new(root).diff_unified0(None).unwrap();
         let files = parse_diff(&String::from_utf8_lossy(&diff));
         assert_eq!(files[0].added_ranges, vec![(2, 2), (5, 5)], "{files:?}");
-        let (findings, capped) = added_secret_findings(root, &files).expect("scan runs");
+        let (findings, caps) = added_secret_findings(root, &files).expect("scan runs");
         assert_eq!(
             findings.iter().map(|f| f.line).collect::<Vec<_>>(),
             vec![Some(2), Some(5)],
             "{findings:?}"
         );
-        assert!(!capped);
+        assert!(caps.is_empty(), "{caps:?}");
     }
 
     /// A non-assigned, non-literal line that matches a token pattern is a
@@ -1262,8 +1333,8 @@ mod tests {
             ]);
         }
         let files = parse_diff(&diff_lines.join("\n"));
-        let (findings, capped) = added_secret_findings(root, &files).expect("scan runs");
+        let (findings, caps) = added_secret_findings(root, &files).expect("scan runs");
         assert_eq!(findings.len(), 1, "f199 was scanned: {findings:?}");
-        assert!(capped, "the file past the cap is reported as capped");
+        assert!(!caps.is_empty(), "the file past the cap is reported");
     }
 }

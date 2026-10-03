@@ -682,15 +682,12 @@ pub fn detect(
     base_ref: Option<&str>,
     include_tests: bool,
 ) -> Result<ChangesReport, BoxError> {
-    // Without `--base` the diff is `git diff`: the working tree against the
-    // index, so staged edits are not part of it.
-    let base = base_ref.unwrap_or("index").to_string();
     let runner = GitRunner::new(root);
     let diff_bytes = match runner.diff_unified0(base_ref) {
         Ok(bytes) => bytes,
         Err(_) => {
             return Ok(ChangesReport {
-                base,
+                base: base_ref.unwrap_or("index").to_string(),
                 changed_files: 0,
                 symbols: Vec::new(),
                 affected_processes: Vec::new(),
@@ -709,6 +706,23 @@ pub fn detect(
     };
     let diff = String::from_utf8_lossy(&diff_bytes).into_owned();
     let file_diffs = parse_diff(&diff);
+    detect_diffs(store, root, base_ref, &file_diffs, include_tests)
+}
+
+/// `detect` over an already-parsed diff: a caller that read the diff itself
+/// (`review`) shares the same change set instead of running a second
+/// `git diff` that could observe a newer tree. Without `--base` the diff is
+/// `git diff`: the working tree against the index, so staged edits are not
+/// part of it.
+pub(crate) fn detect_diffs(
+    store: &GraphStore,
+    root: &Path,
+    base_ref: Option<&str>,
+    file_diffs: &[FileDiff],
+    include_tests: bool,
+) -> Result<ChangesReport, BoxError> {
+    let base = base_ref.unwrap_or("index").to_string();
+    let runner = GitRunner::new(root);
 
     let mut symbols: Vec<ChangedSymbol> = Vec::new();
     let mut proc_set: BTreeSet<String> = BTreeSet::new();
@@ -720,7 +734,7 @@ pub fn detect(
     let mut consumers: BTreeSet<Consumer> = BTreeSet::new();
     let mut base_reads = 0usize;
 
-    for fd in &file_diffs {
+    for fd in file_diffs {
         let file = match store.file_by_path(&fd.path)? {
             Some(f) => f,
             None => continue, // not indexed (e.g. new file before re-index)
@@ -826,7 +840,7 @@ pub fn detect(
         (Vec::new(), false, String::new())
     };
 
-    let uncovered = scan_uncovered(store, root, &runner, base_ref, &file_diffs)?;
+    let uncovered = scan_uncovered(store, root, &runner, base_ref, file_diffs)?;
     // A deleted symbol has no edges left; its former callers are the
     // unresolved sites that still write its name.
     let mut file_symbols: HashMap<i64, Vec<SymbolRow>> = HashMap::new();
