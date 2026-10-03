@@ -16,6 +16,13 @@ fn repo(tag: &str) -> Scratch {
     git(&root, &["add", "."]);
     git(&root, &["commit", "-qm", "initial"]);
     std::fs::create_dir(root.join(".pixel")).unwrap();
+    // These tests exercise the enforcing gate; the product default is
+    // advisory, so the fixture opts in explicitly.
+    std::fs::write(
+        root.join(".pixel/config.json"),
+        json!({"task":{"enforcement":"enforce"}}).to_string(),
+    )
+    .unwrap();
     root
 }
 
@@ -844,7 +851,7 @@ fn first_mutation_should_never_authorize_itself_and_failed_writes_should_invalid
     let root = repo("fallback");
     std::fs::write(
         root.join(".pixel/config.json"),
-        json!({"task":{"checks":contract()["checks"],"conservative_checks":["content"]}})
+        json!({"task":{"enforcement":"enforce","checks":contract()["checks"],"conservative_checks":["content"]}})
             .to_string(),
     )
     .unwrap();
@@ -984,5 +991,28 @@ fn task_model_request_and_native_hook_should_share_one_count_and_keep_available_
         !events
             .to_string()
             .contains("private command must not persist")
+    );
+}
+
+/// The product default is advisory: with no `task.enforcement` key a mutation
+/// is observed and recorded, never denied. `enforce` opts the hard gate in.
+#[test]
+fn default_policy_observes_mutations_without_denying_them() {
+    let root = repo("default-advisory");
+    std::fs::remove_file(root.join(".pixel/config.json")).unwrap();
+    let result = hook(
+        &root,
+        "pi",
+        "pre-tool-use",
+        json!({"session_id":"s","tool_name":"Write","tool_use_id":"first-edit"}),
+    );
+    assert_eq!(result["decision"], "observe");
+    // The task still bound and recorded — advisory is not absent.
+    assert!(
+        pixel_task::Store::open(&root)
+            .unwrap()
+            .find_session("pi", "s")
+            .unwrap()
+            .is_some()
     );
 }

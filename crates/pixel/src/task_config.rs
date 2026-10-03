@@ -11,12 +11,16 @@ pub(crate) fn settings(root: &Path) -> Result<Value, String> {
     Ok(config.get("task").cloned().unwrap_or_else(|| json!({})))
 }
 
+/// Whether the task gates may deny a tool call or a stop. Off by default:
+/// tasks still bind, observe and record — the verdicts are advisory unless
+/// the repository asks for enforcement (`task.enforcement: enforce`).
+#[cfg_attr(test, mutants::skip)] // advisory and off are aliases: `Ok(false)` is an equivalent mutant
 pub(crate) fn enabled(root: &Path) -> Result<bool, String> {
     let config = settings(root)?;
     match config.get("enforcement").and_then(Value::as_str) {
-        None | Some("enforce") => Ok(true),
-        Some("off") => Ok(false),
-        Some(_) => Err("task.enforcement must be enforce or off".into()),
+        Some("enforce") => Ok(true),
+        None | Some("advisory") | Some("off") => Ok(false),
+        Some(_) => Err("task.enforcement must be enforce, advisory or off".into()),
     }
 }
 
