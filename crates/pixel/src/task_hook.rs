@@ -300,7 +300,7 @@ fn pixel_read_or_recovery(args: &[String]) -> bool {
                 || rest.len() == 1
                     && matches!(rest[0].as_str(), "policy" | "metrics" | "--help" | "-h")
         }
-        "task" => rest.first().is_some_and(|operation| {
+        "task" | "task-state" => rest.first().is_some_and(|operation| {
             matches!(
                 operation.as_str(),
                 "begin"
@@ -487,7 +487,10 @@ fn shell_leaf_mutates(command: &str, recovery: bool) -> bool {
             !pixel_read_or_recovery(args)
                 || !recovery
                     && args.first().is_some_and(|operation| {
-                        matches!(operation.as_str(), "task" | "doctor" | "build-index")
+                        matches!(
+                            operation.as_str(),
+                            "task" | "task-state" | "doctor" | "build-index"
+                        )
                     })
         }
         "git" => !git_read(args),
@@ -1043,6 +1046,8 @@ mod tests {
             "pixel config setup",
             "pixel task evaluate --suite external.json",
             "pixel task reset session",
+            "pixel task-state evaluate --suite external.json",
+            "pixel task-state reset session",
         ] {
             assert!(shell_mutates(command), "{command}");
             assert_eq!(
@@ -1068,6 +1073,8 @@ mod tests {
             "pixel task verify task-1",
             "pixel task recover task-1",
             "pixel task contract task-1 --file contract.json",
+            "pixel task-state status task-1 --json",
+            "pixel task-state contract task-1 --definition '{}'",
         ] {
             assert!(!shell_mutates(command), "{command}");
         }
@@ -1099,6 +1106,7 @@ mod tests {
             "rg needle | uniq -- - source.txt",
             "rg needle | tee source.txt",
             "rg needle | pixel task prepare task-1",
+            "rg needle | pixel task-state prepare task-1",
             "rg needle || cat source.txt",
             "rg needle; cat source.txt",
             "rg needle | cat > source.txt",

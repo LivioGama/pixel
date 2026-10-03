@@ -163,7 +163,7 @@ const searchRead = (args: string[]): boolean => readFlags(args, [
 ], ["--glob=", "--iglob=", "--type=", "--type-not=", "--max-count=", "--context=", "--after-context=", "--before-context=", "--regexp=", "--file=", "--color="]);
 const pixelReadOrRecovery = (args: string[]): boolean => {
   if (args[0] === "config") return args.length === 1 || args.length === 2 && ["policy", "metrics", "--help", "-h"].includes(args[1]);
-  if (args[0] === "task") return ["begin", "contract", "prepare", "verify", "review", "finish", "route", "cancel", "recover", "status", "events", "replay", "--help", "-h"].includes(args[1]);
+  if (["task", "task-state"].includes(args[0])) return ["begin", "contract", "prepare", "verify", "review", "finish", "route", "cancel", "recover", "status", "events", "replay", "--help", "-h"].includes(args[1]);
   return ["status", "doctor", "build-index", "scope-task", "find-code", "find-symbol", "search-content", "search-meaning", "impact", "pack-context", "what-changed", "review-changes", "repo-state", "list-areas", "list-flows", "who-calls", "capabilities", "--help", "--version"].includes(args[0]);
 };
 const sortRead = (args: string[]): boolean => readFlags(args, ["-r", "-n", "-u", "-f", "-b", "-d", "-g", "-h", "-M", "-V", "-s", "-z", "-c", "-C", "--reverse", "--numeric-sort", "--unique", "--ignore-case", "--stable", "--check", "--zero-terminated"], ["--key=", "--field-separator="]);
@@ -189,7 +189,7 @@ const taskLeafMutates = (command: string, recovery: boolean): boolean => {
   if (!words?.length) return true;
   const base = (name: string) => name.split("/").at(-1);
   if (base(words[0]) === "rtk") words = words.slice(words[1] === "proxy" ? 2 : 1);
-  if (["pixel", "pixel-dev"].includes(base(words[0] ?? "") ?? "")) return !pixelReadOrRecovery(words.slice(1)) || !recovery && ["task", "doctor", "build-index"].includes(words[1]);
+  if (["pixel", "pixel-dev"].includes(base(words[0] ?? "") ?? "")) return !pixelReadOrRecovery(words.slice(1)) || !recovery && ["task", "task-state", "doctor", "build-index"].includes(words[1]);
   if (base(words[0] ?? "") === "git") return !gitRead(words.slice(1));
   if (["rg", "grep"].includes(base(words[0] ?? "") ?? "")) return !searchRead(words.slice(1));
   if (base(words[0] ?? "") === "sort") return !sortRead(words.slice(1));

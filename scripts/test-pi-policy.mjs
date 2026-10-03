@@ -562,12 +562,14 @@ switch (args[0]) {
       "rg --pre /runner/mutator pattern", "rg --pre=/runner/mutator pattern", "rg --hostname-bin /runner/mutator pattern",
       "pixel config policy off", "pixel config edit --repo", "pixel config setup",
       "pixel task evaluate --suite external.json", "pixel task reset session",
+      "pixel task-state evaluate --suite external.json", "pixel task-state reset session",
     ]) assert.equal((await h.emit("tool_call", native(command))).block, true, command);
     for (const command of [
       "git diff --name-only HEAD", "git status --porcelain=v1", "git diff -- --output=notes",
       "rg -n -F needle src", "rg --glob='*.rs' needle", "rg -- --pre",
       "pixel config", "pixel config policy", "pixel config metrics", "pixel task prepare task-1",
       "pixel task verify task-1", "pixel task recover task-1", "pixel task contract task-1 --file contract.json",
+      "pixel task-state status task-1 --json", "pixel task-state contract task-1 --definition '{}'",
     ]) assert.equal(await h.emit("tool_call", native(command)), undefined, command);
     for (const toolName of ["mcp__custom__edit", "customTool", ""]) {
       assert.equal((await h.emit("tool_call", { toolName, toolCallId: "unknown", input: {} })).block, true, toolName);
@@ -581,7 +583,7 @@ switch (args[0]) {
     for (const command of ["rg needle src | sort | uniq", "git diff --name-only | sort -u", "rg 'x|y' src | uniq -c", "cat source.txt | uniq -- -", `pixel task contract task-1 --definition '${definition}' --json`]) {
       assert.equal(await h.emit("tool_call", native(command)), undefined, command);
     }
-    for (const command of ["rg needle | sort -o source.txt", "rg needle | sort --output=source.txt", "rg needle | uniq - source.txt", "rg needle | uniq -- - source.txt", "rg needle | tee source.txt", "rg needle | pixel task prepare task-1", "rg needle || cat source.txt", "rg needle; cat source.txt", "rg needle | cat > source.txt", "rg $(touch source.txt) | sort", "rg \"$(touch source.txt)\" | sort", "pixel task contract task-1 --definition $(cat secret)", "pixel task contract task-1 --definition \"$(cat secret)\""]) {
+    for (const command of ["rg needle | sort -o source.txt", "rg needle | sort --output=source.txt", "rg needle | uniq - source.txt", "rg needle | uniq -- - source.txt", "rg needle | tee source.txt", "rg needle | pixel task prepare task-1", "rg needle | pixel task-state prepare task-1", "rg needle || cat source.txt", "rg needle; cat source.txt", "rg needle | cat > source.txt", "rg $(touch source.txt) | sort", "rg \"$(touch source.txt)\" | sort", "pixel task contract task-1 --definition $(cat secret)", "pixel task contract task-1 --definition \"$(cat secret)\""]) {
       assert.equal((await h.emit("tool_call", native(command))).block, true, command);
     }
   });
