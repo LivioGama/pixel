@@ -33,8 +33,11 @@ impl std::error::Error for StoreError {}
 
 pub type Result<T> = std::result::Result<T, StoreError>;
 
-/// Bump whenever the concept extractor's output shape changes; forces a
-/// one-time concept rebuild via the `concepts_version` meta key.
+/// The concept schema version stamped into a new graph db's `meta`
+/// (`concepts_version`) and reported by `resolve`'s `index_state`. It is
+/// written once and never compared, so bumping it forces nothing: a change to
+/// the concept extractor's output bumps `build::EXTRACTOR_VERSION`, which
+/// makes the next build re-extract every file.
 pub const CONCEPTS_VERSION: &str = "2";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1810,9 +1813,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             [],
         )?;
     }
-    // Engine 1: stamp the concept extractor version so a change to the
-    // extractor forces a one-time concept rebuild (the graph itself is a
-    // cache; concepts are rebuilt alongside it).
+    // Engine 1: stamp the concept schema version once, at creation. The
+    // rebuild after an extractor change is `EXTRACTOR_VERSION`'s job.
     if conn
         .query_row(
             "SELECT COUNT(*) FROM meta WHERE key = 'concepts_version'",

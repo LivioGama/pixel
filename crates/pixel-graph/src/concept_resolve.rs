@@ -261,8 +261,17 @@ fn kind_for_head_noun(noun: &str) -> Vec<ConceptKind> {
         "endpoint" | "route" | "api" | "url" => vec![ConceptKind::Route],
         "component" | "modal" | "page" | "screen" => vec![ConceptKind::Component],
         "error" | "exception" => vec![ConceptKind::String, ConceptKind::Status],
+        "env" | "envvar" | "variable" => vec![ConceptKind::EnvRead],
         _ => Vec::new(),
     }
+}
+
+/// True when `phrase` has an uppercase letter and no lowercase one
+/// (`CODEX_HOME`, `PATH`): the spelling of a constant or an environment
+/// variable rather than of a function.
+fn is_all_caps(phrase: &str) -> bool {
+    phrase.chars().any(|c| c.is_ascii_uppercase())
+        && !phrase.chars().any(|c| c.is_ascii_lowercase())
 }
 
 /// True when `word` is a 3-digit HTTP status code (100–599 — the same range
@@ -333,8 +342,12 @@ pub fn resolve(
         // case-sensitive in the DB).
         let mut syms = non_script_symbols_by_name(store, phrase, candidate_limit)?;
         // If no exact-case hit, try the normalized (lowercased) form —
-        // handles lowercase queries like "guard_matcher".
-        if syms.is_empty() {
+        // handles lowercase queries like "guard_matcher". Not for an
+        // all-caps token: it names a constant or an environment variable
+        // (`CODEX_HOME`), which a lowercase `codex_home` function is not, so
+        // the cascade goes on to the concepts (an `env_read` matches at T0)
+        // and the symbol fallback still offers the function after them.
+        if syms.is_empty() && !is_all_caps(phrase) {
             syms = non_script_symbols_by_name(store, &norm, candidate_limit)?;
         }
         if !syms.is_empty() {
@@ -1355,6 +1368,15 @@ impl Clone for Box<dyn Reranker> {
 mod tests {
     use super::*;
     use crate::concept::ConceptKind;
+
+    #[test]
+    fn is_all_caps_should_need_an_uppercase_letter_and_no_lowercase_one() {
+        assert!(is_all_caps("CODEX_HOME"));
+        assert!(is_all_caps("PATH"));
+        assert!(!is_all_caps("codex_home"));
+        assert!(!is_all_caps("CodexHome"));
+        assert!(!is_all_caps("_9"), "no letter at all is not all caps");
+    }
 
     fn store() -> GraphStore {
         GraphStore::open_in_memory().unwrap()

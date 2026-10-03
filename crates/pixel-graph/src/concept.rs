@@ -40,6 +40,10 @@ pub enum ConceptKind {
     Status,
     /// JSON/YAML dotted key paths + string leaf values.
     ConfigKey,
+    /// The literal name of an environment variable the code reads
+    /// (`env::var("NAME")`, `env!("NAME")`): the name only, never a value
+    /// or a default. A computed name is not one.
+    EnvRead,
 }
 
 impl ConceptKind {
@@ -53,6 +57,7 @@ impl ConceptKind {
             ConceptKind::Route => "route",
             ConceptKind::Status => "status",
             ConceptKind::ConfigKey => "config_key",
+            ConceptKind::EnvRead => "env_read",
         }
     }
 
@@ -65,6 +70,7 @@ impl ConceptKind {
             "form" => ConceptKind::Form,
             "route" => ConceptKind::Route,
             "status" => ConceptKind::Status,
+            "env_read" => ConceptKind::EnvRead,
             _ => ConceptKind::ConfigKey,
         }
     }
@@ -295,6 +301,19 @@ impl<'a> TsWalker<'a> {
         self.push(ConceptKind::Form, "form".into(), "form".into(), node);
     }
 
+    /// Push the literal environment-variable name `arg` holds, with `detail`
+    /// saying how it is read. Nothing for a computed or non-identifier name.
+    fn push_env_read(&mut self, arg: Node, detail: &str, node: Node) {
+        if arg.kind() != "string_literal" {
+            return;
+        }
+        let name = strip_quotes(&self.text(arg));
+        if !is_env_name(&name) {
+            return;
+        }
+        self.push(ConceptKind::EnvRead, name, detail.to_string(), node);
+    }
+
     fn push_status(&mut self, n: i64, node: Node) {
         let raw = n.to_string();
         self.push(ConceptKind::Status, raw, format!("status {n}"), node);
@@ -484,6 +503,12 @@ fn walk_rust_concepts(w: &mut TsWalker, node: Node, depth: usize) {
                         _ => {}
                     },
                     "scoped_identifier" => {
+                        // `env::var("NAME")`, `std::env::var_os("NAME")`
+                        if let Some(detail) = rust_env_reader(w, f)
+                            && let Some(arg) = w.call_args(node).into_iter().find(Node::is_named)
+                        {
+                            w.push_env_read(arg, detail, node);
+                        }
                         // `StatusCode::from_u16(503)` / `StatusCode::N`
                         if let Some(path) = field_text(w, f, "path")
                             && path.trim() == "StatusCode"
@@ -507,11 +532,71 @@ fn walk_rust_concepts(w: &mut TsWalker, node: Node, depth: usize) {
                 }
             }
         }
+        "macro_invocation" => {
+            // `env!("NAME")` / `option_env!("NAME")`: read at build time.
+            if let Some(macro_name) = field_text(w, node, "macro")
+                && let Some(detail) = env_macro_detail(macro_name.trim())
+                && let Some(tokens) = each_child(node)
+                    .into_iter()
+                    .find(|c| c.kind() == "token_tree")
+                && let Some(arg) = each_child(tokens).into_iter().find(Node::is_named)
+            {
+                w.push_env_read(arg, detail, node);
+            }
+        }
+        "token_tree" => {
+            // Inside another macro's tokens (`concat!(env!("NAME"), …)`) a
+            // nested `env!` is no `macro_invocation`, only the tokens `env`,
+            // `!` and `(…)`.
+            for window in each_child(node).windows(3) {
+                if window[1].kind() == "!"
+                    && window[2].kind() == "token_tree"
+                    && let Some(detail) = env_macro_detail(&w.text(window[0]))
+                    && let Some(arg) = each_child(window[2]).into_iter().find(Node::is_named)
+                {
+                    w.push_env_read(arg, detail, window[0]);
+                }
+            }
+        }
         _ => {}
     }
     for child in each_child(node) {
         walk_rust_concepts(w, child, depth + 1);
     }
+}
+
+/// How the macro named `name` reads the environment, when it does.
+fn env_macro_detail(name: &str) -> Option<&'static str> {
+    match name {
+        "env" => Some("build-time read (env!)"),
+        "option_env" => Some("build-time read (option_env!)"),
+        _ => None,
+    }
+}
+
+/// How `f`, the callee of a Rust call, reads the environment, when it is
+/// `env::var` or `env::var_os` under any path ending in `env`.
+fn rust_env_reader(w: &TsWalker, f: Node) -> Option<&'static str> {
+    let path = field_text(w, f, "path")?;
+    let path = path.trim();
+    if path != "env" && !path.ends_with("::env") {
+        return None;
+    }
+    match field_text(w, f, "name")?.trim() {
+        "var" => Some("runtime read (env::var)"),
+        "var_os" => Some("runtime read (env::var_os)"),
+        _ => None,
+    }
+}
+
+/// True for a name an environment variable can carry in practice: a letter
+/// or `_`, then letters, digits or `_`.
+fn is_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 // --- per-language entry points --------------------------------------------
