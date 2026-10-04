@@ -5572,9 +5572,12 @@ fn run_command(
         Command::Audit { path, top, json } => {
             audit_cmd::run(audit_cmd::AuditOptions { path, top, json })
         }
-        Command::Space { path, json, delete, yes } => {
-            space_cmd::run(path, json, delete, yes)
-        }
+        Command::Space {
+            path,
+            json,
+            delete,
+            yes,
+        } => space_cmd::run(path, json, delete, yes),
         Command::Workspace { cmd } => workspace_cmd::run(cmd),
         Command::IndexPack {
             out,
