@@ -1820,7 +1820,7 @@ pub(crate) fn web_search_provider_check(
 
 /// The provider name from the overview text, when it recognises the line;
 /// an unrecognised shape (including no line at all) reads as `none`.
-fn web_search_provider_from(output: &str) -> &'static str {
+fn web_search_provider_from(output: &str) -> &str {
     output
         .lines()
         .find_map(|line| line.strip_prefix(WEB_SEARCH_PROVIDER_PREFIX))
