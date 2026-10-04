@@ -70,6 +70,45 @@ fn delete_with_yes_removes_the_shards_but_keeps_the_projects() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// The non-`--yes` delete path reads the confirmation from stdin: a
+/// `y` proceeds, so `interactive_confirm` is exercised (and its
+/// body-replacement mutant judged) rather than only the `--yes` shortcut.
+#[test]
+fn delete_without_yes_proceeds_on_a_stdin_yes() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let base = scratch("confirm");
+    let proj = base.join("one");
+    shard_of(&proj, 100);
+    assert!(proj.join(".pixel").exists());
+    let mut child = pixel_command()
+        .args(["space", "--delete", base.to_str().unwrap()])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(b"y\n")
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!proj.join(".pixel").exists(), "shard removed after a stdin yes");
+    assert!(proj.exists(), "project untouched");
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    assert!(stdout.contains("removed "), "{stdout}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[test]
 fn empty_tree_reports_no_shards() {
     let base = scratch("empty");
