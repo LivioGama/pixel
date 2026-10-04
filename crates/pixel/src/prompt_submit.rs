@@ -984,10 +984,8 @@ mod tests {
 
     #[test]
     fn a_pixel_question_makes_the_named_operation_the_first_guidance_line() {
-        let note = crate::pixel_question::pixel_question_note(
-            "how do i use pixel find-code",
-        )
-        .unwrap();
+        let note = crate::pixel_question::pixel_question_note("how do i use pixel find-code")
+            .unwrap();
         for context in [
             render_devin_context("task targets", Some(&note)),
             render_codex_context("task targets", Some(&note)),
