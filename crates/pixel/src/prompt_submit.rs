@@ -956,7 +956,10 @@ mod tests {
             "the guidance fails open, like Devin's"
         );
         assert!(context.ends_with("task targets"));
-        assert_eq!(render_codex_context("", None), CODEX_PIXEL_GUIDANCE.to_string());
+        assert_eq!(
+            render_codex_context("", None),
+            CODEX_PIXEL_GUIDANCE.to_string()
+        );
     }
 
     #[test]
@@ -979,13 +982,16 @@ mod tests {
             "the guidance fails open, like Devin's and Codex's"
         );
         assert!(context.ends_with("task targets"));
-        assert_eq!(render_claude_context("", None), CLAUDE_PIXEL_GUIDANCE.to_string());
+        assert_eq!(
+            render_claude_context("", None),
+            CLAUDE_PIXEL_GUIDANCE.to_string()
+        );
     }
 
     #[test]
     fn a_pixel_question_makes_the_named_operation_the_first_guidance_line() {
-        let note = crate::pixel_question::pixel_question_note("how do i use pixel find-code")
-            .unwrap();
+        let note =
+            crate::pixel_question::pixel_question_note("how do i use pixel find-code").unwrap();
         for context in [
             render_devin_context("task targets", Some(&note)),
             render_codex_context("task targets", Some(&note)),

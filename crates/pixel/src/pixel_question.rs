@@ -211,8 +211,8 @@ pub(crate) fn is_pixel_question(prompt: &str) -> bool {
     let text = normalize(prompt);
     let core = strip_affixes(&text, LEAD_INS, true);
     let core = strip_affixes(core, TRAIL_INS, false);
-    let names_tool = TOOL_CORE.iter().any(|phrase| *phrase == core)
-        || TOOL_ASKS.iter().any(|phrase| core.contains(phrase));
+    let names_tool =
+        TOOL_CORE.contains(&core) || TOOL_ASKS.iter().any(|phrase| core.contains(phrase));
     names_tool || (operation_ask(core) && named_operation(core).is_some())
 }
 
@@ -225,9 +225,10 @@ pub(crate) fn pixel_question_note(prompt: &str) -> Option<String> {
     if !is_pixel_question(prompt) {
         return None;
     }
-    let command = named_operation(&normalize(prompt))
-        .map(|operation| format!("pixel {operation}"))
-        .unwrap_or_else(|| "pixel --help".to_string());
+    let command = named_operation(&normalize(prompt)).map_or_else(
+        || "pixel --help".to_string(),
+        |operation| format!("pixel {operation}"),
+    );
     Some(format!(
         "[PIXEL:TASK_CONTEXT] This prompt asks about the Pixel tool itself, not for a code location. \
          Answer it from the CLI's own interface, not from memory: run `{command}` \
@@ -342,7 +343,10 @@ mod tests {
     fn named_operation_finds_either_spelling() {
         let text = || normalize("what does pixel find-code do");
         assert_eq!(named_operation(&text()), Some("find-code"));
-        assert_eq!(named_operation(&normalize("how does build-index work")), Some("build-index"));
+        assert_eq!(
+            named_operation(&normalize("how does build-index work")),
+            Some("build-index")
+        );
         assert_eq!(named_operation(&normalize("what is pixel")), None);
     }
 }
